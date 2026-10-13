@@ -38,7 +38,7 @@ pipx app (code changes apply without reinstalling) and installs the skill.
 ## Usage
 
 ```
-ticketmaster [open|snapshot|adopt|install-skill] [parent] [--label NAME] [--repo OWNER/NAME]
+ticketmaster [open|snapshot|adopt|setup|install-skill] [parent] [--label NAME] [--repo OWNER/NAME]
              [--provider github|gitlab|gitea|forgejo] [--host HOST] [--columns auto|one|all]
              [--interval SECONDS] [--done-days DAYS] [--limit N]
 ```
@@ -48,6 +48,7 @@ ticketmaster [open|snapshot|adopt|install-skill] [parent] [--label NAME] [--repo
 | `open` (default)| opens the board in a herdr pane right of the calling pane (the focused pane when `HERDR_PANE_ID` is stale or another session's), labelled `ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there |
 | `adopt`         | opens a herdr workspace for every `.claude/worktrees/*` checkout without one   |
 | `snapshot`      | prints every column once as plain text (works outside herdr)                   |
+| `setup`         | writes the wayfinding linking rules for the repo's tracker into `docs/agents/issue-tracker.md` (see [Wayfinding rules](#wayfinding-rules)) |
 | `install-skill` | writes the `/ticketmaster` skill into `~/.claude/skills`                       |
 
 `open` and `adopt` only run inside herdr (`HERDR_ENV=1`).
@@ -133,6 +134,25 @@ until it comes back. This filters what the board shows, unlike
 The board never writes to the tracker: wayfinder claims its tickets by assigning them, and the
 implement prompt tells the session to do the same, so the card moves to In progress on the next
 refresh.
+
+## Wayfinding rules
+
+Wayfinder links tickets the way the "Wayfinding operations" section of the repo's
+`docs/agents/issue-tracker.md` says, and the board reads the same links, so ticketmaster owns that
+section. Run `ticketmaster setup` in the repo once (and again after upgrading ticketmaster): it
+writes the section for the repo's tracker, replacing an existing one in place and leaving the rest
+of the file alone, or creates the doc when there is none. It pins these encodings:
+
+| Tracker         | Child → map                               | Blocking                                   | Out of scope                    |
+| --------------- | ----------------------------------------- | ------------------------------------------ | ------------------------------- |
+| GitHub          | native sub-issue of the map               | native issue dependency (`blocked_by`)     | `out-of-scope` label, closed    |
+| GitLab          | `Part of #<map>` as the description's first line | native `blocks` issue link (GitLab Premium) | `out-of-scope` label, closed |
+| Gitea / Forgejo | `Part of #<map>` as the body's first line | native issue dependency (`/dependencies`)  | `out-of-scope` label, closed    |
+
+The keywords `Part of` and `Blocked by:` and the `out-of-scope` label are always English, even
+when the rest of the issue is in another language. While the repo's section is missing or differs
+from what this version writes, the status line warns and names `ticketmaster setup` (after the
+`/setup-matt-pocock-skills` warning, when the doc itself is missing).
 
 Settings in `.ticketmaster.toml`:
 

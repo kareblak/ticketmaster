@@ -1,7 +1,8 @@
 """Command line: `open` (the board in a herdr pane beside the caller, or right here when the caller is that
-pane), `snapshot` (print once), `adopt` (open herdr workspaces for existing `claude -w` worktrees).
+pane), `snapshot` (print once), `adopt` (open herdr workspaces for existing `claude -w` worktrees), `setup`
+(write the wayfinding linking rules into the repo's issue-tracker doc).
 
-Everything but `snapshot` and `install-skill` runs inside herdr (HERDR_ENV=1).
+Everything but `snapshot`, `setup` and `install-skill` runs inside herdr (HERDR_ENV=1).
 """
 
 from __future__ import annotations
@@ -16,14 +17,14 @@ from .model import COLUMN_ORDER, build_board
 from .providers import ProviderError, Query
 
 
-COMMANDS = ("open", "snapshot", "adopt", "install-skill")
+COMMANDS = ("open", "snapshot", "adopt", "setup", "install-skill")
 NEEDS_HERDR = ("open", "adopt")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ticketmaster",
-        usage="ticketmaster [open|snapshot|adopt|install-skill] [parent] [options]",
+        usage="ticketmaster [open|snapshot|adopt|setup|install-skill] [parent] [options]",
         description="Live kanban board of issue-tracker work, in herdr.",
     )
     parser.add_argument("parent", nargs="?", type=parse_number, help="parent issue: show its sub-issues")
@@ -78,6 +79,12 @@ def main(argv: list[str] | None = None) -> int:
     except ProviderError as exc:
         print(f"ticketmaster: {exc}", file=sys.stderr)
         return 2
+    if args.command == "setup":
+        from .wayfinding import TRACKER_NAMES, setup
+
+        path = setup(herdr.repo_root(cwd), provider.name)
+        print(f"Wrote the {TRACKER_NAMES[provider.name]} wayfinding operations to {path}.")
+        return 0
     query = Query(parent=args.parent, label=args.label, done_days=args.done_days, limit=args.limit)
 
     if args.command == "open":
