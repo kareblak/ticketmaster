@@ -234,6 +234,16 @@ def test_start_creates_a_worktree_workspace_with_a_named_agent():
     assert message == "Started #686 in new worktree issue-686 as agent issue-686"
 
 
+def test_start_passes_the_configured_implement_command_to_claude():
+    fake = FakeHerdr({
+        ("worktree", "list"): worktrees(),
+        ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
+        ("agent", "list"): {"agents": []},
+    })
+    bench(fake, implement_command="/implement").start(ticket())
+    assert fake.first("agent", "start")[-1].startswith("/implement https://")
+
+
 def test_start_always_makes_a_new_worktree_even_when_one_exists(monkeypatch):
     monkeypatch.setattr(herdr, "local_branches", lambda cwd: ["main", "issue-686-2"])
     old = {"path": "/code/shiplog/.claude/worktrees/issue-686", "branch": "worktree-issue-686", "is_linked_worktree": True}
@@ -257,6 +267,16 @@ def test_review_gets_its_own_worktree():
     assert fake.first("worktree", "create")[5] == "review-686"
     assert fake.first("agent", "start")[2] == "review-686-2"  # agent name taken
     assert message.startswith("Reviewing #686 in new worktree review-686")
+    assert fake.first("agent", "start")[-1].startswith("/mattpocock-skills:code-review Review the open pull request")
+
+
+def test_review_starts_the_configured_review_command():
+    fake = FakeHerdr({
+        ("worktree", "list"): worktrees(),
+        ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
+    })
+    bench(fake, review_command="/code-review").review(ticket())
+    assert fake.first("agent", "start")[-1].startswith("/code-review Review the open pull request for issue #686")
 
 
 def test_startup_prompt_is_reported_not_failed():

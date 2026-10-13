@@ -35,6 +35,8 @@ TAG_COLORS = {
     "a11y": "black on green",
     "docs": "black on white",
 }
+SETUP_DOC = Path("docs/agents/issue-tracker.md")  # written by /setup-matt-pocock-skills
+SETUP_COMMAND = "/setup-matt-pocock-skills"
 NARROW_WIDTH = 100  # below this the "auto" view shows one column at a time
 FALLBACK_COLORS = ["white on dark_green", "white on purple4", "black on orange3", "white on grey37", "black on gold3"]
 COLUMN_COLORS = {
@@ -94,6 +96,11 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
     return text
 
 
+def setup_missing(root: Path | None) -> bool:
+    """The mattpocock skills a session runs stop to ask for their setup when the repo has no issue-tracker doc."""
+    return root is not None and not (root / SETUP_DOC).is_file()
+
+
 def matches(ticket: Ticket, needle: str) -> bool:
     if not needle:
         return True
@@ -102,7 +109,8 @@ def matches(ticket: Ticket, needle: str) -> bool:
 
 
 INCLUDE, EXCLUDE = "include", "exclude"
-MODE_CYCLE = {None: INCLUDE, INCLUDE: EXCLUDE, EXCLUDE: None}  # a picker option cycles include → exclude → off
+MODE_CYCLE = {None: INCLUDE, INCLUDE: EXCLUDE, EXCLUDE: None}  # a label option cycles include → exclude → off
+SELECT_CYCLE = {None: INCLUDE, INCLUDE: None}  # an author option is selected or not
 
 
 def passes_labels(ticket: Ticket, modes: dict[str, str], known: set[str]) -> bool:
@@ -111,6 +119,12 @@ def passes_labels(ticket: Ticket, modes: dict[str, str], known: set[str]) -> boo
     if included and not included.intersection(ticket.labels):
         return False
     return not any(modes.get(label) == EXCLUDE for label in ticket.labels)
+
+
+def passes_authors(ticket: Ticket, selected: dict[str, str], known: set[str]) -> bool:
+    """Opened by any selected author (OR); selected authors missing from the board (`known`) are ignored."""
+    authors = {author for author in selected if author in known}
+    return not authors or ticket.author in authors
 
 
 def describe_modes(modes: dict[str, str], known: set[str]) -> str:
@@ -231,13 +245,14 @@ class Confirm(ModalScreen[bool]):
 
 
 class PickerOption(Static, can_focus=True):
-    """One value of a FilterPicker section; Enter, space or a click cycles include → exclude → off."""
+    """One value of a FilterPicker section; Enter, space or a click moves it along `cycle`."""
 
-    def __init__(self, section: str, value: str, mode: str | None):
+    def __init__(self, section: str, value: str, mode: str | None, cycle: dict = MODE_CYCLE):
         super().__init__(classes="option")
         self.section = section
         self.value = value
         self.mode = mode
+        self.cycle = cycle
         self._paint()
 
     def _paint(self) -> None:
@@ -254,10 +269,11 @@ class PickerOption(Static, can_focus=True):
 
 
 class FilterPicker(ModalScreen[None]):
-    """Narrows the board live from sections of values (labels; more sections can be added, e.g. authors).
+    """Narrows the board live from sections of values (labels, authors).
 
     `sections` maps a section title to its values, `modes` a title to {value: include|exclude}; the picker
-    edits `modes` in place and calls `changed` after every edit. Esc, f or q closes it, c clears it.
+    edits `modes` in place and calls `changed` after every edit. Values cycle include → exclude → off, or
+    only on/off for the sections in `cycles`. Esc, f or q closes it, c clears it.
     """
 
     DEFAULT_CSS = """
@@ -276,22 +292,25 @@ class FilterPicker(ModalScreen[None]):
         Binding("down,j", "step(1)", show=False),
     ]
 
-    def __init__(self, sections: dict[str, list[str]], modes: dict[str, dict[str, str]], changed: Callable[[], None]):
+    def __init__(self, sections: dict[str, list[str]], modes: dict[str, dict[str, str]], changed: Callable[[], None],
+                 cycles: dict[str, dict] | None = None):
         super().__init__()
         self.sections = sections
         self.modes = modes
         self.changed = changed
+        self.cycles = cycles or {}
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="picker"):
-            yield Static("Enter/space: include → exclude → off · c clears · Esc closes", id="picker-help")
+            yield Static("Enter/space: labels include → exclude → off, authors on/off · c clears · Esc closes",
+                         id="picker-help")
             for title, values in self.sections.items():
                 yield Static(title, classes="section-title")
                 if not values:
                     yield Static(Text("  none on this board", style="dim"))
                 current = self.modes.get(title, {})
                 for value in values:
-                    yield PickerOption(title, value, current.get(value))
+                    yield PickerOption(title, value, current.get(value), self.cycles.get(title, MODE_CYCLE))
 
     def on_mount(self) -> None:
         options = list(self.query(PickerOption))
@@ -310,7 +329,7 @@ class FilterPicker(ModalScreen[None]):
             self.cycle(self.focused)
 
     def cycle(self, option: PickerOption) -> None:
-        option.set_mode(MODE_CYCLE[option.mode])
+        option.set_mode(option.cycle[option.mode])
         current = self.modes.setdefault(option.section, {})
         if option.mode:
             current[option.value] = option.mode
@@ -329,11 +348,11 @@ class FilterPicker(ModalScreen[None]):
 KEY_DETAILS = {
     "primary": "go to the ticket's herdr workspace; with none, start it (Ready, In progress) or review it (Review)",
     "start": "start the ticket in a new issue-<n> worktree, even when it already has one",
-    "review": "on a Review card, a review-<n> worktree where Claude checks out the PR and reviews it",
+    "review": "on a Review card, a review-<n> worktree where Claude checks out the PR and runs the code-review skill",
     "remove": "on a Done card, remove its worktrees (herdr refuses if one has uncommitted changes)",
     "toggle_auto_remove": "remove Done tickets' worktrees once their agent is idle; unpushed work is kept",
     "open": "open the issue in the browser",
-    "pick_filter": "include or exclude labels (Enter cycles); combines with /, Esc on the board clears both",
+    "pick_filter": "include or exclude labels, select authors (Enter cycles); combines with /, Esc on the board clears all",
 }
 
 
@@ -394,9 +413,15 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     for kind, prompt in [
         ("wayfinder map", "the wayfinder skill with the map's URL"),
         ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs"),
-        ("plain issue", "work on the issue, assigning it to yourself first"),
+        ("plain issue", "the implement skill with the ticket's URL, plus a brief: assign it to\n"
+                        + " " * 20 + "yourself first, implement, then push and open a PR that closes it"),
     ]:
         row(kind, 16, prompt)
+    text.append("  c on a Review card does the same in a review-<n> worktree with the code-review skill\n"
+                "  (review_command in .ticketmaster.toml): check out the PR that closes the issue, review\n"
+                "  it from the PR's base branch against the issue, and report in the session only.\n")
+    text.append(f"  Those skills need the repo set up once with {SETUP_COMMAND} (it writes\n"
+                f"  {SETUP_DOC}); without it a session stops to ask, so the status line warns.\n")
 
     heading("The board only reads")
     text.append("  It never writes to the tracker. A session claims its ticket by assigning it, so the\n"
@@ -442,7 +467,7 @@ class BoardApp(App):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("slash", "filter", "Filter"),
-        Binding("f", "pick_filter", "Labels"),
+        Binding("f", "pick_filter", "Labels/authors"),
         Binding("enter", "primary", "Go/start"),
         Binding("s", "start", "New worktree"),
         Binding("c", "review", "Review"),
@@ -469,6 +494,7 @@ class BoardApp(App):
         columns: str = "auto",
         settings_path: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
+        repo_root: Path | None = None,
     ):
         super().__init__()
         self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
@@ -484,6 +510,8 @@ class BoardApp(App):
         self.auto_remove = bool(self.settings.get("auto_remove", False))
         self.auto_tried: set[str] = set()  # worktree paths auto-remove has handled, so a kept one is not retried
         self.herdr_error: str | None = None
+        self.repo_root = repo_root  # None: the skills setup is not checked
+        self.setup_missing = False
         self.board_query = query
         self.interval = interval
         self.clock = clock
@@ -494,7 +522,10 @@ class BoardApp(App):
         self.needle = ""
         self.repo_key = f"{provider.name}:{provider.repo}"
         saved = self.settings.get("filters", {}).get(self.repo_key, {})
-        self.filters: dict[str, dict[str, str]] = {"Labels": dict(saved.get("labels", {}))}
+        self.filters: dict[str, dict[str, str]] = {
+            "Labels": dict(saved.get("labels", {})),
+            "Authors": dict.fromkeys(saved.get("authors", []), INCLUDE),
+        }
         self.last_error: str | None = None
         self.last_ok: datetime | None = None
         scope = f"parent #{query.parent}" if query.parent else f"label {query.label}" if query.label else "all issues"
@@ -546,6 +577,7 @@ class BoardApp(App):
 
     def _fetch(self, tickets: bool = True) -> None:
         sessions, herdr_error = self.sessions, None
+        self.setup_missing = setup_missing(self.repo_root)
         if self.workbench is not None:
             try:
                 sessions = self.workbench.sessions()
@@ -605,10 +637,14 @@ class BoardApp(App):
     def _board_labels(self) -> set[str]:
         return {label for tickets in self.board.columns.values() for ticket in tickets for label in ticket.labels}
 
+    def _board_authors(self) -> set[str]:
+        return {ticket.author for tickets in self.board.columns.values() for ticket in tickets if ticket.author}
+
     def _visible(self, column: Column) -> list[Ticket]:
-        known = self._board_labels()
+        labels, authors = self._board_labels(), self._board_authors()
         return [t for t in self.board.columns[column]
-                if matches(t, self.needle) and passes_labels(t, self.filters["Labels"], known)]
+                if matches(t, self.needle) and passes_labels(t, self.filters["Labels"], labels)
+                and passes_authors(t, self.filters["Authors"], authors)]
 
     def _render_board(self) -> None:
         focused_widget = self.query_one("#columns").screen.focused  # the board's, also under the filter picker
@@ -642,8 +678,12 @@ class BoardApp(App):
             status.append(f" · filter: {self.needle}", style="yellow")
         if labels := describe_modes(self.filters["Labels"], self._board_labels()):
             status.append(f" · labels: {labels}", style="yellow")
+        if authors := sorted(self._board_authors().intersection(self.filters["Authors"]), key=str.lower):
+            status.append(f" · authors: {', '.join(authors)}", style="yellow")
         if self.auto_remove:
             status.append(" · auto-remove on", style="green")
+        if self.setup_missing:
+            status.append(f"  ⚠ run {SETUP_COMMAND} before starting sessions (no {SETUP_DOC})", style="bold yellow")
         for error in (self.last_error, self.herdr_error):
             if error:
                 status.append(f"  ⚠ {error}", style="bold red")
@@ -808,7 +848,7 @@ class BoardApp(App):
                 self._run(lambda: self.workbench.review(ticket))
 
         self.push_screen(Confirm(f"Review #{ticket.number} {ticket.title} in a new worktree?",
-                                 f"worktree: review-{ticket.number}; Claude checks out the PR and reviews it", "Review"),
+                                 f"worktree: review-{ticket.number}; Claude checks out the PR and runs the code-review skill", "Review"),
                          confirmed)
 
     def action_remove(self) -> None:
@@ -856,30 +896,34 @@ class BoardApp(App):
 
     def action_pick_filter(self) -> None:
         labels = sorted(self._board_labels(), key=str.lower)
+        authors = sorted(self._board_authors(), key=str.lower)
 
         def changed() -> None:
             self._save_filters()
             self._render_board()
 
-        self.push_screen(FilterPicker({"Labels": labels}, self.filters, changed),
+        self.push_screen(FilterPicker({"Labels": labels, "Authors": authors}, self.filters, changed,
+                                      {"Authors": SELECT_CYCLE}),
                          lambda _: self.call_after_refresh(self.action_move, 0, 0))
 
     def _save_filters(self) -> None:
-        """Saves the picker's selection per repo; a saved label that is no longer on the board stays saved."""
+        """Saves the picker's selection per repo; a saved label or author no longer on the board stays saved."""
         filters = self.settings.setdefault("filters", {})
-        filters[self.repo_key] = {"labels": dict(sorted(self.filters["Labels"].items()))}
+        filters[self.repo_key] = {"labels": dict(sorted(self.filters["Labels"].items())),
+                                  "authors": sorted(self.filters["Authors"])}
         if self.settings_path:
             try:
                 save_settings(self.settings_path, self.settings)
             except OSError as exc:
-                self.notify(f"label filter not saved: {exc}", severity="warning")
+                self.notify(f"filter not saved: {exc}", severity="warning")
 
     def action_clear_filter(self) -> None:
         box = self.query_one("#filter", Input)
         box.remove_class("visible")
         self.needle = ""
-        if self.filters["Labels"]:
-            self.filters["Labels"].clear()
+        if any(self.filters.values()):
+            for selection in self.filters.values():
+                selection.clear()
             self._save_filters()
         self._render_board()
         self.call_after_refresh(self.action_move, 0, 0)
