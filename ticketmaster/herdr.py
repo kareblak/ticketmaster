@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 BOARD_LABEL = "ticketmaster"
+BOARD_ENV = "TICKETMASTER_BOARD"  # set on the `open` a board pane runs, so it knows it is the board
 BOARD_RATIO = 0.7  # share the caller keeps; leaves the board ~1/3, i.e. single-column mode
 # `issue-12`, `worktree-issue-12` (claude -w), `issue-12-2` (a second start), `review-12`.
 WORKTREE_NAME = re.compile(r"^(?:worktree-)?(?P<kind>issue|review)-(?P<number>\d+)(?:-\d+)?$")
@@ -99,6 +100,9 @@ class Herdr:
     def open_board(self, cwd: Path, command: str, caller: str | None = None) -> str | None:
         """Restarts the board in its existing pane, or splits one off the caller. Returns the pane id,
         or None when the caller is the board pane itself, which then runs the board in place."""
+        if os.environ.get(BOARD_ENV):
+            return None  # launched by a board pane; it may not be in `pane list` yet, so don't look it up
+        command = f"{BOARD_ENV}=1 {command}"
         existing = self.board_pane(caller)
         if existing and existing == caller:
             return None  # restarting would send q to, and close, the caller's own pane

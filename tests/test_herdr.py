@@ -73,7 +73,7 @@ def test_open_board_splits_and_labels_a_new_pane():
     split, rename, run = fake.calls[1:]
     assert split[:6] == ["pane", "split", "--current", "--direction", "right", "--ratio"]
     assert rename == ["pane", "rename", "w1:p2", "ticketmaster"]
-    assert run == ["pane", "run", "w1:p2", "tm open 680"]
+    assert run == ["pane", "run", "w1:p2", "TICKETMASTER_BOARD=1 tm open 680"]
 
 
 def test_open_board_restarts_in_the_existing_pane():
@@ -83,7 +83,7 @@ def test_open_board_restarts_in_the_existing_pane():
     })
     assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p1") == "w1:p5"
     assert ["pane", "send-keys", "w1:p5", "q"] not in fake.calls  # already at the prompt
-    assert fake.calls[-1] == ["pane", "run", "w1:p5", "cd /code/shiplog && tm open"]
+    assert fake.calls[-1] == ["pane", "run", "w1:p5", "cd /code/shiplog && TICKETMASTER_BOARD=1 tm open"]
     assert ("pane", "split") not in fake.verbs()
 
 
@@ -95,7 +95,7 @@ def test_open_board_quits_a_running_board_before_restarting_it():
     })
     assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p1") == "w1:p5"
     assert fake.calls[2] == ["pane", "send-keys", "w1:p5", "q"]
-    assert fake.calls[-1] == ["pane", "run", "w1:p5", "cd /code/shiplog && tm open"]
+    assert fake.calls[-1] == ["pane", "run", "w1:p5", "cd /code/shiplog && TICKETMASTER_BOARD=1 tm open"]
 
 
 def test_open_board_ignores_a_board_in_another_workspace_and_splits_beside_the_caller():
@@ -133,6 +133,14 @@ def test_open_board_from_a_pane_missing_from_the_list_never_takes_another_worksp
     })
     assert Herdr(fake).open_board(REPO, "tm open", caller="wN:p2") == "wN:p3"
     assert not [c for c in fake.calls if "w1:p2" in c]
+
+
+def test_open_board_launched_by_a_board_pane_runs_in_place_without_looking_it_up(monkeypatch):
+    """A freshly split board pane may not be in `pane list` yet; the env var it was started with says it is the board."""
+    monkeypatch.setenv(herdr.BOARD_ENV, "1")
+    fake = FakeHerdr({("pane", "list"): {"panes": [{"pane_id": "w1:p2", "workspace_id": "w1", "label": "ticketmaster"}]}})
+    assert Herdr(fake).open_board(REPO, "tm open", caller="wN:p2") is None
+    assert fake.calls == []
 
 
 def test_open_board_from_the_board_pane_itself_leaves_the_pane_alone():
