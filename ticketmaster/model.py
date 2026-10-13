@@ -21,12 +21,11 @@ COLUMN_ORDER = [Column.BLOCKED, Column.READY, Column.IN_PROGRESS, Column.REVIEW,
 # `review:security` (GitHub/Gitea) and `review::security` (GitLab scoped labels).
 REVIEW_LABEL = re.compile(r"^review::?(?P<kind>.+)$", re.IGNORECASE)
 BLOCKED_LABEL = "blocked"
-MAP_LABEL = "wayfinder:map"
 WAYFINDER_TYPES = ("research", "prototype", "grilling", "task")
 # `wayfinder:<kind>` (GitHub/Gitea) and `wayfinder::<kind>` (GitLab scoped labels).
-WAYFINDER_LABEL = re.compile(r"^wayfinder::?(?P<kind>[^:].*)$")
+WAYFINDER_LABEL = re.compile(r"^wayfinder::?(?P<kind>[^:].*)$", re.IGNORECASE)
 # The child→map rule for trackers without a native link: the body's first line is `Part of #<map>`.
-PART_OF = re.compile(r"^Part of #(?P<map>\d+)\b")
+PART_OF = re.compile(r"^Part of #(?P<map>\d+)\.?$")
 
 
 @dataclass(frozen=True)
@@ -85,6 +84,10 @@ class Ticket:
     def map_missing(self) -> bool:
         """A typed ticket whose map the board could not find: it starts neither wayfinder nor implement."""
         return self.wayfinder_type is not None and not self.is_wayfinder_ticket
+
+    @property
+    def map_warning(self) -> str:
+        return f"wayfinder:{self.wayfinder_type}, map not found"
 
     @property
     def summary(self) -> str:

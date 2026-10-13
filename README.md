@@ -102,7 +102,8 @@ sessions. The board checks again on every refresh, and `s` and `c` still work wh
 A typed wayfinder ticket never starts implement. The board finds its map on every board (whole
 repo, `--label` or map) by the rule `ticketmaster setup` writes: the native link (a GitHub
 sub-issue's parent), else `Part of #<map>` as the first line of the body. When neither leads to a
-`wayfinder:map` issue, the card says "map not found" and `s` / `Enter` only warn.
+`wayfinder:map` issue, the card (and `snapshot`) says "map not found", and starting it (`s`, or
+`Enter` on a card without a session) only warns.
 
 A review session (`c`) gets a `review-<n>` worktree and starts `/mattpocock-skills:code-review`
 the same way: the prompt tells it to find the PR that closes the issue, check out its branch, and

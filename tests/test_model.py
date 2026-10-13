@@ -102,3 +102,8 @@ def test_part_of_reads_the_first_line_of_the_body():
     assert part_of("\n  Part of #7 \r\nrest") == 7
     assert part_of("Intro\nPart of #12") is None
     assert part_of("Part of #x") is None and part_of("") is None
+    assert part_of("Part of #12, and of #13") is None
+
+
+def test_wayfinder_label_prefix_is_case_insensitive():
+    assert ticket(labels=("Wayfinder:Task",)).wayfinder_type == "task"

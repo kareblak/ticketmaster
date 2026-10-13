@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, resolve_maps, run_json, tracker_error
+from . import NotFound, ProviderError, Query, resolve_maps, run_json, tracker_error
 
 ISSUE_FIELDS = """
   number title url body state closedAt
@@ -82,24 +82,29 @@ class GitHubProvider:
 
     def _map(self, number: int) -> tuple[str, tuple[str, ...]] | None:
         owner, name = self.repo.split("/", 1)
-        body = {"query": ISSUE, "variables": {"owner": owner, "name": name, "number": number}}
+        try:
+            data = self._graphql(ISSUE, {"owner": owner, "name": name, "number": number})
+        except NotFound:
+            return None
+        issue = (data.get("repository") or {}).get("issue")
+        return (issue["url"], tuple(label["name"] for label in issue["labels"]["nodes"])) if issue else None
+
+    def _graphql(self, gql: str, variables: dict) -> dict:
+        body = {"query": gql, "variables": variables}
         args = ["gh", "api", "graphql", "--hostname", self.host, "-H", "Content-Type: application/json", "--input", "-"]
         data = run_json(args, stdin=json.dumps(body))
-        if data.get("errors"):
-            raise tracker_error("; ".join(e.get("message", "") for e in data["errors"]))
-        issue = ((data.get("data") or {}).get("repository") or {}).get("issue")
-        return (issue["url"], tuple(label["name"] for label in issue["labels"]["nodes"])) if issue else None
+        if errors := data.get("errors"):
+            message = "; ".join(e.get("message", "") for e in errors)
+            if all(e.get("type") == "NOT_FOUND" for e in errors):
+                raise NotFound(message)
+            raise tracker_error(message)
+        return data["data"]
 
     def _paginate(self, gql: str, variables: dict, path: list[str], limit: int) -> list[dict]:
         nodes: list[dict] = []
         after = None
         while len(nodes) < limit:
-            body = {"query": gql, "variables": {**variables, "after": after}}
-            args = ["gh", "api", "graphql", "--hostname", self.host, "-H", "Content-Type: application/json", "--input", "-"]
-            data = run_json(args, stdin=json.dumps(body))
-            if data.get("errors"):
-                raise tracker_error("; ".join(e.get("message", "") for e in data["errors"]))
-            page = data["data"]
+            page = self._graphql(gql, {**variables, "after": after})
             for key in path:
                 page = (page or {}).get(key)
             if page is None:

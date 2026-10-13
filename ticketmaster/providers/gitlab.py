@@ -7,11 +7,10 @@ issues whose description mentions `#<parent>`.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, mentions_parent, resolve_maps, run_json, tracker_error
+from . import ProviderError, Query, mentions_parent, on_map_board, resolve_maps, run_json, tracker_error
 
 ISSUES = """
 query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
@@ -63,15 +62,8 @@ class GitLabProvider:
         tickets = list(seen.values())
         if query.parent is not None:
             tickets = [t for t in tickets if t.number != query.parent and mentions_parent(t.body, query.parent)]
-            tickets = self._with_parent(tickets, query.parent)
+            tickets = on_map_board(tickets, query.parent, self._map(query.parent))
         return resolve_maps(tickets, self._map)
-
-    def _with_parent(self, tickets: list[Ticket], parent: int) -> list[Ticket]:
-        found = self._map(parent)
-        if not found:
-            return tickets
-        url, labels = found
-        return [replace(t, parent_number=parent, parent_url=url, parent_labels=labels) for t in tickets]
 
     def _map(self, iid: int) -> tuple[str, tuple[str, ...]] | None:
         issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(iid)}).get("project") or {}).get("issue")

@@ -78,7 +78,8 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         text.append("\n" + ticket.summary, style="dim")
     chips = Text()
     if ticket.map_missing:
-        chips.append(f"⚠ wayfinder:{ticket.wayfinder_type}, map not found ", style="bold yellow")
+        chips.append(f"⚠ {ticket.map_warning}", style="bold yellow")
+        chips.append(" ")
     for kind in ticket.review_tags:
         chips.append(f" {kind} ", style=tag_style(kind))
         chips.append(" ")
@@ -836,9 +837,8 @@ class BoardApp(App):
             self.notify(f"#{ticket.number} is done", severity="warning")
             return
         if ticket.map_missing:
-            self.notify(f"#{ticket.number} is a wayfinder:{ticket.wayfinder_type} ticket, but its map was not "
-                        "found: link it to its map (sub-issue, or `Part of #<map>` as the body's first line)",
-                        severity="warning")
+            self.notify(f"#{ticket.number} {ticket.map_warning}: link it to its map (sub-issue, or "
+                        "`Part of #<map>` as the body's first line)", severity="warning")
             return
         existing = [Path(s.path).name for s in self.sessions.get(ticket.number, [])]
         warn = f"\nalready has {', '.join(existing)}: this makes another" if existing else ""

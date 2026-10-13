@@ -33,7 +33,7 @@ def build_prompt(
     if ticket.is_wayfinder_ticket:
         return f"{wayfinder_command} {ticket.parent_url} {ticket.url}"
     if ticket.map_missing:
-        raise MapNotFound(f"#{ticket.number} is a wayfinder:{ticket.wayfinder_type} ticket, but its map was not found")
+        raise MapNotFound(f"#{ticket.number} {ticket.map_warning}")
     return (
         f"{implement_command} {ticket.url}\n\n"
         "1. Read the issue and its comments, then assign it to yourself before doing any work.\n"

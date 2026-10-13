@@ -238,30 +238,48 @@ def test_resolve_maps_follows_part_of_to_a_map_in_the_board_or_fetched_once():
         Ticket(number=7, title="native", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #9",
                parent_number=1, parent_url="https://x/1", parent_labels=MAP_LABELS),
         Ticket(number=10, title="gone", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #404"),
+        Ticket(number=11, title="loose", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #9, kind of"),
     ]
     resolved = {t.number: t for t in providers.resolve_maps(tickets, fetch_map)}
     assert (resolved[2].parent_number, resolved[2].parent_url) == (1, "https://x/1")
     assert resolved[3].is_wayfinder_ticket and resolved[4].parent_url == "https://x/9"
-    assert resolved[5].map_missing and resolved[10].map_missing
+    assert resolved[5].map_missing and resolved[10].map_missing and resolved[11].map_missing
     assert resolved[6].parent_url is None
     assert resolved[7].parent_number == 1
     assert sorted(fetched) == [8, 9, 404]  # each missing map fetched once, never one already on the board
 
 
-def test_resolve_maps_treats_a_missing_issue_as_no_map_but_not_a_rate_limit():
+def test_resolve_maps_lets_tracker_errors_surface_instead_of_calling_the_map_missing():
     from ticketmaster.model import Ticket
 
     typed = [Ticket(number=2, title="t", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #1")]
 
-    def missing(number):
-        raise ProviderError("not found")
+    def down(number):
+        raise ProviderError("HTTP 401 Unauthorized")
 
-    def limited(number):
-        raise RateLimited("rate limit")
+    with pytest.raises(ProviderError):
+        providers.resolve_maps(typed, down)
 
-    assert providers.resolve_maps(typed, missing)[0].map_missing
-    with pytest.raises(RateLimited):
-        providers.resolve_maps(typed, limited)
+
+def test_github_missing_map_issue_is_no_map_but_other_errors_surface(monkeypatch):
+    answer = {}
+    monkeypatch.setattr(github, "run_json", lambda args, stdin=None: answer)
+    answer.update(errors=[{"type": "NOT_FOUND", "message": "Could not resolve to an Issue with the number of 9."}])
+    assert github.GitHubProvider("o/r")._map(9) is None
+    answer.update(errors=[{"type": "FORBIDDEN", "message": "Resource not accessible"}])
+    with pytest.raises(ProviderError):
+        github.GitHubProvider("o/r")._map(9)
+
+
+def test_gitea_missing_map_issue_is_no_map_but_other_errors_surface(monkeypatch):
+    def urlopen(request, timeout=None):
+        raise http_error(404 if request.full_url.endswith("/9") else 500, "x")
+
+    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    provider = gitea.GiteaProvider("o/r", "codeberg.org", token="x")
+    assert provider._map(9) is None
+    with pytest.raises(ProviderError):
+        provider._map(8)
 
 
 def github_node(number, labels, body="", parent=None):
@@ -346,3 +364,32 @@ def test_gitea_map_board_keeps_the_map_as_parent(monkeypatch):
     monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
     tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query(parent=1))
     assert [(t.number, t.parent_url, t.is_wayfinder_ticket) for t in tickets] == [(2, "https://gt/1", True)]
+
+
+def test_gitea_map_board_follows_a_part_of_line_naming_another_map(monkeypatch):
+    def fake_get(self, path, params=None):
+        if path.endswith("/issues"):
+            return [gitea_issue(2, ["wayfinder:task"], "Part of #7\n\nSee #1")] if params["state"] == "open" else []
+        if path.endswith("/issues/1"):
+            return gitea_issue(1, ["wayfinder:map"])
+        if path.endswith("/issues/7"):
+            return gitea_issue(7, ["wayfinder:map"])
+        return []
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    [ticket] = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query(parent=1))
+    assert (ticket.parent_number, ticket.parent_url) == (7, "https://gt/7")
+
+
+def test_gitlab_map_board_follows_a_part_of_line_naming_another_map(monkeypatch):
+    def fake_run_json(args, stdin=None):
+        variables = json.loads(stdin)["variables"]
+        if "iid" in variables:
+            issue = {"webUrl": f"https://gl/{variables['iid']}", "labels": {"nodes": [{"title": "wayfinder:map"}]}}
+            return {"data": {"project": {"issue": issue}}}
+        nodes = [gitlab_node(2, ["wayfinder:task"], "Part of #7\n\nSee #1")] if variables["state"] == "opened" else []
+        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
+
+    monkeypatch.setattr(gitlab, "run_json", fake_run_json)
+    [ticket] = gitlab.GitLabProvider("g/p").fetch(Query(parent=1))
+    assert (ticket.parent_number, ticket.parent_url) == (7, "https://gl/7")
