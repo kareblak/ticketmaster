@@ -1,5 +1,5 @@
-"""Command line: `open` (the board in a herdr pane beside the caller), `board` (run here, inside herdr),
-`snapshot` (print once), `adopt` (open herdr workspaces for existing `claude -w` worktrees).
+"""Command line: `open` (the board in a herdr pane beside the caller, or right here when the caller is that
+pane), `snapshot` (print once), `adopt` (open herdr workspaces for existing `claude -w` worktrees).
 
 Everything but `snapshot` and `install-skill` runs inside herdr (HERDR_ENV=1).
 """
@@ -7,6 +7,7 @@ Everything but `snapshot` and `install-skill` runs inside herdr (HERDR_ENV=1).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -15,14 +16,14 @@ from .model import COLUMN_ORDER, build_board
 from .providers import ProviderError, Query
 
 
-COMMANDS = ("open", "board", "snapshot", "adopt", "install-skill")
-NEEDS_HERDR = ("open", "board", "adopt")
+COMMANDS = ("open", "snapshot", "adopt", "install-skill")
+NEEDS_HERDR = ("open", "adopt")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ticketmaster",
-        usage="ticketmaster [open|board|snapshot|adopt|install-skill] [parent] [options]",
+        usage="ticketmaster [open|snapshot|adopt|install-skill] [parent] [options]",
         description="Live kanban board of issue-tracker work, in herdr.",
     )
     parser.add_argument("parent", nargs="?", type=parse_number, help="parent issue: show its sub-issues")
@@ -81,12 +82,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "open":
         try:
-            pane = herdr.Herdr().open_board(cwd, herdr.board_command(passthrough(args)))
+            pane = herdr.Herdr().open_board(cwd, herdr.open_command(passthrough(args)), os.environ.get("HERDR_PANE_ID"))
         except herdr.HerdrError as exc:
             print(f"ticketmaster: herdr: {exc}", file=sys.stderr)
             return 1
-        print(f"Board opened in herdr pane {pane} ({herdr.BOARD_LABEL}) for {provider.name}:{provider.repo}.")
-        return 0
+        if pane is not None:
+            print(f"Board opened in herdr pane {pane} ({herdr.BOARD_LABEL}) for {provider.name}:{provider.repo}.")
+            return 0
+        # None: this is the board pane (a fresh one, or the user's), so the board runs here, below
 
     if args.command == "adopt":
         from .start import session_label, worktree_name
