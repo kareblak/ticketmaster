@@ -519,6 +519,7 @@ def test_help_lists_every_visible_binding_and_closes_without_quitting():
                         assert binding.description in text
                         assert app.get_key_display(binding) in text
                 assert "herdr agent issue-<n>" in text and "select authors" in text
+                assert "newer one is available: run `ticketmaster upgrade`" in text
                 await pilot.press(close)
                 await pilot.pause()
                 assert not isinstance(app.screen, HelpScreen) and app.is_running
@@ -1367,3 +1368,45 @@ def test_map_order_lookup_failure_falls_back_to_board_order():
             assert app.screen.question.startswith("Start #5 ")
 
     run(scenario())
+
+
+NOTICE = "a newer ticketmaster is available: run `ticketmaster upgrade`"
+
+
+def test_newer_version_shows_a_toast_and_stays_in_the_status_line_checked_once():
+    checks = []
+
+    def update_check():
+        checks.append(1)
+        return NOTICE
+
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, update_check=update_check)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert [n.message for n in app._notifications] == [NOTICE]
+            for _ in range(3):
+                await pilot.press("r")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+            assert NOTICE in str(app.query_one("#status").render())
+            assert len(checks) == 1
+
+    run(scenario())
+
+
+def test_no_notice_when_the_check_finds_nothing_or_fails():
+    def failing():
+        raise RuntimeError("boom")
+
+    for update_check in (lambda: None, failing):
+        async def scenario():
+            app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, update_check=update_check)
+            async with app.run_test(size=(200, 40)) as pilot:
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+                assert list(app._notifications) == []
+                assert "upgrade" not in str(app.query_one("#status").render())
+
+        run(scenario())

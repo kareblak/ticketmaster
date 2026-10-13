@@ -7,6 +7,7 @@ install carries the commit it was built from, an editable install (a dev clone s
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,8 @@ from urllib.parse import unquote, urlparse
 from . import __version__
 
 SOURCE = "git+https://github.com/kareblak/ticketmaster.git"
+REMOTE = SOURCE.removeprefix("git+")
+LOOKUP_TIMEOUT = 5.0  # seconds; the board runs the lookup in the background, so this only bounds a stuck git
 READ_DIRECT_URL = "from importlib import metadata; print(metadata.distribution('ticketmaster').read_text('direct_url.json') or '')"
 
 
@@ -56,6 +59,31 @@ def describe(install: Install) -> str:
 
 def version_line() -> str:
     return f"ticketmaster {__version__} ({describe(installed())})"
+
+
+def main_head(run: Callable[..., subprocess.CompletedProcess] = subprocess.run) -> str | None:
+    """The commit at the head of `main` on GitHub, or None when git is missing, offline, slow or says nothing."""
+    try:
+        done = run(["git", "ls-remote", REMOTE, "refs/heads/main"], capture_output=True, text=True,
+                   timeout=LOOKUP_TIMEOUT, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    sha, _, _ = done.stdout.partition("\t")
+    return sha.strip() or None
+
+
+UPGRADE_NOTICE = "a newer ticketmaster is available: run `ticketmaster upgrade`"
+
+
+def upgrade_notice(install: Install, main_head: Callable[[], str | None]) -> str | None:
+    """The board's notice when a git install's commit is not the head of `main` on GitHub. `main_head` is only
+    asked for an install that knows its commit, and None from it (offline, no git) means no notice."""
+    if install.commit is None:
+        return None  # an editable (dev) install, or one that cannot say what it was built from
+    head = main_head()
+    return UPGRADE_NOTICE if head and head != install.commit else None
 
 
 def upgrade(
