@@ -2,7 +2,7 @@ import json
 import asyncio
 from datetime import datetime, timezone
 
-from ticketmaster.board import BoardApp, Card, FilterPicker, HelpScreen, PickerOption, passes_labels, tag_style
+from ticketmaster.board import BoardApp, Card, FilterPicker, HelpScreen, PickerOption, passes_authors, passes_labels, tag_style
 from ticketmaster.herdr import Session
 from ticketmaster.model import Ticket
 from ticketmaster.providers import ProviderError, Query
@@ -431,7 +431,7 @@ def test_help_lists_every_visible_binding_and_closes_without_quitting():
                     if binding.show:
                         assert binding.description in text
                         assert app.get_key_display(binding) in text
-                assert "herdr agent issue-<n>" in text and "include or exclude labels" in text
+                assert "herdr agent issue-<n>" in text and "select authors" in text
                 await pilot.press(close)
                 await pilot.pause()
                 assert not isinstance(app.screen, HelpScreen) and app.is_running
@@ -540,7 +540,7 @@ def test_label_filter_is_saved_per_repo_and_restored(tmp_path):
     run(choose())
     assert json.loads(settings.read_text()) == {
         "auto_remove": True,
-        "filters": {"other:x/y": {"labels": {"ux": "include"}}, "fake:o/r": {"labels": {"wontfix": "exclude"}}},
+        "filters": {"other:x/y": {"labels": {"ux": "include"}}, "fake:o/r": {"labels": {"wontfix": "exclude"}, "authors": []}},
     }
     run(reopen())
 
@@ -558,3 +558,101 @@ def test_clicking_a_picker_option_cycles_that_option(tmp_path):
             assert app.filters["Labels"] == {"ux": "include"} and shown_numbers(app) == [2]
 
     run(scenario())
+
+
+AUTHORED = [
+    Ticket(number=1, title="Login bug", url="u1", is_open=True, labels=("bug",), author="alice"),
+    Ticket(number=2, title="Dark mode", url="u2", is_open=True, labels=("ux",), author="bob"),
+    Ticket(number=3, title="Crash on save", url="u3", is_open=True, labels=("bug",), author="bob"),
+    Ticket(number=4, title="Docs", url="u4", is_open=True, author="carol"),
+    Ticket(number=5, title="Imported", url="u5", is_open=True),
+]
+
+
+def test_passes_authors_matches_any_selected_author():
+    known = {"alice", "bob", "carol"}
+    shown = lambda selected: [t.number for t in AUTHORED if passes_authors(t, selected, known)]
+    assert shown({}) == [1, 2, 3, 4, 5]
+    assert shown({"bob": "include"}) == [2, 3]
+    assert shown({"alice": "include", "carol": "include"}) == [1, 4]
+    assert shown({"gone": "include"}) == [1, 2, 3, 4, 5]  # a saved author no longer on the board
+
+
+def test_picker_selects_authors_on_and_off_and_shows_them_in_the_status_line(tmp_path):
+    async def scenario():
+        app = BoardApp(FakeProvider(AUTHORED), Query(), interval=60, settings_path=tmp_path / "settings.json")
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            authors = [o.value for o in app.screen.query(PickerOption) if o.section == "Authors"]
+            assert authors == ["alice", "bob", "carol"]
+            await pick(pilot, app, "alice")
+            await pick(pilot, app, "carol")
+            assert shown_numbers(app) == [1, 4]
+            assert "authors: alice, carol" in str(app.query_one("#status").render())
+            await pick(pilot, app, "carol")  # second press deselects; authors have no exclude
+            assert shown_numbers(app) == [1] and app.filters["Authors"] == {"alice": "include"}
+            await pilot.press("c")
+            await pilot.pause()
+            assert shown_numbers(app) == [1, 2, 3, 4, 5] and app.filters["Authors"] == {}
+            assert "authors:" not in str(app.query_one("#status").render())
+
+    run(scenario())
+
+
+def test_author_filter_combines_with_label_and_text_filters_and_esc_clears_all(tmp_path):
+    async def scenario():
+        app = BoardApp(FakeProvider(AUTHORED), Query(), interval=60, settings_path=tmp_path / "settings.json")
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            await pick(pilot, app, "bob")
+            assert shown_numbers(app) == [2, 3]
+            await pick(pilot, app, "bug")
+            assert shown_numbers(app) == [3]
+            await pick(pilot, app, "bug")  # exclude
+            assert shown_numbers(app) == [2]
+            await pick(pilot, app, "bug")  # off
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.press("slash", *"dark", "enter")
+            await pilot.pause()
+            assert shown_numbers(app) == [2]
+            await pilot.press("escape")
+            await pilot.pause()
+            assert shown_numbers(app) == [1, 2, 3, 4, 5] and app.filters["Authors"] == {}
+
+    run(scenario())
+
+
+def test_author_filter_is_saved_per_repo_and_restored(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"filters": {"other:x/y": {"labels": {}, "authors": ["alice"]}}}))
+
+    async def choose():
+        app = BoardApp(FakeProvider(AUTHORED), Query(), interval=60, settings_path=settings)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            await pick(pilot, app, "carol")
+            await pick(pilot, app, "bob")
+            await pick(pilot, app, "ux")
+
+    async def reopen():
+        app = BoardApp(FakeProvider(AUTHORED), Query(), interval=60, settings_path=settings)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert shown_numbers(app) == [2]
+            assert "authors: bob, carol" in str(app.query_one("#status").render())
+
+    run(choose())
+    assert json.loads(settings.read_text()) == {
+        "filters": {
+            "other:x/y": {"labels": {}, "authors": ["alice"]},
+            "fake:o/r": {"labels": {"ux": "include"}, "authors": ["bob", "carol"]},
+        },
+    }
+    run(reopen())

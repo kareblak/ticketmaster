@@ -72,7 +72,7 @@ switch columns, `1`–`5` jump to one, `v` shows all side by side (`--columns` s
 | `a`            | any               | toggle auto-remove of Done tickets' worktrees (see below; saved)    |
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | filter, clear both filters, refresh now, quit                       |
-| `f`            | any               | label filter picker: each label cycles include → exclude → off (see below; saved per repo) |
+| `f`            | any               | filter picker: labels cycle include → exclude → off, authors on/off (see below; saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
 
 Arrows or `hjkl` move between cards.
@@ -112,13 +112,15 @@ each worktree once per run; a kept one is retried after the board restarts. The 
 saved per user in `$XDG_CONFIG_HOME/ticketmaster/settings.json` (`~/.config/…`), so it applies to
 every board until toggled off.
 
-`f` opens a picker listing every label on the board's tickets; `Enter` (or space, or a click) cycles
-a label through include, exclude and off, and the board narrows as you go. With any label
-included, a ticket shows only if it has at least one of them; a ticket with any excluded label is
-hidden. A ticket must also match the `/` text filter. The status line shows the selection
-(`labels: +bug -wontfix`); `c` in the picker or `Esc` on the board clears it. The selection is
-saved per repo in the same settings file and restored when the board reopens; a saved label that
-is no longer on the board is ignored until it comes back. This filters what the board shows, unlike
+`f` opens a picker listing every label and every author on the board's tickets; `Enter` (or space,
+or a click) cycles a label through include, exclude and off, and selects or deselects an author. The
+board narrows as you go. With any label included, a ticket shows only if it has at least one of
+them; a ticket with any excluded label is hidden. With any author selected, a ticket shows only if
+one of them opened it. A ticket must pass the labels, the authors and the `/` text filter. The
+status line shows the selection (`labels: +bug -wontfix · authors: alice, bob`); `c` in the picker
+or `Esc` on the board clears it. The selection is saved per repo in the same settings file and
+restored when the board reopens; a saved label or author that is no longer on the board is ignored
+until it comes back. This filters what the board shows, unlike
 `--label`, which scopes the query.
 
 The board never writes to the tracker: wayfinder claims its tickets by assigning them, and the
