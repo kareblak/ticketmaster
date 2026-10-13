@@ -1,4 +1,4 @@
-"""GitLab via `glab api graphql`: `blocks` links and closing merge requests.
+"""GitLab via `glab api graphql`: `blocks` links plus `Blocked by:` body lines, and closing merge requests.
 
 GitLab issues have no sub-issue list in the Issue API, so a parent board falls back to
 issues whose description mentions `#<parent>`.
@@ -11,7 +11,8 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, mentions_parent, on_map_board, resolve_maps, run_cli, run_json, tracker_error
+from . import (IssueStates, ProviderError, Query, blocker_ref, mentions_parent, on_map_board, resolve_maps, run_cli,
+               run_json, tracker_error, with_body_blockers)
 
 ISSUES = """
 query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
@@ -25,7 +26,7 @@ query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
         author { username }
         assignees { nodes { username } }
         labels { nodes { title } }
-        blockedByCount
+        blockedByIssues(first: 20) { nodes { iid state reference(full: true) } }
         mergeRequestsCount
       }
     }
@@ -41,12 +42,34 @@ query($path: ID!, $iid: String!) {
 """
 
 
+STATES = """
+query($path: ID!, $iids: [String!]) {
+  project(fullPath: $path) { issues(iids: $iids, first: 100) { nodes { iid state } } }
+}
+"""
+
+VIEWER = "query { currentUser { username } }"
+
+
 class GitLabProvider:
     name = "gitlab"
 
     def __init__(self, repo: str, host: str = "gitlab.com"):
         self.repo = repo
         self.host = host
+        self.states = IssueStates(self._issue_states)
+
+    def viewer(self) -> str | None:
+        return (self._graphql(VIEWER, {}).get("currentUser") or {}).get("username")
+
+    def _issue_states(self, numbers: list[int]) -> dict[int, bool]:
+        states: dict[int, bool] = {}
+        for start in range(0, len(numbers), 100):
+            iids = [str(n) for n in numbers[start:start + 100]]
+            project = self._graphql(STATES, {"path": self.repo, "iids": iids}).get("project") or {}
+            nodes = ((project.get("issues") or {}).get("nodes")) or []
+            states |= {int(node["iid"]): node["state"] == "opened" for node in nodes}
+        return states
 
     def fetch(self, query: Query) -> list[Ticket]:
         closed_after = (datetime.now(timezone.utc) - timedelta(days=query.done_days)).isoformat()
@@ -58,13 +81,13 @@ class GitLabProvider:
         seen: dict[int, Ticket] = {}
         for variables in filters:
             for node in self._issues(variables, query.limit):
-                ticket = to_ticket(node)
+                ticket = to_ticket(node, self.repo)
                 seen.setdefault(ticket.number, ticket)
         tickets = list(seen.values())
         if query.parent is not None:
             tickets = [t for t in tickets if t.number != query.parent and mentions_parent(t.body, query.parent)]
             tickets = on_map_board(tickets, query.parent, self._map(query.parent))
-        return resolve_maps(tickets, self._map)
+        return with_body_blockers(resolve_maps(tickets, self._map), self.states)
 
     def delete(self, number: int) -> None:
         project = urllib.parse.quote(self.repo, safe="")
@@ -98,7 +121,10 @@ class GitLabProvider:
         return data["data"]
 
 
-def to_ticket(node: dict) -> Ticket:
+def to_ticket(node: dict, repo: str = "") -> Ticket:
+    deps = node.get("blockedByIssues")
+    blocked_by = tuple(blocker_ref(int(b["iid"]), (b.get("reference") or "").rpartition("#")[0], repo)
+                       for b in (deps or {}).get("nodes") or [] if b and b.get("state") == "opened")
     return Ticket(
         number=int(node["iid"]),
         title=node["title"],
@@ -109,7 +135,8 @@ def to_ticket(node: dict) -> Ticket:
         author=(node.get("author") or {}).get("username", ""),
         assignees=tuple(a["username"] for a in node["assignees"]["nodes"]),
         labels=tuple(label["title"] for label in node["labels"]["nodes"]),
-        open_blockers=node.get("blockedByCount"),
+        open_blockers=None if deps is None else len(blocked_by),
+        blocked_by=blocked_by,
         has_open_change_request=bool(node.get("mergeRequestsCount")) and node["state"] == "opened",
         order=0,
     )

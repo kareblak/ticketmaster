@@ -352,7 +352,7 @@ class FilterPicker(ModalScreen[None]):
 
 KEY_DETAILS = {
     "primary": "go to the ticket's herdr workspace; with none, start it (Ready, In progress) or review it (Review)",
-    "start": "start the ticket in a new issue-<n> worktree, even when it already has one",
+    "start": "start the ticket in a new issue-<n> worktree, even when it already has one; not while blocked or claimed by someone else",
     "review": "on a Review card, a review-<n> worktree where Claude checks out the PR and runs the code-review skill",
     "remove": "on a Done card, remove its worktrees (herdr refuses if one has uncommitted changes)",
     "toggle_auto_remove": "remove Done tickets' worktrees once their agent is idle; unpushed work is kept",
@@ -396,7 +396,7 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     for column, rule in [
         (Column.DONE, f"closed in the last {query.done_days} days; older closed issues are hidden"),
         (Column.REVIEW, "a review:<kind> label, or an open PR/MR that closes it"),
-        (Column.BLOCKED, "an open blocking issue, or a 'blocked' label"),
+        (Column.BLOCKED, "an open blocking issue (native or a 'Blocked by: #n' body line), or a 'blocked' label"),
         (Column.IN_PROGRESS, "assigned to someone"),
         (Column.READY, "everything else"),
     ]:
@@ -533,6 +533,7 @@ class BoardApp(App):
         self.fetching = False
         self.queued: bool | None = None  # a refresh asked for mid-fetch: whether it includes tickets
         self.board = Board()
+        self.viewer: str | None = None  # the tracker login; asked for with each ticket fetch until known
         self.needle = ""
         self.repo_key = f"{provider.name}:{provider.repo}"
         saved = self.settings.get("filters", {}).get(self.repo_key, {})
@@ -602,6 +603,8 @@ class BoardApp(App):
             self.call_from_thread(self._apply, None, None, sessions, herdr_error, fetched_tickets=False)
             return
         try:
+            if self.viewer is None:
+                self.viewer = self._viewer()
             board = build_board(self.provider.fetch(self.board_query), done_days=self.board_query.done_days)
             self.call_from_thread(self._apply, board, None, sessions, herdr_error)
         except RateLimited:
@@ -611,6 +614,14 @@ class BoardApp(App):
         except BaseException:
             self.call_from_thread(setattr, self, "fetching", False)
             raise
+
+    def _viewer(self) -> str | None:
+        try:
+            return self.provider.viewer()
+        except RateLimited:
+            raise
+        except ProviderError:
+            return None  # claimed tickets then start after the confirm, as before the login was known
 
     def _apply(self, board: Board | None, error: str | None, sessions: dict[int, list[Session]] | None = None,
                herdr_error: str | None = None, fetched_tickets: bool = True, rate_limited: bool = False) -> None:
@@ -829,7 +840,8 @@ class BoardApp(App):
         elif card.column in (Column.READY, Column.IN_PROGRESS):
             self.action_start()
         else:
-            self.notify(f"#{ticket.number} has no worktree here; s starts one", severity="warning")
+            refusal = ticket.start_refusal(self.viewer)
+            self.notify(refusal or f"#{ticket.number} has no worktree here; s starts one", severity="warning")
 
     def action_start(self) -> None:
         card = self._card()
@@ -839,14 +851,15 @@ class BoardApp(App):
         if card.column is Column.DONE:
             self.notify(f"#{ticket.number} is done", severity="warning")
             return
+        if refusal := ticket.start_refusal(self.viewer):
+            self.notify(refusal, severity="warning")
+            return
         if ticket.map_missing:
             self.notify(f"#{ticket.number} {ticket.map_warning}: link it to its map (sub-issue, or "
                         "`Part of #<map>` as the body's first line)", severity="warning")
             return
         existing = [Path(s.path).name for s in self.sessions.get(ticket.number, [])]
         warn = f"\nalready has {', '.join(existing)}: this makes another" if existing else ""
-        if card.column is Column.BLOCKED:
-            warn += f"\nblocked by {ticket.open_blockers or 'a label'}"
 
         def confirmed(yes: bool | None) -> None:
             if yes:

@@ -6,6 +6,7 @@ import pytest
 
 from ticketmaster import providers
 from ticketmaster.providers import ProviderError, Query, RateLimited, github, gitlab, gitea, mentions_parent
+from ticketmaster.model import Ticket
 from ticketmaster.providers.gitea import token_from_tea_config
 
 
@@ -15,11 +16,12 @@ def test_github_node_to_ticket():
         "author": {"login": "opener"},
         "assignees": {"nodes": [{"login": "kareblak"}]},
         "labels": {"nodes": [{"name": "review:security"}]},
-        "issueDependenciesSummary": {"blockedBy": 1},
+        "blockedBy": {"nodes": [{"number": 5, "state": "OPEN", "repository": {"nameWithOwner": "o/r"}}]},
         "closedByPullRequestsReferences": {"nodes": [{"state": "MERGED"}, {"state": "OPEN"}]},
         "parent": {"number": 2, "url": "https://x/2", "labels": {"nodes": [{"name": "wayfinder:map"}]}},
     }
-    t = github.to_ticket(node, order=3)
+    t = github.to_ticket(node, order=3, repo="o/r")
+    assert t.blocked_by == ("#5",)
     assert (t.parent_number, t.parent_url, t.parent_labels) == (2, "https://x/2", ("wayfinder:map",))
     assert (t.number, t.is_open, t.open_blockers, t.has_open_change_request, t.order) == (7, True, 1, True, 3)
     assert t.assignees == ("kareblak",) and t.review_tags == ["security"]
@@ -73,7 +75,7 @@ def test_gitlab_node_to_ticket():
     node = {
         "iid": "12", "title": "T", "webUrl": "https://gl/12", "description": "d", "state": "opened",
         "closedAt": None, "author": {"username": "gl-user"}, "assignees": {"nodes": []},
-        "labels": {"nodes": [{"title": "review::ux"}]}, "blockedByCount": 0, "mergeRequestsCount": 1,
+        "labels": {"nodes": [{"title": "review::ux"}]}, "blockedByIssues": {"nodes": []}, "mergeRequestsCount": 1,
     }
     t = gitlab.to_ticket(node)
     assert (t.number, t.is_open, t.open_blockers, t.has_open_change_request) == (12, True, 0, True)
@@ -84,7 +86,7 @@ def test_gitlab_parent_falls_back_to_mentions(monkeypatch):
     def node(iid, body):
         return {"iid": str(iid), "title": "t", "webUrl": "u", "description": body, "state": "opened",
                 "closedAt": None, "assignees": {"nodes": []}, "labels": {"nodes": []},
-                "blockedByCount": 0, "mergeRequestsCount": 0}
+                "blockedByIssues": {"nodes": []}, "mergeRequestsCount": 0}
 
     def fake_run_json(args, stdin=None):
         variables = json.loads(stdin)["variables"]
@@ -103,10 +105,10 @@ def test_gitlab_parent_falls_back_to_mentions(monkeypatch):
 def test_gitea_issue_to_ticket_detects_closing_pr():
     issue = {"number": 4, "title": "T", "html_url": "https://gt/4", "body": "", "state": "open",
              "closed_at": None, "user": {"login": "gt-user"}, "assignees": None, "labels": [{"name": "review:perf"}]}
-    t = gitea.to_ticket(issue, 0, ["Refactor\nFixes #4"])
+    t = gitea.to_ticket(issue, (), ["Refactor\nFixes #4"])
     assert t.has_open_change_request and t.review_tags == ["perf"] and t.assignees == ()
     assert t.author == "gt-user"
-    assert gitea.to_ticket(issue, 0, ["Fixes #40"]).has_open_change_request is False
+    assert gitea.to_ticket(issue, (), ["Fixes #40"]).has_open_change_request is False
 
 
 def test_gitea_fetch_default_scope_is_every_issue_with_blockers(monkeypatch):
@@ -124,7 +126,7 @@ def test_gitea_fetch_default_scope_is_every_issue_with_blockers(monkeypatch):
         if path.endswith("/pulls"):
             return []
         if path.endswith("/2/dependencies"):
-            return [{"state": "open"}, {"state": "closed"}]
+            return [{"number": 1, "state": "open"}, {"number": 3, "state": "closed"}]
         return []
 
     monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
@@ -214,6 +216,144 @@ def test_gitea_other_http_errors_are_not_rate_limited(monkeypatch):
     with pytest.raises(ProviderError) as raised:
         gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
     assert not isinstance(raised.value, RateLimited)
+
+
+def test_body_blockers_join_native_ones_and_lookup_skips_known_issues():
+    tickets = [
+        Ticket(number=1, title="t", url="u", is_open=True, body="Blocked by: #2, #3, #4, #9", blocked_by=("#2",),
+               open_blockers=1),
+        Ticket(number=2, title="t", url="u", is_open=True),
+        Ticket(number=3, title="t", url="u", is_open=False),
+    ]
+    asked = []
+
+    def lookup(numbers):
+        asked.append(numbers)
+        return {4: True, 9: False}
+
+    out = providers.with_body_blockers(tickets, providers.IssueStates(lookup))
+    assert asked == [[4, 9]]
+    assert (out[0].blocked_by, out[0].open_blockers) == (("#2", "#4"), 2)
+    assert (out[1].blocked_by, out[1].open_blockers) == ((), None)
+
+
+def test_ticket_unblocks_once_every_listed_blocker_is_closed():
+    tickets = [Ticket(number=1, title="t", url="u", is_open=True, body="## Blocked by\n\n- #2\n- #3"),
+               Ticket(number=2, title="t", url="u", is_open=False),
+               Ticket(number=3, title="t", url="u", is_open=False)]
+    out = providers.with_body_blockers(tickets, providers.IssueStates(lambda numbers: {}))
+    assert (out[0].blocked_by, out[0].open_blockers, out[0].is_blocked) == ((), 0, False)
+
+
+def test_issue_states_remembers_closed_and_missing_issues():
+    asked = []
+
+    def lookup(numbers):
+        asked.append(numbers)
+        return {4: True, 5: False}
+
+    states = providers.IssueStates(lookup)
+    assert states([4, 5, 6]) == {4: True, 5: False, 6: False}
+    assert states([4, 5, 6]) == {4: True, 5: False, 6: False}
+    assert asked == [[4, 5, 6], [4]]
+
+
+def test_github_native_blockers_are_named_and_body_blockers_looked_up(monkeypatch):
+    def node(number, body="", blocked_by=()):
+        return {"number": number, "title": "t", "url": "u", "body": body, "state": "OPEN",
+                "assignees": {"nodes": []}, "labels": {"nodes": []},
+                "blockedBy": {"nodes": [{"number": n, "state": s, "repository": {"nameWithOwner": repo}}
+                                        for n, s, repo in blocked_by]}}
+
+    calls = []
+
+    def fake_run_cli(args, stdin=None, check=True):
+        body = json.loads(stdin)
+        calls.append(body)
+        if "q" in body["variables"]:
+            nodes = [node(7, "Blocked by: #8, #50, #51", [(8, "OPEN", "o/r"), (3, "OPEN", "x/y"), (9, "CLOSED", "o/r")])]
+            nodes = nodes if "is:open" in body["variables"]["q"] else []
+            return json.dumps({"data": {"search": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}})
+        errors = [{"type": "NOT_FOUND", "message": "Could not resolve"}]
+        return json.dumps({"data": {"repository": {"i50": {"state": "OPEN"}, "i51": None}}, "errors": errors})
+
+    monkeypatch.setattr(github, "run_cli", fake_run_cli)
+    monkeypatch.setattr(providers, "run_cli", fake_run_cli)
+    [t] = github.GitHubProvider("o/r").fetch(Query())
+    assert (t.blocked_by, t.open_blockers) == (("#8", "x/y#3", "#50"), 3)
+    assert "i50: issueOrPullRequest(number: 50)" in calls[-1]["query"]
+
+
+def test_github_lookup_raises_on_errors_other_than_not_found(monkeypatch):
+    errors = [{"type": "RATE_LIMITED", "message": "API rate limit exceeded"}]
+    monkeypatch.setattr(github, "run_cli", lambda args, stdin=None, check=True: json.dumps({"data": None, "errors": errors}))
+    with pytest.raises(RateLimited):
+        github.GitHubProvider("o/r")._issue_states([5])
+
+
+def test_github_viewer(monkeypatch):
+    monkeypatch.setattr(github, "run_json", lambda args, stdin=None: {"data": {"viewer": {"login": "kareblak"}}})
+    assert github.GitHubProvider("o/r").viewer() == "kareblak"
+
+
+def test_gitlab_native_and_body_blockers(monkeypatch):
+    issue = {"iid": "12", "title": "T", "webUrl": "u", "description": "Blokkert av: #20", "state": "opened",
+             "closedAt": None, "assignees": {"nodes": []}, "labels": {"nodes": []}, "mergeRequestsCount": 0,
+             "blockedByIssues": {"nodes": [{"iid": "13", "state": "opened", "reference": "g/p#13"},
+                                           {"iid": "14", "state": "closed", "reference": "g/p#14"},
+                                           {"iid": "3", "state": "opened", "reference": "g/other#3"}]}}
+
+    def fake_run_json(args, stdin=None):
+        variables = json.loads(stdin)["variables"]
+        if "iids" in variables:
+            assert variables["iids"] == ["20"]
+            return {"data": {"project": {"issues": {"nodes": [{"iid": "20", "state": "opened"}]}}}}
+        nodes = [issue] if variables["state"] == "opened" else []
+        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
+
+    monkeypatch.setattr(gitlab, "run_json", fake_run_json)
+    [t] = gitlab.GitLabProvider("g/p").fetch(Query())
+    assert (t.blocked_by, t.open_blockers) == (("#13", "g/other#3", "#20"), 3)
+
+
+def test_gitlab_viewer(monkeypatch):
+    monkeypatch.setattr(gitlab, "run_json", lambda args, stdin=None: {"data": {"currentUser": {"username": "gl"}}})
+    assert gitlab.GitLabProvider("g/p").viewer() == "gl"
+
+
+def test_gitea_native_and_body_blockers(monkeypatch):
+    def fake_get(self, path, params=None):
+        if path.endswith("/issues"):
+            return [{"number": 1, "title": "t", "html_url": "u", "state": "open", "labels": [],
+                     "body": "Blocked by: #5, #6"}] if params["state"] == "open" else []
+        if path.endswith("/1/dependencies"):
+            return [{"number": 2, "state": "open", "repository": {"full_name": "o/r"}},
+                    {"number": 3, "state": "open", "repository": {"full_name": "x/y"}},
+                    {"number": 4, "state": "closed", "repository": {"full_name": "o/r"}}]
+        if path.endswith("/issues/5"):
+            return {"number": 5, "state": "open"}
+        if path.endswith("/issues/6"):
+            raise providers.NotFound("codeberg.org/x: HTTP 404 Not Found")
+        if path == "/user":
+            return {"login": "gt"}
+        return []
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    provider = gitea.GiteaProvider("o/r", "codeberg.org", token="x")
+    [t] = provider.fetch(Query())
+    assert (t.blocked_by, t.open_blockers) == (("#2", "x/y#3", "#5"), 3)
+    assert provider.viewer() == "gt"
+
+
+def test_gitea_blocker_lookup_failure_is_not_taken_for_closed(monkeypatch):
+    def fake_get(self, path, params=None):
+        if path.endswith("/issues/5"):
+            raise ProviderError("codeberg.org/x: HTTP 502 Bad Gateway")
+        return {}
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    with pytest.raises(ProviderError):
+        gitea.GiteaProvider("o/r", "codeberg.org", token="x")._issue_states([5])
 
 
 MAP_LABELS = ("wayfinder:map",)

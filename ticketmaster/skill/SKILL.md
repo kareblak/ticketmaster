@@ -37,7 +37,8 @@ To answer a question about the board's contents without opening a pane, run the 
 with `snapshot` instead of `open`; it prints every column once as plain text.
 
 On the board, `Enter` goes to a ticket's herdr workspace (resuming Claude with `--continue` if it
-exited), or starts one when there is none. `s` always starts the ticket in a new worktree
+exited), or starts one when there is none; both refuse a blocked ticket, or one assigned to someone
+else, and say why. `s` always starts the ticket in a new worktree
 (`issue-<n>`, `issue-<n>-2`…) as herdr agent `issue-<n>`, with `/mattpocock-skills:wayfinder
 <map> <ticket>` for wayfinder tickets (never implement; one whose map can't be found only warns)
 or `/mattpocock-skills:implement <ticket>` plus a short brief otherwise. `c` starts a review session for a Review ticket in a `review-<n>` worktree; `x` removes a Done ticket's
@@ -52,7 +53,7 @@ The board never changes issues. Column rules (first match wins):
 | ----------- | ------------------------------------------------------------------------ |
 | Done        | closed within the last 7 days (`--done-days`); older closed issues hidden |
 | Review      | has a `review:<type>` / `review::<type>` label, or an open linked PR/MR  |
-| Blocked     | has an open blocking issue, or a `blocked` label                         |
+| Blocked     | has an open blocking issue (native, or a `Blocked by: #n` body line or `## Blocked by` section), or a `blocked` label |
 | In progress | has an assignee                                                          |
 | Ready       | everything else                                                          |
 
