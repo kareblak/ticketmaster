@@ -11,6 +11,7 @@ from .herdr import Herdr, Session, unsaved_work
 from .model import Ticket
 
 DEFAULT_WAYFINDER_COMMAND = "/mattpocock-skills:wayfinder"
+DEFAULT_REVIEW_COMMAND = "/mattpocock-skills:code-review"
 
 
 def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND) -> str:
@@ -25,11 +26,13 @@ def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMM
     )
 
 
-def review_prompt(ticket: Ticket) -> str:
+def review_prompt(ticket: Ticket, review_command: str = DEFAULT_REVIEW_COMMAND) -> str:
+    """The skill reviews from a fixed point against a spec: the PR's base branch and the issue."""
     return (
-        f"Review the open pull request for issue #{ticket.number}: {ticket.title}\n{ticket.url}\n\n"
-        "Find the PR that closes this issue, check out its branch in this worktree, then review it "
-        "against the issue. Report findings; do not push or comment without asking."
+        f"{review_command} Review the open pull request for issue #{ticket.number}: {ticket.title}\n{ticket.url}\n\n"
+        "First find the PR that closes this issue and check out its branch in this worktree. "
+        f"Use the PR's base branch (e.g. origin/main) as the fixed point and {ticket.url} as the spec. "
+        "Report findings in this session only; do not push or comment on the PR without asking."
     )
 
 
@@ -57,6 +60,7 @@ class Workbench:
 
     cwd: Path
     wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND
+    review_command: str = DEFAULT_REVIEW_COMMAND
     claude: str = "claude"
     herdr: Herdr = field(default_factory=Herdr)
     check_unsaved: Callable[[str], str | None] = unsaved_work  # why removing a checkout would lose work
@@ -74,7 +78,7 @@ class Workbench:
     def review(self, ticket: Ticket) -> str:
         where = self.herdr.start_in_new_worktree(
             self.cwd, f"review-{ticket.number}", f"review {session_label(ticket)}",
-            claude_args(ticket, review_prompt(ticket)), self.claude,
+            claude_args(ticket, review_prompt(ticket, self.review_command)), self.claude,
         )
         return f"Reviewing #{ticket.number} in {where}"
 
@@ -95,3 +99,12 @@ class Workbench:
         parts = [f"auto-removed {', '.join(Path(s.path).name for s in safe)}"] if safe else []
         parts += [f"kept {Path(path).name} ({reason})" for path, reason in kept.items()]
         return f"#{ticket.number} done: " + "; ".join(parts)
+
+
+def workbench_for(cwd: Path, config: dict) -> Workbench:
+    """`.ticketmaster.toml` can rename the skills the sessions start with."""
+    return Workbench(
+        cwd,
+        wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND),
+        review_command=config.get("review_command", DEFAULT_REVIEW_COMMAND),
+    )

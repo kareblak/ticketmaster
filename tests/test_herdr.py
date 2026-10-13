@@ -257,6 +257,16 @@ def test_review_gets_its_own_worktree():
     assert fake.first("worktree", "create")[5] == "review-686"
     assert fake.first("agent", "start")[2] == "review-686-2"  # agent name taken
     assert message.startswith("Reviewing #686 in new worktree review-686")
+    assert fake.first("agent", "start")[-1].startswith("/mattpocock-skills:code-review Review the open pull request")
+
+
+def test_review_starts_the_configured_review_command():
+    fake = FakeHerdr({
+        ("worktree", "list"): worktrees(),
+        ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
+    })
+    bench(fake, review_command="/code-review").review(ticket())
+    assert fake.first("agent", "start")[-1].startswith("/code-review Review the open pull request for issue #686")
 
 
 def test_startup_prompt_is_reported_not_failed():
