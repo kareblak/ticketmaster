@@ -28,17 +28,24 @@ skill to `~/.claude/skills/ticketmaster/SKILL.md`, so `/ticketmaster` works in e
 session started afterwards, in any repo (`CLAUDE_SKILLS_DIR` overrides the location). Nothing is
 installed per project: the board reads the repo it is started in.
 
-Upgrade with `pipx install --force git+https://github.com/kareblak/ticketmaster.git && ticketmaster install-skill`
-(append `@<branch>` or `@<tag>` to the URL to pin a version). Uninstall with
-`pipx uninstall ticketmaster && rm -r ~/.claude/skills/ticketmaster`.
+Upgrade with `ticketmaster upgrade`: it reinstalls from the GitHub source with pipx, refreshes the
+skill, and prints the commit it now runs (`ticketmaster --version` prints it any time). To pin a
+version instead, run `pipx install --force git+https://github.com/kareblak/ticketmaster.git@<tag> && ticketmaster install-skill`.
+Uninstall with `pipx uninstall ticketmaster && rm -r ~/.claude/skills/ticketmaster`.
 
 For development, clone the repo and run `./install.sh`. It installs the clone as an editable
 pipx app (code changes apply without reinstalling) and installs the skill.
+`ticketmaster upgrade` leaves such an install alone and tells you to `git pull` in the clone.
+
+When the board opens it asks GitHub (`git ls-remote`, in the background, once per start) for the
+head of `main`. If that differs from the commit your install was built from, a toast and the status
+line say `a newer ticketmaster is available: run ticketmaster upgrade`. It stays silent when offline,
+when `git` is missing, on editable installs, and when the install does not know its commit.
 
 ## Usage
 
 ```
-ticketmaster [open|snapshot|adopt|setup|install-skill] [parent] [--label NAME] [--repo OWNER/NAME]
+ticketmaster [open|snapshot|adopt|setup|install-skill|upgrade] [parent] [--label NAME] [--repo OWNER/NAME]
              [--provider github|gitlab|gitea|forgejo] [--host HOST] [--columns auto|one|all]
              [--interval SECONDS] [--done-days DAYS] [--limit N]
 ```
@@ -50,6 +57,7 @@ ticketmaster [open|snapshot|adopt|setup|install-skill] [parent] [--label NAME] [
 | `snapshot`      | prints every column once as plain text (works outside herdr)                   |
 | `setup`         | writes the wayfinding linking rules for the repo's tracker into `docs/agents/issue-tracker.md` (see [Wayfinding rules](#wayfinding-rules)) |
 | `install-skill` | writes the `/ticketmaster` skill into `~/.claude/skills`                       |
+| `upgrade`       | reinstalls from the GitHub source with pipx, then refreshes the skill; on an editable install it says to `git pull` in the clone instead |
 
 `open` and `adopt` only run inside herdr (`HERDR_ENV=1`).
 
@@ -68,8 +76,8 @@ switch columns, `1`–`5` jump to one, `v` shows all side by side (`--columns` s
 | Key            | Column            | Effect                                                              |
 | -------------- | ----------------- | ------------------------------------------------------------------- |
 | `Enter` / double-click | any       | go to the ticket's herdr workspace; with none: start (Ready, In progress) or review (Review) |
-| `s`            | all but Done      | start the ticket in a **new** worktree (always new; asks first); refused while it is blocked or assigned to someone else |
-| `c`            | Review            | start a review session in a new `review-<n>` worktree               |
+| `s`            | all but Done      | start the ticket in a **new** worktree (always new; asks first); refused while it is blocked, assigned to someone else, or held by a triage label (see below) |
+| `c`            | Review            | start a review session in a new `review-<n>` worktree; never for wayfinder tickets |
 | `x`            | Done              | remove the ticket's worktrees (herdr refuses if one has uncommitted changes) |
 | `a`            | any               | toggle auto-remove of Done tickets' worktrees (see below; saved)    |
 | `o`            | any               | open the issue in the browser                                       |
@@ -206,8 +214,8 @@ Each issue lands in the first column whose rule matches:
 
 | Column      | Rule                                                                       |
 | ----------- | -------------------------------------------------------------------------- |
-| Done        | closed within `--done-days` (default 7); older closed issues, and those labelled `wontfix` or (GitHub) closed as not planned, are hidden |
-| Review      | has a `review:<type>` (or GitLab scoped `review::<type>`) label, or an open PR/MR that closes it |
+| Done        | closed within `--done-days` (default 7); older closed issues, and those closed as not planned (see below), are hidden; an `out-of-scope` label marks the card `out of scope` |
+| Review      | has a `review:<type>` (or GitLab scoped `review::<type>`) label, or an open PR/MR that closes it; never a `wayfinder:<type>` ticket |
 | Blocked     | has an open blocking issue (native, or listed in the body), or a `blocked` label |
 | In progress | has an assignee                                                            |
 | Ready       | everything else                                                            |
@@ -216,6 +224,19 @@ Review types are tags, not columns: an issue labelled `review:security` and `rev
 one card in Review with a red `security` chip and a magenta `ux` chip. Cards show the issue
 number and title, the first ~90 characters (about two card lines) of the body (the `## Question` section when the
 issue has one, as wayfinder tickets do), review tags, up to three other labels, the author (`by <login>`) and assignees.
+
+Cards speak wayfinder's and the triage labels' vocabulary:
+
+- A wayfinder ticket shows who it needs: `HITL` (you at the keyboard) for `grilling` and `prototype`, `AFK`
+  (the agent alone) for `research`, and for a `task` whichever of the words `HITL` / `AFK` its body names
+  first (no badge when it names neither).
+- A ticket closed with the `out-of-scope` label (as `ticketmaster setup` pins it) shows `out of scope` in Done,
+  apart from the decisions that were resolved.
+- Wayfinder tickets (`wayfinder:<type>`) resolve with a comment and close, never a PR, so they never show in Review and
+  `c` refuses them.
+- A ticket labelled `needs-info` or `ready-for-human` shows the label (`⏸ needs-info`) and `s` / `Enter`
+  refuse to start it, with the reason. The names are the repo's own, from the right-hand column of
+  `docs/agents/triage-labels.md`; without that doc the canonical names apply.
 
 Ready and In progress sort by parent order (sub-issue position), then issue number. Done sorts
 newest first.

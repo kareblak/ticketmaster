@@ -3,11 +3,14 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 
+import pytest
+
 from ticketmaster.board import (BoardApp, Card, FilterPicker, HelpScreen, Pacer, PickerOption, passes_authors,
-                               passes_labels, tag_style)
+                               passes_labels, render_card, tag_style)
 from ticketmaster.herdr import Session
-from ticketmaster.model import Ticket
+from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
+from ticketmaster.upgrade import UPGRADE_NOTICE as NOTICE
 
 
 class FakeProvider:
@@ -522,6 +525,7 @@ def test_help_lists_every_visible_binding_and_closes_without_quitting():
                         assert binding.description in text
                         assert app.get_key_display(binding) in text
                 assert "herdr agent issue-<n>" in text and "select authors" in text
+                assert "newer one is available: run `ticketmaster upgrade`" in text
                 await pilot.press(close)
                 await pilot.pause()
                 assert not isinstance(app.screen, HelpScreen) and app.is_running
@@ -1140,6 +1144,31 @@ def test_help_lists_the_close_binding():
     run(scenario())
 
 
+MAP_URL = "https://gh/o/r/issues/9"
+ON_MAP = dict(parent_url=MAP_URL, parent_labels=("wayfinder:map",))
+GRILL = Ticket(number=11, title="Which store?", url="u11", is_open=True, labels=("wayfinder:grilling",), **ON_MAP)
+DIG = Ticket(number=12, title="Read the API", url="u12", is_open=True, labels=("wayfinder:research",), **ON_MAP)
+CHORE = Ticket(number=13, title="Sign up", url="u13", is_open=True, labels=("wayfinder:task",),
+               body="## Question\nAFK: the agent can sign up alone.", **ON_MAP)
+
+
+def card_text(app, number):
+    return str(next(c for c in app.query(Card) if c.ticket.number == number).render())
+
+
+def test_wayfinder_cards_show_hitl_or_afk():
+    async def scenario():
+        app = bench_app(FakeBench(), [GRILL, DIG, CHORE, *TICKETS])
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "HITL" in card_text(app, 11)
+            assert "AFK" in card_text(app, 12) and "HITL" not in card_text(app, 12)
+            assert "AFK" in card_text(app, 13)
+            assert "HITL" not in card_text(app, 1) and "AFK" not in card_text(app, 1)
+
+    run(scenario())
+
+
 MAP_CARD = Ticket(number=1, title="Pick a stack", url="u1", is_open=True, labels=("wayfinder:map",),
                   body="## Decisions so far\n- Store: Postgres\n")
 
@@ -1169,6 +1198,88 @@ def test_map_card_shows_progress_in_progress_not_ready():
             card = app.query_one("#col-IN_PROGRESS").query(Card).first()
             assert card.ticket.number == 1
             assert "1 decided · 3 open · 1 blocked" in str(card.render())
+
+    run(scenario())
+
+
+def test_done_marks_out_of_scope_tickets_apart_from_resolved_decisions():
+    closed = dict(is_open=False, closed_at=datetime.now(timezone.utc))
+    ruled_out = Ticket(number=21, title="Mobile app", url="u21", labels=("wayfinder:grilling", "out-of-scope"), **closed)
+    resolved = Ticket(number=22, title="Which DB?", url="u22", labels=("wayfinder:grilling",), **closed)
+
+    async def scenario():
+        app = bench_app(FakeBench(), [ruled_out, resolved])
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert [c.ticket.number for c in app.query_one("#col-DONE").query(Card)] == [21, 22]
+            assert "out of scope" in card_text(app, 21) and "[out-of-scope]" not in card_text(app, 21)
+            assert "out of scope" not in card_text(app, 22)
+
+    run(scenario())
+
+
+def test_decision_tickets_never_show_in_review_and_c_does_not_review_them():
+    with_pr = Ticket(number=11, title="Which store?", url="u11", is_open=True, has_open_change_request=True,
+                     labels=("wayfinder:grilling", "review:ux"), **ON_MAP)
+
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, [with_pr])
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert not list(app.query_one("#col-REVIEW").query(Card))
+            await pilot.press("down", "c")
+            await loaded(app, pilot)
+            assert not is_confirm(app) and bench.calls == []
+            assert any("#11" in m and "no PR to review" in m for m, _ in notifications(app))
+
+    run(scenario())
+
+
+NEEDS_INFO = Ticket(number=31, title="Vague", url="u31", is_open=True, labels=("needs-info",))
+HUMAN = Ticket(number=32, title="Delicate", url="u32", is_open=True, labels=("bug", "human only"))
+
+
+def test_s_and_enter_refuse_a_needs_info_ticket_and_its_card_shows_the_label():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, [NEEDS_INFO])
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert [c.ticket.number for c in app.query_one("#col-READY").query(Card)] == [31]
+            assert "needs-info" in card_text(app, 31)
+            await pilot.press("down")
+            for key in ("s", "enter"):
+                await pilot.press(key)
+                await pilot.pause()
+                assert not is_confirm(app)
+            await loaded(app, pilot)
+            assert bench.calls == []
+            messages = [m for m, _ in notifications(app)]
+            assert messages.count("#31 is labelled needs-info: waits on more information; not started") == 2
+
+    run(scenario())
+
+
+def test_triage_holds_use_the_repos_label_names(tmp_path):
+    doc = tmp_path / "docs" / "agents" / "triage-labels.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("| `needs-info` | `waiting` | x |\n| `ready-for-human` | `human only` | y |\n")
+
+    async def scenario():
+        bench = FakeBench()
+        app = BoardApp(FakeProvider([HUMAN, NEEDS_INFO]), Query(), interval=60, workbench=bench, repo_root=tmp_path)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "s")  # #31: needs-info is not this repo's name for the role
+            await pilot.pause()
+            assert is_confirm(app)
+            await pilot.press("n", "down", "s")
+            await pilot.pause()
+            assert not is_confirm(app)
+            assert ("#32 is labelled human only: needs a human to implement it; not started", "warning") \
+                in notifications(app)
+            assert "⏸ human only" in card_text(app, 32) and "⏸" not in card_text(app, 31)
 
     run(scenario())
 
@@ -1284,3 +1395,75 @@ def test_map_order_lookup_failure_falls_back_to_board_order():
             assert app.screen.question.startswith("Start #5 ")
 
     run(scenario())
+
+
+def test_newer_version_shows_a_toast_and_stays_in_the_status_line_checked_once():
+    checks = []
+
+    def update_check():
+        checks.append(1)
+        return NOTICE
+
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, update_check=update_check)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert [n.message for n in app._notifications] == [NOTICE]
+            for _ in range(3):
+                await pilot.press("r")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+            assert NOTICE in str(app.query_one("#status").render())
+            assert len(checks) == 1
+
+    run(scenario())
+
+
+def failing_check():
+    raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize("update_check", [lambda: None, failing_check])
+def test_no_notice_when_the_check_finds_nothing_or_fails(update_check):
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, update_check=update_check)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert list(app._notifications) == []
+            assert "upgrade" not in str(app.query_one("#status").render())
+
+    run(scenario())
+
+
+def blocked_card(**fields) -> str:
+    return render_card(Ticket(number=5, title="Waits", url="u5", is_open=True, **fields), Column.BLOCKED).plain
+
+
+def test_blocked_card_lists_each_open_blocker_in_order():
+    assert "⛔ #12 " in blocked_card(blocked_by=("#12",), open_blockers=1)
+    many = tuple(f"#{n}" for n in range(20, 0, -1))
+    assert f"⛔ {' '.join(many)} " in blocked_card(blocked_by=many, open_blockers=len(many))
+
+
+def test_blocked_card_names_blockers_in_another_repo():
+    assert "⛔ #3 other/lib#12 " in blocked_card(blocked_by=("#3", "other/lib#12"), open_blockers=2)
+
+
+def test_blocked_card_without_refs_keeps_the_count_and_a_label_only_card_shows_no_chip():
+    assert "⛔ 2 " in blocked_card(open_blockers=2)
+    assert "⛔" not in blocked_card(labels=("blocked",))
+    assert "⛔" not in blocked_card(labels=("blocked",), open_blockers=0)
+
+
+def test_snapshot_lists_a_blocked_tickets_open_blockers(monkeypatch, capsys):
+    from ticketmaster import cli, config
+
+    tickets = [BLOCKED, Ticket(number=7, title="Free", url="u7", is_open=True),
+               Ticket(number=8, title="Counted", url="u8", is_open=True, open_blockers=1)]
+    monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(tickets))
+    assert cli.main(["snapshot"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "  #5 Waits blocked by #1, #9" in lines
+    assert "  #7 Free" in lines and "  #8 Counted" in lines

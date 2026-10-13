@@ -29,6 +29,10 @@ WAYFINDER_TYPES = ("research", "prototype", "grilling", "task")
 WAYFINDER_LABEL = re.compile(r"^wayfinder::?(?P<kind>[^:].*)$", re.IGNORECASE)
 # The child→map rule for trackers without a native link: the body's first line is `Part of #<map>`.
 PART_OF = re.compile(r"^Part of #(?P<map>\d+)\.?$")
+OUT_OF_SCOPE_LABEL = "out-of-scope"  # pinned by `ticketmaster setup`, always English
+# HITL: worked with a human; AFK: the agent alone. A task says which in its body.
+TYPE_MODES = {"grilling": "HITL", "prototype": "HITL", "research": "AFK"}
+_MODE_WORD = re.compile(r"\b(HITL|AFK)\b")  # the acronyms, not "afk" in prose
 
 
 @dataclass(frozen=True)
@@ -75,8 +79,11 @@ class Ticket:
         """Closed as not planned or labelled `wontfix`: not finished work, so it stays off Done."""
         return self.not_planned or any(label.lower() == WONTFIX_LABEL for label in self.labels)
 
-    def start_refusal(self, viewer: str | None) -> str | None:
-        """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart."""
+    def start_refusal(self, viewer: str | None, holds: dict[str, str] | None = None) -> str | None:
+        """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart.
+
+        `holds` maps the triage labels that keep a ticket from an AFK start to why, see triage.hold_labels.
+        """
         if self.blocked_by:
             return f"#{self.number} is blocked by {', '.join(self.blocked_by)}"
         if self.open_blockers:
@@ -85,6 +92,9 @@ class Ticket:
             return f"#{self.number} has the '{BLOCKED_LABEL}' label"
         if viewer and self.assignees and viewer.lower() not in (a.lower() for a in self.assignees):
             return f"#{self.number} is claimed by {', '.join('@' + a for a in self.assignees)}"
+        if hold := self.triage_hold(holds or {}):
+            reason = next(why for label, why in holds.items() if label.lower() == hold.lower())
+            return f"#{self.number} is labelled {hold}: {reason}; not started"
         return None
 
     @property
@@ -112,6 +122,29 @@ class Ticket:
     @property
     def map_warning(self) -> str:
         return f"wayfinder:{self.wayfinder_type}, map not found"
+
+    @property
+    def is_decision(self) -> bool:
+        """A wayfinder ticket: it resolves with a comment and closes, never through a PR. The map is not one."""
+        return self.wayfinder_type is not None
+
+    @property
+    def mode(self) -> str | None:
+        """`HITL` or `AFK` for a wayfinder ticket; a task by the first of those words in its body, else None."""
+        if self.wayfinder_type == "task":
+            match = _MODE_WORD.search(self.body or "")
+            return match.group(1) if match else None
+        return TYPE_MODES.get(self.wayfinder_type)
+
+    @property
+    def is_out_of_scope(self) -> bool:
+        """Closed as ruled out of scope, rather than resolved."""
+        return not self.is_open and any(label.lower() == OUT_OF_SCOPE_LABEL for label in self.labels)
+
+    def triage_hold(self, holds: dict[str, str]) -> str | None:
+        """This ticket's first label among `holds` (label → reason, see triage.hold_labels), or None."""
+        wanted = {label.lower() for label in holds}
+        return next((label for label in self.labels if label.lower() in wanted), None)
 
     @property
     def summary(self) -> str:
@@ -186,7 +219,7 @@ def classify(ticket: Ticket, now: datetime, done_days: int) -> Column | None:
         if ticket.is_wont_fix or ticket.closed_at is None or now - ticket.closed_at > timedelta(days=done_days):
             return None
         return Column.DONE
-    if ticket.review_tags or ticket.has_open_change_request:
+    if (ticket.review_tags or ticket.has_open_change_request) and not ticket.is_decision:
         return Column.REVIEW
     if ticket.is_wayfinder_map:
         return Column.IN_PROGRESS  # a map is worked through its tickets, never started itself
