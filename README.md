@@ -92,7 +92,6 @@ claude -n "#<n> <title>" "<prompt>"
 
 | Ticket                                                        | Prompt                                         |
 | ------------------------------------------------------------- | ---------------------------------------------- |
-| a wayfinder map (`wayfinder:map`)                             | `/mattpocock-skills:wayfinder <map-url>`        |
 | has a `wayfinder:<type>` label (`research`, `prototype`, `grilling`, `task`; GitLab's `wayfinder::<type>` too) | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
 | anything else                                                 | `/mattpocock-skills:implement <ticket-url>` plus a brief: assign it to yourself first, implement via the skill, then push and open a ready PR that closes it (body via the `pr` skill) |
 
@@ -106,6 +105,15 @@ repo, `--label` or map) by the rule `ticketmaster setup` writes: the native link
 sub-issue's parent), else `Part of #<map>` as the first line of the body. When neither leads to a
 `wayfinder:map` issue, the card (and `snapshot`) says "map not found", and starting it (`s`, or
 `Enter` on a card without a session) only warns.
+
+A map (`wayfinder:map`) is never started itself. Its card sits in In progress and shows the map's
+progress: decisions so far (the top-level bullets of the body's Decisions-so-far section), and its
+open and blocked tickets on the board. `s` (or `Enter` with no session) on the map starts its first
+**frontier** ticket: open, unblocked, unassigned, not already started from this board or holding a
+session, in map order (GitHub's sub-issue order, asked for when you press `s`; else issue number).
+That ticket gets its own `issue-<n>` worktree, card and
+`/mattpocock-skills:wayfinder <map-url> <ticket-url>` session, so a second press starts the next
+frontier ticket. With an empty frontier the board says so and starts nothing.
 
 A review session (`c`) gets a `review-<n>` worktree and starts `/mattpocock-skills:code-review`
 the same way: the prompt tells it to find the PR that closes the issue, check out its branch, and
@@ -198,7 +206,7 @@ Each issue lands in the first column whose rule matches:
 | Column      | Rule                                                                       |
 | ----------- | -------------------------------------------------------------------------- |
 | Done        | closed within `--done-days` (default 7); older closed issues are hidden; an `out-of-scope` label marks the card `out of scope` |
-| Review      | has a `review:<type>` (or GitLab scoped `review::<type>`) label, or an open PR/MR that closes it; never a wayfinder map or ticket |
+| Review      | has a `review:<type>` (or GitLab scoped `review::<type>`) label, or an open PR/MR that closes it; never a `wayfinder:<type>` ticket |
 | Blocked     | has an open blocking issue (native, or listed in the body), or a `blocked` label |
 | In progress | has an assignee                                                            |
 | Ready       | everything else                                                            |
@@ -215,7 +223,7 @@ Cards speak wayfinder's and the triage labels' vocabulary:
   first (no badge when it names neither).
 - A ticket closed with the `out-of-scope` label (as `ticketmaster setup` pins it) shows `out of scope` in Done,
   apart from the decisions that were resolved.
-- Wayfinder maps and tickets resolve with a comment and close, never a PR, so they never show in Review and
+- Wayfinder tickets (`wayfinder:<type>`) resolve with a comment and close, never a PR, so they never show in Review and
   `c` refuses them.
 - A ticket labelled `needs-info` or `ready-for-human` shows the label (`⏸ needs-info`) and `s` / `Enter`
   refuse to start it, with the reason. The names are the repo's own, from the right-hand column of

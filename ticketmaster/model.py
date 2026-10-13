@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from typing import NamedTuple
 
 
 class Column(Enum):
@@ -115,8 +116,8 @@ class Ticket:
 
     @property
     def is_decision(self) -> bool:
-        """A wayfinder map or ticket: it resolves with a comment and closes, never through a PR."""
-        return self.is_wayfinder_map or self.wayfinder_type is not None
+        """A wayfinder ticket: it resolves with a comment and closes, never through a PR. The map is not one."""
+        return self.wayfinder_type is not None
 
     @property
     def mode(self) -> str | None:
@@ -152,6 +153,49 @@ def part_of(body: str) -> int | None:
     return int(match.group("map")) if match else None
 
 
+def map_tickets(map_ticket: Ticket, tickets: list[Ticket]) -> list[Ticket]:
+    """The map's typed wayfinder tickets, in map order."""
+    children = [t for t in tickets if t.parent_number == map_ticket.number and t.is_wayfinder_ticket]
+    return sorted(children, key=lambda t: (t.order, t.number))
+
+
+def frontier(map_ticket: Ticket, tickets: list[Ticket], taken: set[int] = frozenset(),
+             order: list[int] | None = None) -> list[Ticket]:
+    """The map's open, unblocked, unclaimed tickets in map order; `taken` are being started but not claimed yet.
+
+    `order` is the tracker's own map order (GitHub sub-issue order), which a search board does not carry;
+    tickets it does not list follow in board order.
+    """
+    ready = [t for t in map_tickets(map_ticket, tickets)
+             if t.is_open and not t.is_blocked and not t.assignees and t.number not in taken]
+    if order is None:
+        return ready
+    position = {number: index for index, number in enumerate(order)}
+    return sorted(ready, key=lambda t: position.get(t.number, len(position)))
+
+
+class MapProgress(NamedTuple):
+    decided: int  # decisions so far, from the map's body
+    open: int  # the map's open tickets on the board
+    blocked: int
+
+
+def map_progress(map_ticket: Ticket, tickets: list[Ticket]) -> MapProgress:
+    still_open = [t for t in map_tickets(map_ticket, tickets) if t.is_open]
+    return MapProgress(decisions_so_far(map_ticket.body), len(still_open), sum(t.is_blocked for t in still_open))
+
+
+_DECISIONS = re.compile(r"^#+[ \t]*Decisions[- ]so[- ]far[ \t]*:?[ \t]*$(?P<text>.*?)(?=^#+[ \t]|\Z)",
+                        re.MULTILINE | re.DOTALL | re.IGNORECASE)
+_TOP_BULLET = re.compile(r"^(?:[-*+]|\d+[.)])[ \t]+\S", re.MULTILINE)
+
+
+def decisions_so_far(body: str) -> int:
+    """Top-level bullets in the map's Decisions-so-far section: wayfinder appends one per resolved ticket."""
+    match = _DECISIONS.search(body or "")
+    return len(_TOP_BULLET.findall(match.group("text"))) if match else 0
+
+
 @dataclass
 class Board:
     columns: dict[Column, list[Ticket]] = field(default_factory=lambda: {c: [] for c in COLUMN_ORDER})
@@ -168,6 +212,8 @@ def classify(ticket: Ticket, now: datetime, done_days: int) -> Column | None:
         return Column.DONE
     if (ticket.review_tags or ticket.has_open_change_request) and not ticket.is_decision:
         return Column.REVIEW
+    if ticket.is_wayfinder_map:
+        return Column.IN_PROGRESS  # a map is worked through its tickets, never started itself
     if ticket.is_blocked:
         return Column.BLOCKED
     if ticket.assignees:
