@@ -21,11 +21,15 @@ PREAMBLE = f"""{HEADING}
 <!-- Written by `{SETUP_COMMAND}`, which replaces this section; the ticketmaster board reads it. -->
 
 Used by `/wayfinder`; the ticketmaster board reads the same encodings. The **map** is a single issue with
-**child** issues as tickets. The keywords `Part of` and `Blocked by:` and the `{OUT_OF_SCOPE_LABEL}` label are
-always English, even when the rest of the issue is written in another language.
+**child** issues as tickets. Link tickets only as the bullets below say: blocking is always the tracker's
+native link, never a `Blocked by:` body line. %s
 """
 
-GITHUB = PREAMBLE + f"""
+PART_OF_ENGLISH = f"""The keyword `Part of` and the `{OUT_OF_SCOPE_LABEL}` label are always English, even
+when the rest of the issue is written in another language."""
+
+GITHUB = PREAMBLE % f"""Nothing goes in the body; the `{OUT_OF_SCOPE_LABEL}` label is always English,
+even when the rest of the issue is written in another language.""" + f"""
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
 - **Child → map**: a GitHub **sub-issue** of the map, nothing in the body: `gh api --method POST repos/<owner>/<repo>/issues/<map>/sub_issues -F sub_issue_id=<child-db-id>`. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`).
 - **Blocking**: GitHub's **native issue dependencies**: `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`. A ticket is unblocked when every blocker is closed.
@@ -36,17 +40,17 @@ GITHUB = PREAMBLE + f"""
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
 """
 
-GITLAB = PREAMBLE + f"""
+GITLAB = PREAMBLE % PART_OF_ENGLISH + f"""
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `glab issue create --label wayfinder:map`.
 - **Child → map**: the first line of the child's description is `Part of #<map>`. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`).
-- **Blocking**: GitLab's **native `blocks` issue link**, from the blocker to the child: `glab api --method POST projects/:id/issues/<blocker>/links -f target_project_id=:id -f target_issue_iid=<child> -f link_type=blocks`. A ticket is unblocked when every blocker is closed.
+- **Blocking**: GitLab's **native `blocks` issue link** (GitLab Premium or Ultimate), from the blocker to the child: `glab api --method POST projects/:id/issues/<blocker>/links -f target_project_id=:id -f target_issue_iid=<child> -f link_type=blocks`. A ticket is unblocked when every blocker is closed.
 - **Out of scope**: label it `{OUT_OF_SCOPE_LABEL}`, say why, and close it: `glab issue update <n> --label {OUT_OF_SCOPE_LABEL}`, `glab issue note <n> -m "<why>"`, then `glab issue close <n>`.
 - **Frontier query**: open issues whose description starts with `Part of #<map>`, in issue order, minus any with an open blocker (`blockedByCount > 0`) or an assignee; first wins.
 - **Claim**: `glab issue update <n> --assignee <your-username>`, the session's first write.
 - **Resolve**: `glab issue note <n> -m "<answer>"`, then `glab issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
 """
 
-GITEA = PREAMBLE + f"""
+GITEA = PREAMBLE % PART_OF_ENGLISH + f"""
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `tea issues create --labels wayfinder:map`.
 - **Child → map**: the first line of the child's body is `Part of #<map>`. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`).
 - **Blocking**: Gitea/Forgejo's **native issue dependencies**: `POST /api/v1/repos/<owner>/<repo>/issues/<child>/dependencies` with body `{{"owner": "<owner>", "repo": "<repo>", "index": <blocker>}}` (token from the `tea` login, header `Authorization: token <token>`). A ticket is unblocked when every blocker is closed.
@@ -59,7 +63,7 @@ GITEA = PREAMBLE + f"""
 SECTIONS = {"github": GITHUB, "gitlab": GITLAB, "gitea": GITEA}
 
 # The section runs from its heading to the next heading of the same or a higher level, or the end of the file.
-_SECTION = re.compile(rf"^{re.escape(HEADING)}[ \t]*\n.*?(?=^#{{1,2}}\s|\Z)", re.MULTILINE | re.DOTALL)
+_SECTION = re.compile(rf"^{re.escape(HEADING)}[ \t]*(?:\n|\Z).*?(?=^#{{1,2}}\s|\Z)", re.MULTILINE | re.DOTALL)
 
 
 def section(kind: str) -> str:
@@ -74,9 +78,9 @@ def normalize(kind: str) -> str:
 def setup(root: Path, kind: str) -> Path:
     """Writes the section into the repo's tracker doc: replaced in place, appended, or in a new doc."""
     path = root / TRACKER_DOC
-    text = path.read_text() if path.is_file() else f"# Issue tracker: {TRACKER_NAMES[normalize(kind)]}\n"
+    text = path.read_text(encoding="utf-8") if path.is_file() else f"# Issue tracker: {TRACKER_NAMES[normalize(kind)]}\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(with_section(text, section(kind)))
+    path.write_text(with_section(text, section(kind)), encoding="utf-8")
     return path
 
 
@@ -93,7 +97,7 @@ def drift(root: Path, kind: str) -> str | None:
     if normalize(kind) not in SECTIONS:
         return None
     path = root / TRACKER_DOC
-    match = _SECTION.search(path.read_text()) if path.is_file() else None
+    match = _SECTION.search(path.read_text(encoding="utf-8")) if path.is_file() else None
     if match is None:
         return "missing"
     return None if match.group(0).rstrip("\n") == section(kind).rstrip("\n") else "outdated"

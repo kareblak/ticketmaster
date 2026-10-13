@@ -579,6 +579,19 @@ def test_status_warns_until_the_skills_setup_exists_and_rechecks_on_refresh(tmp_
     run(scenario())
 
 
+def test_missing_doc_warning_also_names_ticketmaster_setup(tmp_path):
+    provider = FakeProvider(TICKETS)
+    provider.name = "github"
+
+    async def scenario():
+        app = BoardApp(provider, Query(), interval=60, repo_root=tmp_path)
+        async with app.run_test(size=(240, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "/setup-matt-pocock-skills, then ticketmaster setup" in status_of(app)
+
+    run(scenario())
+
+
 def test_no_warning_when_the_skills_setup_exists(tmp_path):
     (tmp_path / "docs" / "agents").mkdir(parents=True)
     (tmp_path / "docs" / "agents" / "issue-tracker.md").write_text("# Issue tracker\n")

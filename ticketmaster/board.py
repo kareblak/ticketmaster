@@ -596,7 +596,8 @@ class BoardApp(App):
         if self.auto_remove:
             status.append(" · auto-remove on", style="green")
         if self.setup_missing:
-            status.append(f"  ⚠ run {SETUP_COMMAND} before starting sessions (no {SETUP_DOC})", style="bold yellow")
+            status.append(f"  ⚠ run {SETUP_COMMAND}, then {WAYFINDING_SETUP}, before starting sessions (no {SETUP_DOC})",
+                          style="bold yellow")
         elif self.wayfinding_drift:
             state = "missing from" if self.wayfinding_drift == "missing" else "out of date in"
             status.append(f"  ⚠ run {WAYFINDING_SETUP}: wayfinding rules {state} {SETUP_DOC}", style="bold yellow")

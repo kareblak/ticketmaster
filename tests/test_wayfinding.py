@@ -54,7 +54,8 @@ def test_each_tracker_pins_its_encodings_with_english_keywords(tmp_path, kind, c
     text = setup(tmp_path, kind).read_text()
     assert child in text and blocking in text
     assert "--add-label out-of-scope" in text or "--label out-of-scope" in text or "--add-labels out-of-scope" in text
-    assert "`Part of` and `Blocked by:`" in text and "always English" in text
+    assert "always English" in text and "never a `Blocked by:` body line" in text
+    assert ("`Part of`" in text) == (kind != "github")  # GitHub links children natively, nothing in the body
 
 
 def test_drift_names_a_missing_or_outdated_section(tmp_path):
@@ -76,3 +77,10 @@ def test_cli_setup_writes_the_section_for_the_repos_tracker(tmp_path, monkeypatc
     assert main(["setup", "--provider", "gitlab", "--repo", "group/project"]) == 0
     assert drift(tmp_path, "gitlab") is None
     assert "GitLab" in capsys.readouterr().out
+
+
+def test_setup_replaces_a_bare_heading_at_the_end_of_the_file(tmp_path):
+    path = write_doc(tmp_path, HEAD + "\n## Wayfinding operations")
+    setup(tmp_path, "gitea")
+    assert path.read_text().count("## Wayfinding operations") == 1
+    assert drift(tmp_path, "gitea") is None

@@ -38,8 +38,9 @@ Run `gh issue view <number> --comments`.
 <!-- Written by `ticketmaster setup`, which replaces this section; the ticketmaster board reads it. -->
 
 Used by `/wayfinder`; the ticketmaster board reads the same encodings. The **map** is a single issue with
-**child** issues as tickets. The keywords `Part of` and `Blocked by:` and the `out-of-scope` label are
-always English, even when the rest of the issue is written in another language.
+**child** issues as tickets. Link tickets only as the bullets below say: blocking is always the tracker's
+native link, never a `Blocked by:` body line. Nothing goes in the body; the `out-of-scope` label is always English,
+even when the rest of the issue is written in another language.
 
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
 - **Child → map**: a GitHub **sub-issue** of the map, nothing in the body: `gh api --method POST repos/<owner>/<repo>/issues/<map>/sub_issues -F sub_issue_id=<child-db-id>`. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`).

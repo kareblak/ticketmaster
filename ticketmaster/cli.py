@@ -80,10 +80,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ticketmaster: {exc}", file=sys.stderr)
         return 2
     if args.command == "setup":
-        from .wayfinding import TRACKER_NAMES, setup
+        from .wayfinding import TRACKER_NAMES, normalize, setup
 
         path = setup(herdr.repo_root(cwd), provider.name)
-        print(f"Wrote the {TRACKER_NAMES[provider.name]} wayfinding operations to {path}.")
+        print(f"Wrote the {TRACKER_NAMES[normalize(provider.name)]} wayfinding operations to {path}.")
         return 0
     query = Query(parent=args.parent, label=args.label, done_days=args.done_days, limit=args.limit)
 

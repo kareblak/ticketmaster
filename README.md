@@ -149,10 +149,10 @@ of the file alone, or creates the doc when there is none. It pins these encoding
 | GitLab          | `Part of #<map>` as the description's first line | native `blocks` issue link (GitLab Premium) | `out-of-scope` label, closed |
 | Gitea / Forgejo | `Part of #<map>` as the body's first line | native issue dependency (`/dependencies`)  | `out-of-scope` label, closed    |
 
-The keywords `Part of` and `Blocked by:` and the `out-of-scope` label are always English, even
-when the rest of the issue is in another language. While the repo's section is missing or differs
-from what this version writes, the status line warns and names `ticketmaster setup` (after the
-`/setup-matt-pocock-skills` warning, when the doc itself is missing).
+Blocking is always the native link, never a `Blocked by:` body line. The keyword `Part of` and the
+`out-of-scope` label are always English, even when the rest of the issue is in another language. While the repo's section is missing or differs
+from what this version writes, the status line warns and names `ticketmaster setup`; when the doc
+itself is missing, it names `/setup-matt-pocock-skills` first, then `ticketmaster setup`.
 
 Settings in `.ticketmaster.toml`:
 
