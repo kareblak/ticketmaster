@@ -84,11 +84,17 @@ class Herdr:
     # --- the board pane -------------------------------------------------------------------------
 
     def board_pane(self, caller: str | None = None) -> str | None:
-        """The board pane in the caller's tab; a board in another tab or workspace belongs to other work."""
+        """The caller's own pane when it is the board, else the board in the caller's workspace. One board
+        per workspace: a board in another workspace belongs to other work, even when it shows this repo."""
         panes = self.call("pane", "list").get("panes", [])
-        tab = next((p.get("tab_id") for p in panes if p["pane_id"] == caller), None)
+        if caller is None:
+            return None  # no workspace to look in
+        if any(p["pane_id"] == caller and p.get("label") == BOARD_LABEL for p in panes):
+            return caller
+        # A freshly split pane may not be listed yet, but its id (`w3:p2`) still names its workspace.
+        workspace = next((p.get("workspace_id") for p in panes if p["pane_id"] == caller), None) or caller.split(":")[0]
         return next((p["pane_id"] for p in panes
-                     if p.get("label") == BOARD_LABEL and (tab is None or p.get("tab_id") == tab)), None)
+                     if p.get("label") == BOARD_LABEL and (p.get("workspace_id") or p["pane_id"].split(":")[0]) == workspace), None)
 
     def open_board(self, cwd: Path, command: str, caller: str | None = None) -> str | None:
         """Restarts the board in its existing pane, or splits one off the caller. Returns the pane id,
