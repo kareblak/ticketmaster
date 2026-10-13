@@ -21,7 +21,7 @@ from textual.widgets import Button, Footer, Input, Label, Static
 
 from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
-from .model import COLUMN_ORDER, Board, Column, Ticket, build_board, frontier, map_progress
+from .model import COLUMN_ORDER, Board, Column, Ticket, build_board, frontier, map_progress, MapProgress
 from .providers import Provider, ProviderError, Query, RateLimited
 from .wayfinding import SETUP_COMMAND as WAYFINDING_SETUP, drift
 
@@ -66,8 +66,7 @@ def tag_style(kind: str) -> str:
 
 
 def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
-                progress: tuple[int, int, int] | None = None) -> Text:
-    """`progress` is a map's decisions so far, open and blocked tickets (see `map_progress`)."""
+                progress: MapProgress | None = None) -> Text:
     text = Text()
     for session in sessions:
         label, style = STATUS_STYLES.get(session.status, STATUS_STYLES["unknown"])
@@ -80,8 +79,8 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
     if ticket.summary:
         text.append("\n" + ticket.summary, style="dim")
     if progress is not None:
-        decided, open_, blocked = progress
-        text.append(f"\n◆ map: {decided} decided · {open_} open · {blocked} blocked", style="bold cyan")
+        text.append(f"\n◆ map: {progress.decided} decided · {progress.open} open · {progress.blocked} blocked",
+                    style="bold cyan")
     chips = Text()
     if ticket.map_missing:
         chips.append(f"⚠ {ticket.map_warning}", style="bold yellow")
@@ -194,7 +193,7 @@ class Card(Static, can_focus=True):
     ]
 
     def __init__(self, ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
-                 progress: tuple[int, int, int] | None = None):
+                 progress: MapProgress | None = None):
         super().__init__(render_card(ticket, column, sessions, starting, progress), classes="card")
         self.ticket = ticket
         self.column = column
@@ -688,6 +687,7 @@ class BoardApp(App):
         focused_widget = self.query_one("#columns").screen.focused  # the board's, also under the filter picker
         focused = focused_widget.ticket.number if isinstance(focused_widget, Card) else None
         refocus: Card | None = None
+        everything = self._tickets()
         for column in COLUMN_ORDER:
             tickets = self._visible(column)
             title = self.query_one(f"#title-{column.name}", Static)
@@ -695,7 +695,7 @@ class BoardApp(App):
             container = self.query_one(f"#col-{column.name}", VerticalScroll)
             container.remove_children()
             cards = [Card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
-                          map_progress(t, self._tickets()) if t.is_wayfinder_map else None) for t in tickets]
+                          map_progress(t, everything) if t.is_wayfinder_map else None) for t in tickets]
             container.mount_all(cards)
             refocus = refocus or next((c for c in cards if c.ticket.number == focused), None)
         if refocus is not None:
@@ -864,14 +864,9 @@ class BoardApp(App):
         if card.column is Column.DONE:
             self.notify(f"#{ticket.number} is done", severity="warning")
             return
-        via = ""
         if ticket.is_wayfinder_map:  # the map is worked through its next frontier ticket, on that ticket's card
-            taken = self.starting | {n for n, sessions in self.sessions.items() if sessions}
-            if not (ready := frontier(ticket, self._tickets(), taken)):
-                self.notify(f"Map #{ticket.number} has no frontier ticket: none open, unblocked, unclaimed "
-                            "and not already started", severity="warning")
-                return
-            ticket, via = ready[0], f" (next on map #{ticket.number})"
+            self._start_frontier(ticket)
+            return
         if refusal := ticket.start_refusal(self.viewer):
             self.notify(refusal, severity="warning")
             return
@@ -879,6 +874,33 @@ class BoardApp(App):
             self.notify(f"#{ticket.number} {ticket.map_warning}: link it to its map (sub-issue, or "
                         "`Part of #<map>` as the body's first line)", severity="warning")
             return
+        self._confirm_start(ticket)
+
+    def _start_frontier(self, map_ticket: Ticket) -> None:
+        """Asks the tracker for the map's own order when it has one (GitHub), then offers the first frontier ticket."""
+        map_order = getattr(self.provider, "map_order", None)
+        if map_order is None:
+            self._start_first_frontier(map_ticket, None)
+            return
+
+        def work() -> None:
+            try:
+                order = map_order(map_ticket.number)
+            except ProviderError:
+                order = None  # the board's own order is the fallback
+            self.call_from_thread(self._start_first_frontier, map_ticket, order)
+
+        self.run_worker(work, thread=True, group="herdr")
+
+    def _start_first_frontier(self, map_ticket: Ticket, order: list[int] | None) -> None:
+        taken = self.starting | {n for n, sessions in self.sessions.items() if sessions}
+        if not (ready := frontier(map_ticket, self._tickets(), taken, order)):
+            self.notify(f"Map #{map_ticket.number} has no frontier ticket: none open, unblocked, unclaimed "
+                        "and not already started", severity="warning")
+            return
+        self._confirm_start(ready[0], f" (next on map #{map_ticket.number})")
+
+    def _confirm_start(self, ticket: Ticket, via: str = "") -> None:
         existing = [Path(s.path).name for s in self.sessions.get(ticket.number, [])]
         warn = f"\nalready has {', '.join(existing)}: this makes another" if existing else ""
 

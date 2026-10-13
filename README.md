@@ -110,7 +110,8 @@ A map (`wayfinder:map`) is never started itself. Its card sits in In progress an
 progress: decisions so far (the top-level bullets of the body's Decisions-so-far section), and its
 open and blocked tickets on the board. `s` (or `Enter` with no session) on the map starts its first
 **frontier** ticket: open, unblocked, unassigned, not already started from this board or holding a
-session, in map order. That ticket gets its own `issue-<n>` worktree, card and
+session, in map order (GitHub's sub-issue order, asked for when you press `s`; else issue number).
+That ticket gets its own `issue-<n>` worktree, card and
 `/mattpocock-skills:wayfinder <map-url> <ticket-url>` session, so a second press starts the next
 frontier ticket. With an empty frontier the board says so and starts nothing.
 

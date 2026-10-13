@@ -724,3 +724,19 @@ def test_github_map_board_includes_the_spec_and_its_implementation_tickets(monke
     assert_map_family(tickets, "https://gh/1", "https://gh/3")
     assert [t.number for t in tickets] == [2, 3, 4, 5]  # map order, then the spec, then its tickets
     assert sorted(asked) == [1, 3]  # the decision ticket is not a spec, so its children are not asked for
+
+
+def test_github_map_order_is_the_maps_sub_issue_order(monkeypatch):
+    calls = []
+
+    def fake_run_json(args, stdin=None):
+        body = json.loads(stdin)
+        calls.append(body["variables"])
+        after = body["variables"]["after"]
+        nodes, more = ([{"number": 9}, {"number": 4}], True) if after is None else ([{"number": 6}], False)
+        page = {"pageInfo": {"hasNextPage": more, "endCursor": "c1"}, "nodes": nodes}
+        return {"data": {"repository": {"issue": {"subIssues": page}}}}
+
+    monkeypatch.setattr(github, "run_json", fake_run_json)
+    assert github.GitHubProvider("o/r").map_order(1) == [9, 4, 6]
+    assert [c["number"] for c in calls] == [1, 1] and calls[1]["after"] == "c1"

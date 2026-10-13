@@ -195,3 +195,8 @@ def test_map_progress_counts_decisions_open_and_blocked_tickets():
     map_ticket = ticket(number=1, labels=MAP, body="## Decisions so far\n- one\n- two\n")
     tickets = [map_ticket, child(2), child(3, open_blockers=1), child(4, assignees=("bob",)), child(5, is_open=False)]
     assert map_progress(map_ticket, tickets) == (2, 3, 1)
+
+
+def test_frontier_follows_the_trackers_map_order_when_given():
+    tickets = [MAP_TICKET, child(5, order=1), child(6, order=2), child(7, order=3)]
+    assert [t.number for t in frontier(MAP_TICKET, tickets, order=[7, 5])] == [7, 5, 6]

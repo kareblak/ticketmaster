@@ -60,6 +60,14 @@ query($owner: String!, $name: String!, $number: Int!) {
 }
 """
 
+SUB_ISSUES = """
+query($owner: String!, $name: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    issue(number: $number) { subIssues(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { number } } }
+  }
+}
+"""
+
 VIEWER = "query { viewer { login } }"
 
 
@@ -77,6 +85,13 @@ class GitHubProvider:
 
     def _fetch(self, query: Query) -> list[Ticket]:
         return self._sub_issues(query) if query.parent is not None else self._search(query)
+
+    def map_order(self, number: int) -> list[int]:
+        """The map's sub-issue numbers in the order set on GitHub; search results carry no such order."""
+        owner, name = self.repo.split("/", 1)
+        nodes = self._paginate(SUB_ISSUES, {"owner": owner, "name": name, "number": number},
+                               ["repository", "issue", "subIssues"], limit=1000)
+        return [node["number"] for node in nodes]
 
     def viewer(self) -> str | None:
         return (self._graphql(VIEWER, {}).get("viewer") or {}).get("login")

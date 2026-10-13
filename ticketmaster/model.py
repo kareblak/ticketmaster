@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from typing import NamedTuple
 
 
 class Column(Enum):
@@ -125,16 +126,30 @@ def map_tickets(map_ticket: Ticket, tickets: list[Ticket]) -> list[Ticket]:
     return sorted(children, key=lambda t: (t.order, t.number))
 
 
-def frontier(map_ticket: Ticket, tickets: list[Ticket], taken: set[int] = frozenset()) -> list[Ticket]:
-    """The map's open, unblocked, unclaimed tickets in map order; `taken` are being started but not claimed yet."""
-    return [t for t in map_tickets(map_ticket, tickets)
-            if t.is_open and not t.is_blocked and not t.assignees and t.number not in taken]
+def frontier(map_ticket: Ticket, tickets: list[Ticket], taken: set[int] = frozenset(),
+             order: list[int] | None = None) -> list[Ticket]:
+    """The map's open, unblocked, unclaimed tickets in map order; `taken` are being started but not claimed yet.
+
+    `order` is the tracker's own map order (GitHub sub-issue order), which a search board does not carry;
+    tickets it does not list follow in board order.
+    """
+    ready = [t for t in map_tickets(map_ticket, tickets)
+             if t.is_open and not t.is_blocked and not t.assignees and t.number not in taken]
+    if order is None:
+        return ready
+    position = {number: index for index, number in enumerate(order)}
+    return sorted(ready, key=lambda t: position.get(t.number, len(position)))
 
 
-def map_progress(map_ticket: Ticket, tickets: list[Ticket]) -> tuple[int, int, int]:
-    """Decisions so far (from the map's body), and the map's open and blocked tickets on the board."""
-    open_ = [t for t in map_tickets(map_ticket, tickets) if t.is_open]
-    return decisions_so_far(map_ticket.body), len(open_), sum(t.is_blocked for t in open_)
+class MapProgress(NamedTuple):
+    decided: int  # decisions so far, from the map's body
+    open: int  # the map's open tickets on the board
+    blocked: int
+
+
+def map_progress(map_ticket: Ticket, tickets: list[Ticket]) -> MapProgress:
+    still_open = [t for t in map_tickets(map_ticket, tickets) if t.is_open]
+    return MapProgress(decisions_so_far(map_ticket.body), len(still_open), sum(t.is_blocked for t in still_open))
 
 
 _DECISIONS = re.compile(r"^#+[ \t]*Decisions[- ]so[- ]far[ \t]*:?[ \t]*$(?P<text>.*?)(?=^#+[ \t]|\Z)",

@@ -1215,3 +1215,48 @@ def test_empty_frontier_says_so_and_starts_nothing():
             assert len(warnings) == 2 and all("#1" in m and "frontier" in m for m in warnings)
 
     run(scenario())
+
+
+class OrderedProvider(FakeProvider):
+    """A tracker that knows the map's own order (GitHub sub-issue order)."""
+
+    def __init__(self, tickets, order):
+        super().__init__(tickets)
+        self.order = order
+        self.asked = []
+
+    def map_order(self, number):
+        self.asked.append(number)
+        if isinstance(self.order, Exception):
+            raise self.order
+        return self.order
+
+
+def test_s_on_the_map_follows_the_trackers_map_order():
+    async def scenario():
+        bench = FakeBench()
+        provider = OrderedProvider(MAP_BOARD, [6, 7, 5])
+        app = BoardApp(provider, Query(), interval=60, workbench=bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await focus_map(app, pilot)
+            await pilot.press("s")
+            await loaded(app, pilot)
+            assert provider.asked == [1] and app.screen.question.startswith("Start #6 ")
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 6)]
+
+    run(scenario())
+
+
+def test_map_order_lookup_failure_falls_back_to_board_order():
+    async def scenario():
+        bench = FakeBench()
+        app = BoardApp(OrderedProvider(MAP_BOARD, ProviderError("boom")), Query(), interval=60, workbench=bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await focus_map(app, pilot)
+            await pilot.press("s")
+            await loaded(app, pilot)
+            assert app.screen.question.startswith("Start #5 ")
+
+    run(scenario())
