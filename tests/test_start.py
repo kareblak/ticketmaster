@@ -35,6 +35,15 @@ def test_claude_args_name_the_session_and_never_use_claude_w():
     assert args[2].startswith("Work on issue #686")
 
 
+def test_claude_args_are_single_line_because_herdr_rejects_newlines():
+    args = claude_args(ticket(), build_prompt(ticket())) + claude_args(ticket(), review_prompt(ticket()))
+    assert not any("\n" in arg for arg in args)
+    assert claude_args(ticket(), build_prompt(ticket()))[2] == (
+        "Work on issue #686: Attach a  deviation reason https://gh/686 "
+        "Read the issue and its comments first, then assign it to yourself before doing any work."
+    )
+
+
 def test_review_prompt_points_at_the_issue_and_forbids_pushing():
     prompt = review_prompt(ticket())
     assert "https://gh/686" in prompt and "do not push" in prompt
