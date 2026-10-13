@@ -40,7 +40,7 @@ pipx app (code changes apply without reinstalling) and installs the skill.
 ```
 ticketmaster [open|board|snapshot|adopt|install-skill] [parent] [--label NAME] [--repo OWNER/NAME]
              [--provider github|gitlab|gitea|forgejo] [--host HOST] [--columns auto|one|all]
-             [--interval SECONDS] [--done-days DAYS] [--limit N]
+             [--interval SECONDS] [--done-days DAYS] [--limit N] [--auto-remove]
 ```
 
 | Command         | Effect                                                                         |
@@ -101,6 +101,13 @@ The board finds a ticket's sessions through its worktrees: any checkout named `i
 Claude has exited. `Enter` on such a card focuses the workspace, reopening it and resuming
 Claude with `claude --continue` when needed.
 
+With `--auto-remove` (or `auto_remove = true`), the board cleans up by itself: when a ticket is
+in Done, each of its worktrees is removed as `x` would, once its agent is no longer `working` or
+`needs you`. A worktree is kept, with a notification saying why, when it has uncommitted changes
+or commits that are on no remote (`git rev-list HEAD --not --remotes`). A squash-merged branch
+whose remote branch was deleted counts as unpushed, so remove that one with `x`. The board tries
+each worktree once per run; a kept one is retried after the board restarts.
+
 The board never writes to the tracker: wayfinder claims its tickets by assigning them, and the
 plain prompt tells the session to do the same, so the card moves to In progress on the next
 refresh.
@@ -109,6 +116,7 @@ Settings in `.ticketmaster.toml`:
 
 ```toml
 wayfinder_command = "/wayfinder"          # if wayfinder is installed under another name
+auto_remove = true                        # same as --auto-remove
 ```
 
 ## Columns

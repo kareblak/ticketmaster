@@ -112,6 +112,10 @@ class FakeBench:
         self.calls.append(("remove", ticket.number, len(sessions)))
         return "ok"
 
+    def auto_remove(self, ticket, sessions):
+        self.calls.append(("auto_remove", ticket.number, [x.path for x in sessions]))
+        return "ok"
+
 
 DONE = Ticket(number=4, title="Shipped", url="u4", is_open=False, closed_at=datetime.now(timezone.utc))
 
@@ -335,5 +339,34 @@ def test_wide_board_can_be_forced_to_one_column():
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             assert [c.id for c in app.query(".column") if c.display] == ["column-READY"]
+
+    run(scenario())
+
+
+def test_auto_remove_cleans_done_tickets_whose_agent_is_not_busy_and_only_once():
+    async def scenario():
+        bench = FakeBench({
+            4: [Session(4, "issue", "/w/issue-4", status="idle"), Session(4, "review", "/w/review-4", status="working")],
+            2: [Session(2, "issue", "/w/issue-2")],
+        })
+        app = BoardApp(FakeProvider(TICKETS + [DONE]), Query(), interval=60, workbench=bench, auto_remove=True)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert bench.calls == [("auto_remove", 4, ["/w/issue-4"])]
+            bench.current = {4: [Session(4, "issue", "/w/issue-4", status="idle"), Session(4, "review", "/w/review-4", status="done")]}
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert bench.calls == [("auto_remove", 4, ["/w/issue-4"]), ("auto_remove", 4, ["/w/review-4"])]
+
+    run(scenario())
+
+
+def test_auto_remove_is_off_by_default():
+    async def scenario():
+        bench = FakeBench({4: [Session(4, "issue", "/w/issue-4")]})
+        app = bench_app(bench, TICKETS + [DONE])
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert bench.calls == []
 
     run(scenario())

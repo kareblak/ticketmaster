@@ -48,6 +48,7 @@ STATUS_STYLES = {  # herdr agent states
     "unknown": ("? unknown", "grey62"),
     None: ("○ no agent", "grey50"),
 }
+ACTIVE_STATES = ("working", "blocked")  # auto-remove waits until the agent is no longer busy or asking
 
 
 def tag_style(kind: str) -> str:
@@ -124,6 +125,7 @@ class Workbench(Protocol):
     def review(self, ticket: Ticket) -> str: ...
     def go_to(self, ticket: Ticket, session: Session) -> str: ...
     def remove(self, ticket: Ticket, sessions: list[Session]) -> str: ...
+    def auto_remove(self, ticket: Ticket, sessions: list[Session]) -> str: ...
 
 
 class Confirm(ModalScreen[bool]):
@@ -203,6 +205,7 @@ class BoardApp(App):
         workbench: Workbench | None = None,
         describe_start: Callable[[Ticket], str] | None = None,
         columns: str = "auto",
+        auto_remove: bool = False,
     ):
         super().__init__()
         self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
@@ -213,6 +216,8 @@ class BoardApp(App):
         self.describe_start = describe_start or (lambda ticket: "")
         self.starting: set[int] = set()  # started from this board, until herdr lists the worktree
         self.sessions: dict[int, list[Session]] = {}
+        self.auto_remove = auto_remove
+        self.auto_tried: set[str] = set()  # worktree paths auto-remove has handled, so a kept one is not retried
         self.herdr_error: str | None = None
         self.board_query = query
         self.interval = interval
@@ -273,6 +278,19 @@ class BoardApp(App):
             self._render_board()  # rebuilding resets scroll, so only when tickets changed
         else:
             self._render_status()
+        if board is not None and herdr_error is None:
+            self._auto_remove_done()
+
+    def _auto_remove_done(self) -> None:
+        """Removes Done tickets' worktrees once their agent is idle, done or gone; once per worktree per board run."""
+        if not self.auto_remove or self.workbench is None:
+            return
+        for ticket in self.board.columns[Column.DONE]:
+            sessions = [s for s in self.sessions.get(ticket.number, [])
+                        if s.path not in self.auto_tried and s.status not in ACTIVE_STATES]
+            if sessions:
+                self.auto_tried.update(s.path for s in sessions)
+                self._run(lambda ticket=ticket, sessions=sessions: self.workbench.auto_remove(ticket, sessions))
 
     def _render_board(self) -> None:
         focused = self.focused.ticket.number if isinstance(self.focused, Card) else None

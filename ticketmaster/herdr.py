@@ -203,6 +203,24 @@ def local_branches(cwd: Path) -> list[str]:
     return result.stdout.split() if result.returncode == 0 else []
 
 
+def unsaved_work(path: str) -> str | None:
+    """Why a checkout would lose work if removed: uncommitted changes or commits on no remote. None when safe."""
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", *args], cwd=path, capture_output=True, text=True)
+
+    status = git("status", "--porcelain")
+    if status.returncode != 0:
+        return "not a git checkout"
+    if status.stdout.strip():
+        return "uncommitted changes"
+    unpushed = git("rev-list", "--count", "HEAD", "--not", "--remotes")
+    if unpushed.returncode != 0:
+        return "cannot compare with remotes"
+    if int(unpushed.stdout.strip() or 0):
+        return "unpushed commits"
+    return None
+
+
 def error_code(stderr: str) -> str | None:
     try:
         return json.loads(stderr)["error"]["code"]
