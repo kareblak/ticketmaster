@@ -71,7 +71,8 @@ switch columns, `1`–`5` jump to one, `v` shows all side by side (`--columns` s
 | `x`            | Done              | remove the ticket's worktrees (herdr refuses if one has uncommitted changes) |
 | `a`            | any               | toggle auto-remove of Done tickets' worktrees (see below; saved)    |
 | `o`            | any               | open the issue in the browser                                       |
-| `/` `Esc` `r` `q` |                | filter, clear filter, refresh now, quit                             |
+| `/` `Esc` `r` `q` |                | filter, clear both filters, refresh now, quit                       |
+| `f`            | any               | label filter picker: each label cycles include → exclude → off (see below; saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
 
 Arrows or `hjkl` move between cards.
@@ -110,6 +111,15 @@ whose remote branch was deleted counts as unpushed, so remove that one with `x`.
 each worktree once per run; a kept one is retried after the board restarts. The setting is
 saved per user in `$XDG_CONFIG_HOME/ticketmaster/settings.json` (`~/.config/…`), so it applies to
 every board until toggled off.
+
+`f` opens a picker listing every label on the board's tickets; `Enter` (or space, or a click) cycles
+a label through include, exclude and off, and the board narrows as you go. With any label
+included, a ticket shows only if it has at least one of them; a ticket with any excluded label is
+hidden. A ticket must also match the `/` text filter. The status line shows the selection
+(`labels: +bug -wontfix`); `c` in the picker or `Esc` on the board clears it. The selection is
+saved per repo in the same settings file and restored when the board reopens; a saved label that
+is no longer on the board is ignored until it comes back. This filters what the board shows, unlike
+`--label`, which scopes the query.
 
 The board never writes to the tracker: wayfinder claims its tickets by assigning them, and the
 plain prompt tells the session to do the same, so the card moves to In progress on the next

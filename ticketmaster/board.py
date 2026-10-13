@@ -95,6 +95,24 @@ def matches(ticket: Ticket, needle: str) -> bool:
     return all(word in haystack for word in needle.lower().split())
 
 
+INCLUDE, EXCLUDE = "include", "exclude"
+MODE_CYCLE = {None: INCLUDE, INCLUDE: EXCLUDE, EXCLUDE: None}  # a picker option cycles include → exclude → off
+
+
+def passes_labels(ticket: Ticket, modes: dict[str, str], known: set[str]) -> bool:
+    """Any included label (OR) and no excluded one; included labels missing from the board (`known`) are ignored."""
+    included = {label for label, mode in modes.items() if mode == INCLUDE and label in known}
+    if included and not included.intersection(ticket.labels):
+        return False
+    return not any(modes.get(label) == EXCLUDE for label in ticket.labels)
+
+
+def describe_modes(modes: dict[str, str], known: set[str]) -> str:
+    """`+bug -wontfix` for the status line, leaving out labels that are not on the board."""
+    return " ".join(("+" if mode == INCLUDE else "-") + label
+                    for label, mode in sorted(modes.items()) if label in known)
+
+
 class Card(Static, can_focus=True):
     # Bound on the card itself: otherwise the column's VerticalScroll handles up/down as scrolling.
     BINDINGS = [
@@ -165,6 +183,102 @@ class Confirm(ModalScreen[bool]):
         self.dismiss(answer)
 
 
+class PickerOption(Static, can_focus=True):
+    """One value of a FilterPicker section; Enter, space or a click cycles include → exclude → off."""
+
+    def __init__(self, section: str, value: str, mode: str | None):
+        super().__init__(classes="option")
+        self.section = section
+        self.value = value
+        self.mode = mode
+        self._paint()
+
+    def _paint(self) -> None:
+        mark, style = {INCLUDE: ("[+]", "bold green"), EXCLUDE: ("[-]", "bold red")}.get(self.mode, ("[ ]", "grey50"))
+        self.update(Text.assemble((mark, style), " ", (self.value, style if self.mode else "")))
+
+    def set_mode(self, mode: str | None) -> None:
+        self.mode = mode
+        self._paint()
+
+    def on_click(self) -> None:
+        self.focus()
+        self.screen.cycle(self)  # focus lands a tick later, so cycle this option rather than the focused one
+
+
+class FilterPicker(ModalScreen[None]):
+    """Narrows the board live from sections of values (labels; more sections can be added, e.g. authors).
+
+    `sections` maps a section title to its values, `modes` a title to {value: include|exclude}; the picker
+    edits `modes` in place and calls `changed` after every edit. Esc, f or q closes it, c clears it.
+    """
+
+    DEFAULT_CSS = """
+    FilterPicker { align: center middle; }
+    #picker { width: 60; max-width: 100%; height: auto; max-height: 100%; padding: 1 2; border: thick $accent; background: $surface; }
+    .section-title { text-style: bold underline; margin-top: 1; }
+    .option { padding: 0 1; }
+    .option:focus { background: $boost; }
+    #picker-help { color: $text-muted; }
+    """
+    BINDINGS = [
+        Binding("escape,f,q", "dismiss", "Close"),
+        Binding("enter,space", "cycle", "Include/exclude/off"),
+        Binding("c", "clear", "Clear"),
+        Binding("up,k", "step(-1)", show=False),
+        Binding("down,j", "step(1)", show=False),
+    ]
+
+    def __init__(self, sections: dict[str, list[str]], modes: dict[str, dict[str, str]], changed: Callable[[], None]):
+        super().__init__()
+        self.sections = sections
+        self.modes = modes
+        self.changed = changed
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="picker"):
+            yield Static("Enter/space: include → exclude → off · c clears · Esc closes", id="picker-help")
+            for title, values in self.sections.items():
+                yield Static(title, classes="section-title")
+                if not values:
+                    yield Static(Text("  none on this board", style="dim"))
+                current = self.modes.get(title, {})
+                for value in values:
+                    yield PickerOption(title, value, current.get(value))
+
+    def on_mount(self) -> None:
+        options = list(self.query(PickerOption))
+        if options:
+            options[0].focus()
+
+    def action_step(self, delta: int) -> None:
+        options = list(self.query(PickerOption))
+        if not options:
+            return
+        index = options.index(self.focused) + delta if self.focused in options else 0
+        options[max(0, min(len(options) - 1, index))].focus()
+
+    def action_cycle(self) -> None:
+        if isinstance(self.focused, PickerOption):
+            self.cycle(self.focused)
+
+    def cycle(self, option: PickerOption) -> None:
+        option.set_mode(MODE_CYCLE[option.mode])
+        current = self.modes.setdefault(option.section, {})
+        if option.mode:
+            current[option.value] = option.mode
+        else:
+            current.pop(option.value, None)
+        self.changed()
+
+    def action_clear(self) -> None:
+        for current in self.modes.values():
+            current.clear()
+        for option in self.query(PickerOption):
+            option.set_mode(None)
+        self.changed()
+
+
 KEY_DETAILS = {
     "primary": "go to the ticket's herdr workspace; with none, start it (Ready, In progress) or review it (Review)",
     "start": "start the ticket in a new issue-<n> worktree, even when it already has one",
@@ -172,6 +286,7 @@ KEY_DETAILS = {
     "remove": "on a Done card, remove its worktrees (herdr refuses if one has uncommitted changes)",
     "toggle_auto_remove": "remove Done tickets' worktrees once their agent is idle; unpushed work is kept",
     "open": "open the issue in the browser",
+    "pick_filter": "include or exclude labels (Enter cycles); combines with /, Esc on the board clears both",
 }
 
 
@@ -280,6 +395,7 @@ class BoardApp(App):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("slash", "filter", "Filter"),
+        Binding("f", "pick_filter", "Labels"),
         Binding("enter", "primary", "Go/start"),
         Binding("s", "start", "New worktree"),
         Binding("c", "review", "Review"),
@@ -324,6 +440,9 @@ class BoardApp(App):
         self.interval = interval
         self.board = Board()
         self.needle = ""
+        self.repo_key = f"{provider.name}:{provider.repo}"
+        saved = self.settings.get("filters", {}).get(self.repo_key, {})
+        self.filters: dict[str, dict[str, str]] = {"Labels": dict(saved.get("labels", {}))}
         self.last_error: str | None = None
         self.last_ok: datetime | None = None
         scope = f"parent #{query.parent}" if query.parent else f"label {query.label}" if query.label else "all issues"
@@ -393,11 +512,20 @@ class BoardApp(App):
                 self.auto_tried.update(s.path for s in sessions)
                 self._run(lambda ticket=ticket, sessions=sessions: self.workbench.auto_remove(ticket, sessions))
 
+    def _board_labels(self) -> set[str]:
+        return {label for tickets in self.board.columns.values() for ticket in tickets for label in ticket.labels}
+
+    def _visible(self, column: Column) -> list[Ticket]:
+        known = self._board_labels()
+        return [t for t in self.board.columns[column]
+                if matches(t, self.needle) and passes_labels(t, self.filters["Labels"], known)]
+
     def _render_board(self) -> None:
-        focused = self.focused.ticket.number if isinstance(self.focused, Card) else None
+        focused_widget = self.query_one("#columns").screen.focused  # the board's, also under the filter picker
+        focused = focused_widget.ticket.number if isinstance(focused_widget, Card) else None
         refocus: Card | None = None
         for column in COLUMN_ORDER:
-            tickets = [t for t in self.board.columns[column] if matches(t, self.needle)]
+            tickets = self._visible(column)
             title = self.query_one(f"#title-{column.name}", Static)
             title.update(Text(f"{column.value} ({len(tickets)})", style=f"bold {COLUMN_COLORS[column]}"))
             container = self.query_one(f"#col-{column.name}", VerticalScroll)
@@ -417,6 +545,8 @@ class BoardApp(App):
             status.append(f"updated {self.last_ok:%H:%M:%S} · {self.board.total()} tickets · every {self.interval:g}s")
         if self.needle:
             status.append(f" · filter: {self.needle}", style="yellow")
+        if labels := describe_modes(self.filters["Labels"], self._board_labels()):
+            status.append(f" · labels: {labels}", style="yellow")
         if self.auto_remove:
             status.append(" · auto-remove on", style="green")
         for error in (self.last_error, self.herdr_error):
@@ -451,7 +581,7 @@ class BoardApp(App):
         self.query_one("#tabs", Static).update(tabs)
 
     def _visible_count(self, column: Column) -> int:
-        return sum(1 for t in self.board.columns[column] if matches(t, self.needle))
+        return len(self._visible(column))
 
     def action_toggle_view(self) -> None:
         self.view = "all" if self.single else "one"
@@ -629,10 +759,33 @@ class BoardApp(App):
         box.cursor_position = len(self.needle)
         box.focus()
 
+    def action_pick_filter(self) -> None:
+        labels = sorted(self._board_labels(), key=str.lower)
+
+        def changed() -> None:
+            self._save_filters()
+            self._render_board()
+
+        self.push_screen(FilterPicker({"Labels": labels}, self.filters, changed),
+                         lambda _: self.call_after_refresh(self.action_move, 0, 0))
+
+    def _save_filters(self) -> None:
+        """Saves the picker's selection per repo; a saved label that is no longer on the board stays saved."""
+        filters = self.settings.setdefault("filters", {})
+        filters[self.repo_key] = {"labels": dict(sorted(self.filters["Labels"].items()))}
+        if self.settings_path:
+            try:
+                save_settings(self.settings_path, self.settings)
+            except OSError as exc:
+                self.notify(f"label filter not saved: {exc}", severity="warning")
+
     def action_clear_filter(self) -> None:
         box = self.query_one("#filter", Input)
         box.remove_class("visible")
         self.needle = ""
+        if self.filters["Labels"]:
+            self.filters["Labels"].clear()
+            self._save_filters()
         self._render_board()
         self.call_after_refresh(self.action_move, 0, 0)
 

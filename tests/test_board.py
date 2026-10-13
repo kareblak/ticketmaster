@@ -2,7 +2,7 @@ import json
 import asyncio
 from datetime import datetime, timezone
 
-from ticketmaster.board import BoardApp, Card, HelpScreen, tag_style
+from ticketmaster.board import BoardApp, Card, FilterPicker, HelpScreen, PickerOption, passes_labels, tag_style
 from ticketmaster.herdr import Session
 from ticketmaster.model import Ticket
 from ticketmaster.providers import ProviderError, Query
@@ -416,9 +416,130 @@ def test_help_lists_every_visible_binding_and_closes_without_quitting():
                     if binding.show:
                         assert binding.description in text
                         assert app.get_key_display(binding) in text
-                assert "herdr agent issue-<n>" in text
+                assert "herdr agent issue-<n>" in text and "include or exclude labels" in text
                 await pilot.press(close)
                 await pilot.pause()
                 assert not isinstance(app.screen, HelpScreen) and app.is_running
+
+    run(scenario())
+
+
+LABELLED = [
+    Ticket(number=1, title="Login bug", url="u1", is_open=True, labels=("bug",)),
+    Ticket(number=2, title="Dark mode", url="u2", is_open=True, labels=("ux", "wontfix")),
+    Ticket(number=3, title="Crash on save", url="u3", is_open=True, labels=("bug", "wontfix")),
+    Ticket(number=4, title="Docs", url="u4", is_open=True),
+]
+
+
+def test_passes_labels_includes_with_or_and_excludes_any():
+    known = {"bug", "ux", "wontfix"}
+    shown = lambda modes: [t.number for t in LABELLED if passes_labels(t, modes, known)]
+    assert shown({}) == [1, 2, 3, 4]
+    assert shown({"bug": "include", "ux": "include"}) == [1, 2, 3]
+    assert shown({"wontfix": "exclude"}) == [1, 4]
+    assert shown({"bug": "include", "wontfix": "exclude"}) == [1]
+    assert shown({"gone": "include", "wontfix": "exclude"}) == [1, 4]  # a saved label no longer on the board
+
+
+def shown_numbers(app):
+    return sorted(c.ticket.number for c in app.query(Card))
+
+
+async def pick(pilot, app, label, times=1):
+    """Focuses `label` in the open picker and cycles it."""
+    option = next(o for o in app.screen.query(PickerOption) if o.value == label)
+    option.focus()
+    await pilot.pause()
+    for _ in range(times):
+        await pilot.press("enter")
+    await pilot.pause()
+
+
+def test_f_picker_lists_board_labels_and_narrows_the_board_live(tmp_path):
+    async def scenario():
+        app = BoardApp(FakeProvider(LABELLED), Query(), interval=60, settings_path=tmp_path / "settings.json")
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            assert isinstance(app.screen, FilterPicker)
+            assert [o.value for o in app.screen.query(PickerOption)] == ["bug", "ux", "wontfix"]
+            await pick(pilot, app, "bug")  # include
+            assert shown_numbers(app) == [1, 3]
+            await pick(pilot, app, "wontfix", times=2)  # exclude
+            assert shown_numbers(app) == [1]
+            assert "labels: +bug -wontfix" in str(app.query_one("#status").render())
+            await pick(pilot, app, "bug", times=2)  # exclude, then off
+            assert shown_numbers(app) == [1, 4]
+            await pilot.press("c")
+            await pilot.pause()
+            assert shown_numbers(app) == [1, 2, 3, 4] and app.filters["Labels"] == {}
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, FilterPicker)
+
+    run(scenario())
+
+
+def test_label_filter_combines_with_text_filter_and_esc_clears_both(tmp_path):
+    async def scenario():
+        app = BoardApp(FakeProvider(LABELLED), Query(), interval=60, settings_path=tmp_path / "settings.json")
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            await pick(pilot, app, "bug")
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.press("slash", *"crash", "enter")
+            await pilot.pause()
+            assert shown_numbers(app) == [3]
+            await pilot.press("escape")
+            await pilot.pause()
+            assert shown_numbers(app) == [1, 2, 3, 4]
+            assert "labels:" not in str(app.query_one("#status").render())
+
+    run(scenario())
+
+
+def test_label_filter_is_saved_per_repo_and_restored(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"auto_remove": True, "filters": {"other:x/y": {"labels": {"ux": "include"}}}}))
+
+    async def choose():
+        app = BoardApp(FakeProvider(LABELLED), Query(), interval=60, settings_path=settings)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            await pick(pilot, app, "wontfix", times=2)
+
+    async def reopen():
+        app = BoardApp(FakeProvider(LABELLED), Query(), interval=60, settings_path=settings)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert shown_numbers(app) == [1, 4]
+            assert "labels: -wontfix" in str(app.query_one("#status").render())
+
+    run(choose())
+    assert json.loads(settings.read_text()) == {
+        "auto_remove": True,
+        "filters": {"other:x/y": {"labels": {"ux": "include"}}, "fake:o/r": {"labels": {"wontfix": "exclude"}}},
+    }
+    run(reopen())
+
+
+def test_clicking_a_picker_option_cycles_that_option(tmp_path):
+    async def scenario():
+        app = BoardApp(FakeProvider(LABELLED), Query(), interval=60, settings_path=tmp_path / "settings.json")
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            option = next(o for o in app.screen.query(PickerOption) if o.value == "ux")
+            await pilot.click(option)
+            await pilot.pause()
+            assert app.filters["Labels"] == {"ux": "include"} and shown_numbers(app) == [2]
 
     run(scenario())
