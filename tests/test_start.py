@@ -1,8 +1,5 @@
-import shlex
-from pathlib import Path
-
 from ticketmaster.model import Ticket
-from ticketmaster.start import StartOptions, build_prompt, session_command
+from ticketmaster.start import build_prompt, claude_args, review_prompt
 
 MAP = ("wayfinder:map",)
 
@@ -32,12 +29,12 @@ def test_custom_wayfinder_command():
     assert build_prompt(ticket(labels=MAP), "/wayfinder") == "/wayfinder https://gh/686"
 
 
-def test_session_command_uses_worktree_and_name():
-    args = shlex.split(session_command(ticket(), StartOptions(cwd=Path("."))))
-    assert args[:5] == ["claude", "-w", "issue-686", "-n", "#686 Attach a deviation reason"]
-    assert args[5].startswith("Work on issue #686")
+def test_claude_args_name_the_session_and_never_use_claude_w():
+    args = claude_args(ticket(), build_prompt(ticket()))
+    assert args[:2] == ["-n", "#686 Attach a deviation reason"] and "-w" not in args
+    assert args[2].startswith("Work on issue #686")
 
 
-def test_session_command_without_worktree():
-    args = shlex.split(session_command(ticket(), StartOptions(cwd=Path("."), worktree=False)))
-    assert "-w" not in args
+def test_review_prompt_points_at_the_issue_and_forbids_pushing():
+    prompt = review_prompt(ticket())
+    assert "https://gh/686" in prompt and "do not push" in prompt
