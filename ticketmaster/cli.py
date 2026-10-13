@@ -35,8 +35,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--limit", type=int, default=300, help="max issues per query (default 300)")
     parser.add_argument("--columns", choices=["auto", "one", "all"], default="auto",
                         help="one column at a time, all side by side, or auto by width (default)")
-    parser.add_argument("--auto-remove", action="store_true",
-                        help="remove Done tickets' worktrees without unsaved work once their agent is idle")
     command = argv[0] if argv and argv[0] in COMMANDS else None
     args = parser.parse_args(argv[1:] if command else argv)
     args.command = command or "open"
@@ -56,8 +54,6 @@ def passthrough(args: argparse.Namespace) -> list[str]:
             out += [f"--{flag}", getattr(args, flag)]
     if args.columns != "auto":
         out += ["--columns", args.columns]
-    if args.auto_remove:
-        out.append("--auto-remove")
     out += ["--interval", f"{args.interval:g}", "--done-days", str(args.done_days), "--limit", str(args.limit)]
     return out
 
@@ -124,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     from .board import BoardApp
-    from .config import load_config
+    from .config import load_config, settings_path
     from .start import DEFAULT_WAYFINDER_COMMAND, Workbench, build_prompt
 
     config = load_config(cwd)
@@ -137,6 +133,6 @@ def main(argv: list[str] | None = None) -> int:
         describe_start=lambda ticket: build_prompt(ticket, workbench.wayfinder_command).splitlines()[0]
         + f"\nworktree: issue-{ticket.number}, in its own herdr workspace",
         columns=args.columns,
-        auto_remove=args.auto_remove or bool(config.get("auto_remove", False)),
+        settings_path=settings_path(),
     ).run()
     return 0

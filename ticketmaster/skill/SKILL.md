@@ -1,7 +1,7 @@
 ---
 name: ticketmaster
 description: Open a live kanban board (Blocked, Ready, In progress, Review, Done) of the current repo's issues in a herdr pane beside the Claude session, where each ticket starts in its own git worktree workspace with Claude as a herdr agent. Works with GitHub, GitLab and Gitea/Forgejo. Use when the user wants to see, track or start the work being done, e.g. a wayfinder map's tickets.
-argument-hint: "[parent-issue] [--label <name>] [--auto-remove] [--repo owner/name] [--provider github|gitlab|gitea] [--host <host>]"
+argument-hint: "[parent-issue] [--label <name>] [--repo owner/name] [--provider github|gitlab|gitea] [--host <host>]"
 ---
 
 Open the board for the repo in the current working directory, in a herdr pane to the right of
@@ -33,8 +33,8 @@ exited), or starts one when there is none. `s` always starts the ticket in a new
 (`issue-<n>`, `issue-<n>-2`…) as herdr agent `issue-<n>`, with `/mattpocock-skills:wayfinder
 <map> <ticket>` for wayfinder tickets or a plain "work on issue" prompt otherwise. `c` starts a
 review session for a Review ticket in a `review-<n>` worktree; `x` removes a Done ticket's
-worktrees; with `--auto-remove` (or `auto_remove = true` in `.ticketmaster.toml`) the board does
-that itself once the agent is idle, keeping worktrees with uncommitted or unpushed work. Cards
+worktrees; `a` toggles auto-remove (saved per user), where the board does that itself once the
+agent is idle, keeping worktrees with uncommitted or unpushed work. Cards
 show each session's agent state (working, needs you, idle, done, no agent).
 `ticketmaster adopt` opens herdr workspaces for older `claude -w` worktrees.
 
