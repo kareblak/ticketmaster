@@ -682,6 +682,19 @@ def test_status_warns_until_the_skills_setup_exists_and_rechecks_on_refresh(tmp_
     run(scenario())
 
 
+def test_missing_doc_warning_also_names_ticketmaster_setup(tmp_path):
+    provider = FakeProvider(TICKETS)
+    provider.name = "github"
+
+    async def scenario():
+        app = BoardApp(provider, Query(), interval=60, repo_root=tmp_path)
+        async with app.run_test(size=(240, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "/setup-matt-pocock-skills, then ticketmaster setup" in status_of(app)
+
+    run(scenario())
+
+
 def test_non_rate_limit_error_keeps_the_interval():
     async def scenario():
         clock = Clock()
@@ -712,6 +725,32 @@ def test_no_warning_when_the_skills_setup_exists(tmp_path):
     run(scenario())
 
 
+def test_status_warns_when_the_wayfinding_rules_are_missing_or_out_of_date(tmp_path):
+    from ticketmaster.wayfinding import setup
+
+    doc = tmp_path / "docs" / "agents" / "issue-tracker.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("# Issue tracker\n")
+    provider = FakeProvider(TICKETS)
+    provider.name = "github"
+
+    async def scenario():
+        app = BoardApp(provider, Query(), interval=60, repo_root=tmp_path)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "run ticketmaster setup" in status_of(app) and "missing" in status_of(app)
+            setup(tmp_path, "github")
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert "ticketmaster setup" not in status_of(app)
+            doc.write_text(doc.read_text().replace("sub-issue", "task list"))
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert "run ticketmaster setup" in status_of(app) and "out of date" in status_of(app)
+
+    run(scenario())
+
+
 def test_sessions_still_start_while_the_setup_warning_shows(tmp_path):
     async def scenario():
         bench = FakeBench()
@@ -737,6 +776,7 @@ def test_help_mentions_the_skills_setup():
             await pilot.pause()
             text = app.screen.text.plain
             assert "/setup-matt-pocock-skills" in text and "docs/agents/issue-tracker.md" in text
+            assert "ticketmaster setup" in text
 
     run(scenario())
 

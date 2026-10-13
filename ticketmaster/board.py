@@ -23,6 +23,7 @@ from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
 from .model import COLUMN_ORDER, Board, Column, Ticket, build_board
 from .providers import Provider, ProviderError, Query, RateLimited
+from .wayfinding import SETUP_COMMAND as WAYFINDING_SETUP, drift
 
 TAG_COLORS = {
     "security": "white on red",
@@ -422,6 +423,9 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  it from the PR's base branch against the issue, and report in the session only.\n")
     text.append(f"  Those skills need the repo set up once with {SETUP_COMMAND} (it writes\n"
                 f"  {SETUP_DOC}); without it a session stops to ask, so the status line warns.\n")
+    text.append(f"  `{WAYFINDING_SETUP}` then writes the wayfinding linking rules (map, blocking, out of\n"
+                f"  scope) into that doc's Wayfinding operations section; the status line warns while\n"
+                f"  they are missing or differ from what this version writes.\n")
 
     heading("The board only reads")
     text.append("  It never writes to the tracker. A session claims its ticket by assigning it, so the\n"
@@ -512,6 +516,7 @@ class BoardApp(App):
         self.herdr_error: str | None = None
         self.repo_root = repo_root  # None: the skills setup is not checked
         self.setup_missing = False
+        self.wayfinding_drift: str | None = None  # "missing" / "outdated" when `ticketmaster setup` should run
         self.board_query = query
         self.interval = interval
         self.clock = clock
@@ -578,6 +583,7 @@ class BoardApp(App):
     def _fetch(self, tickets: bool = True) -> None:
         sessions, herdr_error = self.sessions, None
         self.setup_missing = setup_missing(self.repo_root)
+        self.wayfinding_drift = None if self.repo_root is None else drift(self.repo_root, self.provider.name)
         if self.workbench is not None:
             try:
                 sessions = self.workbench.sessions()
@@ -683,7 +689,11 @@ class BoardApp(App):
         if self.auto_remove:
             status.append(" · auto-remove on", style="green")
         if self.setup_missing:
-            status.append(f"  ⚠ run {SETUP_COMMAND} before starting sessions (no {SETUP_DOC})", style="bold yellow")
+            status.append(f"  ⚠ run {SETUP_COMMAND}, then {WAYFINDING_SETUP}, before starting sessions (no {SETUP_DOC})",
+                          style="bold yellow")
+        elif self.wayfinding_drift:
+            state = "missing from" if self.wayfinding_drift == "missing" else "out of date in"
+            status.append(f"  ⚠ run {WAYFINDING_SETUP}: wayfinding rules {state} {SETUP_DOC}", style="bold yellow")
         for error in (self.last_error, self.herdr_error):
             if error:
                 status.append(f"  ⚠ {error}", style="bold red")

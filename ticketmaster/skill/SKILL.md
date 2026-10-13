@@ -27,6 +27,12 @@ If it fails with a provider error (CLI missing or not logged in, unknown host), 
 as printed and the fix: `gh auth login`, `glab auth login`, `tea login add`, or a
 `.ticketmaster.toml` with `provider`/`host`/`repo` for self-hosted trackers.
 
+If the board's status line says to run `ticketmaster setup`, or the user wants wayfinder and the
+board to agree on how tickets are linked, run `ticketmaster setup` in the repo: it writes the
+"Wayfinding operations" section of `docs/agents/issue-tracker.md` for the repo's tracker (child →
+map, blocking, out-of-scope, English keywords), replacing an older copy in place. Read that section
+before creating or linking wayfinder tickets.
+
 To answer a question about the board's contents without opening a pane, run the same script
 with `snapshot` instead of `open`; it prints every column once as plain text.
 
