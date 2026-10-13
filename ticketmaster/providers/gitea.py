@@ -1,9 +1,9 @@
 """Gitea and Forgejo via REST, reusing the login stored by the `tea` CLI.
 
 Token lookup order: GITEA_TOKEN / FORGEJO_TOKEN env vars, then the `tea` config login whose
-URL matches the repo host. Dependencies come from `/issues/{n}/dependencies` plus `Blocked by:` body lines; there are no
-sub-issues, so a parent board falls back to issues whose body mentions `#<parent>`. Open
-pull requests count as review when their body says `closes/fixes/resolves #<n>`.
+URL matches the repo host. Dependencies come from `/issues/{n}/dependencies` plus `Blocked by:`
+body lines; there are no sub-issues, so a parent board falls back to issues whose body mentions
+`#<parent>`. Open pull requests count as review when their body says `closes/fixes/resolves #<n>`.
 """
 
 from __future__ import annotations
@@ -86,10 +86,10 @@ class GiteaProvider:
     def _issue_or_none(self, number: int) -> dict | None:
         try:
             return self._get(f"/repos/{self.repo}/issues/{number}")
-        except RateLimited:
+        except ProviderError as exc:
+            if "HTTP 404" in str(exc):
+                return None  # deleted, or not visible to this login
             raise
-        except ProviderError:
-            return None  # deleted, or no access
 
     def _list(self, path: str, params: dict, limit: int) -> list[dict]:
         items: list[dict] = []

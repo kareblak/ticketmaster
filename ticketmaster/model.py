@@ -150,7 +150,7 @@ def summarize(body: str, max_chars: int = 90) -> str:
 _BLOCKED_LINE = re.compile(r"^[ \t>*-]*(?:\*\*)?(?:blocked by|blokkert av)(?:\*\*)?[ \t]*:(?:\*\*)?(?P<refs>.*)$",
                            re.MULTILINE | re.IGNORECASE)
 # `## Blocked by` with one `- #3` bullet per blocker, as `to-tickets` writes it.
-_BLOCKED_SECTION = re.compile(r"^##+[ \t]*(?:blocked by|blokkert av)[ \t]*$(?P<refs>.*?)(?=^##?[ \t]|\Z)",
+_BLOCKED_SECTION = re.compile(r"^##+[ \t]*(?:blocked by|blokkert av)[ \t]*:?[ \t]*$(?P<refs>.*?)(?=^#+[ \t]|\Z)",
                               re.MULTILINE | re.DOTALL | re.IGNORECASE)
 _REF = re.compile(r"(?<![\w&/])#(\d+)\b")
 

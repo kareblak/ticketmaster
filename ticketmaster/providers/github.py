@@ -62,8 +62,8 @@ class GitHubProvider:
     def _issue_states(self, numbers: list[int]) -> dict[int, bool]:
         """One query for every number; a number that is no issue or PR answers NOT_FOUND, and is left out."""
         owner, name = self.repo.split("/", 1)
-        fields = " ".join(f"i{n}: issueOrPullRequest(number: {n}) {{ ... on Issue {{ state }} ... on PullRequest {{ state }} }}"
-                          for n in numbers)
+        state = "... on Issue { state } ... on PullRequest { state }"
+        fields = " ".join(f"i{n}: issueOrPullRequest(number: {n}) {{ {state} }}" for n in numbers)
         gql = f"query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
         body = {"query": gql, "variables": {"owner": owner, "name": name}}
         try:

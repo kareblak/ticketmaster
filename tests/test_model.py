@@ -76,6 +76,7 @@ def test_parse_blockers_reads_the_body_line_and_the_section():
     assert parse_blockers("**Blocked by:** #4") == (4,)
     assert parse_blockers("## What\n\nx\n\n## Blocked by\n\n- #30\n- #31\n\n## Notes\n- #99") == (30, 31)
     assert parse_blockers("Blocked by: #3\n\n## Blocked by\n\n- #3\n- #5") == (3, 5)
+    assert parse_blockers("## Blocked by:\n\n- #6\n\n### Notes\n\n- #7") == (6,)
 
 
 def test_parse_blockers_accepts_the_norwegian_line():

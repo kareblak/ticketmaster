@@ -57,7 +57,8 @@ def run_cli(args: list[str], stdin: str | None = None, check: bool = True) -> st
         raise ProviderError(f"`{args[0]}` is not installed or not on PATH") from exc
     except subprocess.TimeoutExpired as exc:
         raise ProviderError(f"`{' '.join(args[:3])}` timed out") from exc
-    if result.returncode != 0 and not (not check and result.stdout.strip()):
+    partial = not check and result.stdout.strip()
+    if result.returncode != 0 and not partial:
         raise tracker_error((result.stderr or result.stdout).strip() or f"`{args[0]}` exited {result.returncode}")
     return result.stdout
 

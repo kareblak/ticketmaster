@@ -271,7 +271,7 @@ def test_github_native_blockers_are_named_and_body_blockers_looked_up(monkeypatc
         body = json.loads(stdin)
         calls.append(body)
         if "q" in body["variables"]:
-            nodes = [node(7, "Blocked by: #50, #51", [(8, "OPEN", "o/r"), (3, "OPEN", "x/y"), (9, "CLOSED", "o/r")])]
+            nodes = [node(7, "Blocked by: #8, #50, #51", [(8, "OPEN", "o/r"), (3, "OPEN", "x/y"), (9, "CLOSED", "o/r")])]
             nodes = nodes if "is:open" in body["variables"]["q"] else []
             return json.dumps({"data": {"search": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}})
         errors = [{"type": "NOT_FOUND", "message": "Could not resolve"}]
@@ -343,3 +343,14 @@ def test_gitea_native_and_body_blockers(monkeypatch):
     [t] = provider.fetch(Query())
     assert (t.blocked_by, t.open_blockers) == (("#2", "x/y#3", "#5"), 3)
     assert provider.viewer() == "gt"
+
+
+def test_gitea_blocker_lookup_failure_is_not_taken_for_closed(monkeypatch):
+    def fake_get(self, path, params=None):
+        if path.endswith("/issues/5"):
+            raise ProviderError("codeberg.org/x: HTTP 502 Bad Gateway")
+        return {}
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    with pytest.raises(ProviderError):
+        gitea.GiteaProvider("o/r", "codeberg.org", token="x")._issue_states([5])
