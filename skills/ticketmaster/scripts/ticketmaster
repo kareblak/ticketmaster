@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Entry point. Resolves symlinks so it works from ~/.claude/skills/ticketmaster.
+set -euo pipefail
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$dir/$src"
+done
+self="$(cd -P "$(dirname "$src")" && pwd)/$(basename "$src")"
+root="$(cd "$(dirname "$self")/../../.." && pwd)"
+python="$root/.venv/bin/python"
+if [ ! -x "$python" ]; then
+  echo "ticketmaster: not installed; run $root/install.sh" >&2
+  exit 3
+fi
+export TICKETMASTER_BIN="$self"
+export PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+exec "$python" -m ticketmaster "$@"
