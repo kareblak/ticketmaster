@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, run_json, tracker_error
+from . import ProviderError, Query, run_cli, run_json, tracker_error
 
 ISSUE_FIELDS = """
   number title url body state closedAt
@@ -62,6 +62,9 @@ class GitHubProvider:
                 if node and node["number"] not in seen:
                     seen[node["number"]] = to_ticket(node, order=0)
         return list(seen.values())
+
+    def delete(self, number: int) -> None:
+        run_cli(["gh", "issue", "delete", str(number), "--repo", f"{self.host}/{self.repo}", "--yes"])
 
     def _sub_issues(self, query: Query) -> list[Ticket]:
         owner, name = self.repo.split("/", 1)

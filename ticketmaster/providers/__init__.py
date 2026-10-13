@@ -1,4 +1,4 @@
-"""Issue-tracker providers. Each one turns a board query into provider-neutral Tickets."""
+"""Issue-tracker providers. Each one turns a board query into provider-neutral Tickets, and can delete an issue."""
 
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ class Provider(Protocol):
     repo: str
 
     def fetch(self, query: Query) -> list[Ticket]: ...
+    def delete(self, number: int) -> None: ...
 
 
 def run_cli(args: list[str], stdin: str | None = None) -> str:
