@@ -197,3 +197,16 @@ def test_up_down_move_between_cards_in_a_column():
             assert app.focused.ticket.number == 1 and column.scroll_y == 0
 
     run(scenario())
+
+
+def test_auto_key():
+    async def scenario():
+        calls = []
+        app = start_app(calls)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "s", "a")
+            await loaded(app, pilot)
+            assert calls == [(1, Placement.AUTO)]
+
+    run(scenario())

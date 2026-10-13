@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
-from dataclasses import dataclass
+import sys
+import threading
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from .launch import Placement, describe, open_beside
+from .auto_layout import GhosttyAutoLayout, LayoutError
+from .launch import Launch, Placement, describe, open_beside, terminal_program
 from .model import Ticket
 
 DEFAULT_WAYFINDER_COMMAND = "/mattpocock-skills:wayfinder"
@@ -19,6 +23,9 @@ class StartOptions:
     worktree: bool = True
     wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND
     claude: str = "claude"
+    # Shared across starts so the auto layout knows which panes it already placed.
+    layout: GhosttyAutoLayout = field(default_factory=GhosttyAutoLayout, compare=False)
+    layout_lock: threading.Lock = field(default_factory=threading.Lock, compare=False)
 
 
 def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND) -> str:
@@ -49,7 +56,22 @@ def session_command(ticket: Ticket, options: StartOptions) -> str:
 def start_session(ticket: Ticket, options: StartOptions, placement: Placement = Placement.TAB) -> str:
     """Opens the session as asked, falling back (split → tab → window). Returns a status line."""
     command = session_command(ticket, options)
+    if placement is Placement.AUTO and auto_layout_supported():
+        try:
+            with options.layout_lock:
+                options.layout.open(options.cwd, shlex.join([login_shell(), "-lc", command]))
+            return f"Started #{ticket.number} in {describe(Launch('Ghostty', Placement.AUTO, []))}"
+        except LayoutError:
+            pass  # fall back to a plain split, then tab, then window
     launch = open_beside(options.cwd, command, placement)
     if launch is None:
         return f"No terminal launcher worked; run: {command}"
     return f"Started #{ticket.number} in {describe(launch)}"
+
+
+def auto_layout_supported() -> bool:
+    return sys.platform == "darwin" and terminal_program(os.environ) == "ghostty" and not os.environ.get("TMUX")
+
+
+def login_shell() -> str:
+    return os.environ.get("SHELL") or "/bin/sh"

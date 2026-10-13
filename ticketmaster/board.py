@@ -106,7 +106,7 @@ class ConfirmStart(ModalScreen[Placement | None]):
 
     DEFAULT_CSS = """
     ConfirmStart { align: center middle; }
-    #dialog { width: 80; height: auto; padding: 1 2; border: thick $accent; background: $surface; }
+    #dialog { width: 96; height: auto; padding: 1 2; border: thick $accent; background: $surface; }
     #prompt { margin-bottom: 1; }
     #buttons { height: auto; align-horizontal: right; }
     #buttons Button { margin-left: 2; }
@@ -115,6 +115,7 @@ class ConfirmStart(ModalScreen[Placement | None]):
         Binding("t", "answer('tab')", "New tab"),
         Binding("r", "answer('split right')", "Pane right"),
         Binding("d", "answer('split down')", "Pane down"),
+        Binding("a", "answer('auto')", "Auto layout"),
         Binding("n,escape", "answer('')", "Cancel"),
     ]
 
@@ -132,6 +133,7 @@ class ConfirmStart(ModalScreen[Placement | None]):
                 yield Button("New tab (t)", id="tab", variant="primary")
                 yield Button("Pane right (r)", id="split-right", variant="primary")
                 yield Button("Pane down (d)", id="split-down", variant="primary")
+                yield Button("Auto (a)", id="auto", variant="primary")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.action_answer(event.button.id.replace("-", " "))

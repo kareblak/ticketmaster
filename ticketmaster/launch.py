@@ -23,6 +23,7 @@ class Placement(Enum):
     SPLIT_DOWN = "split down"
     TAB = "tab"
     WINDOW = "window"
+    AUTO = "auto"  # Ghostty grid around the board, see auto_layout.py; elsewhere a pane to the right
 
     @property
     def is_split(self) -> bool:
@@ -34,6 +35,7 @@ FALLBACKS = {
     Placement.SPLIT_DOWN: [Placement.SPLIT_DOWN, Placement.TAB, Placement.WINDOW],
     Placement.TAB: [Placement.TAB, Placement.WINDOW],
     Placement.WINDOW: [Placement.WINDOW],
+    Placement.AUTO: [Placement.SPLIT_RIGHT, Placement.TAB, Placement.WINDOW],
 }
 
 
@@ -202,4 +204,5 @@ def describe(launch: Launch) -> str:
         Placement.SPLIT_DOWN: f"a {launch.terminal} pane below",
         Placement.TAB: f"a new {launch.terminal} tab",
         Placement.WINDOW: f"a new {launch.terminal} window",
+        Placement.AUTO: f"the {launch.terminal} auto layout",
     }[launch.placement]

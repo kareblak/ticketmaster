@@ -51,7 +51,8 @@ match title, body, labels or assignees), `Esc` clears the filter, `r` refreshes 
 ## Starting work from the board
 
 Select a card in **Ready** and press `s` or double-click it. The board asks where to open the
-session: `t` new tab, `r` pane to the right, `d` pane below (`n` or `Esc` cancels). It runs:
+session: `t` new tab, `r` pane to the right, `d` pane below, `a` auto layout (`n` or `Esc`
+cancels). It runs:
 
 ```
 claude -w issue-<n> -n "#<n> <title>" "<prompt>"
@@ -88,6 +89,22 @@ tmux is checked first, so inside tmux everything opens as tmux panes and windows
 the host terminal. Ghostty splits the focused pane of its front window: the pane you typed `/ticketmaster` in,
 or the board itself when starting a session. Where a terminal can't split, `r`/`d` fall back to
 a tab, then a window.
+
+### Auto layout (`a`, Ghostty on macOS)
+
+Sessions are tiled in the board's tab as a two-row grid, with the board fixed top-left:
+
+```
+1 session    2            3            4                5
+B | 1        B | 1        B | 1        B | 1 | 4        B | 1 | 4
+             2 |          2 | 3        2 | 3            2 | 3 | 5
+```
+
+Ghostty can only split one pane at a time, so the order is fixed: session 1 splits the board
+right, 2 splits the board down, 3 splits session 1 down, then new sessions alternate between
+extending the top and bottom rows to the right. Each split is followed by `equalize_splits`.
+The board remembers which panes it placed; if you close one, the next session starts the
+layout again from the board. Outside Ghostty (or inside tmux), `a` behaves like `r`.
 
 Settings in `.ticketmaster.toml`:
 

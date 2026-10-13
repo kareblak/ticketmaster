@@ -28,7 +28,7 @@ To answer a question about the board's contents without opening a pane, run the 
 with `snapshot` instead of `open`; it prints every column once as plain text.
 
 The board never changes issues. Selecting a Ready card and pressing `s` (or double-clicking it)
-opens a new `claude -w issue-<n>` session in a new tab or a pane right/below (asked with t/r/d), started with
+opens a new `claude -w issue-<n>` session in a new tab, a pane right/below, or a Ghostty auto grid with the board top-left (asked with t/r/d/a), started with
 `/mattpocock-skills:wayfinder <map> <ticket>` for wayfinder tickets or a plain "work on issue"
 prompt otherwise. Column rules (first match wins):
 
