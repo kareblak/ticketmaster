@@ -1,4 +1,4 @@
-"""GitHub via `gh api graphql`: native blockedBy, sub-issues and closing PRs.
+"""GitHub via `gh api graphql`: native blockedBy plus `Blocked by:` body lines, sub-issues and closing PRs.
 
 A parent board is the parent's sub-issues and, for a map, the spec that links to it with a
 `Part of #<map>` line (a sub-issue or not) and the spec's implementation tickets: its sub-issues and
@@ -13,17 +13,15 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import (
-    NotFound, ProviderError, Query, is_map, is_spec, names_parent, resolve_maps, run_cli, run_json, tracker_error,
-    under_spec, with_map,
-)
+from . import (IssueStates, NotFound, ProviderError, Query, blocker_ref, is_map, is_spec, names_parent, resolve_maps,
+               run_cli, run_json, tracker_error, under_spec, with_body_blockers, with_map)
 
 ISSUE_FIELDS = """
   number title url body state closedAt
   author { login }
   assignees(first: 10) { nodes { login } }
   labels(first: 30) { nodes { name } }
-  issueDependenciesSummary { blockedBy }
+  blockedBy(first: 20) { nodes { number state repository { nameWithOwner } } }
   closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { state } }
   parent { number url labels(first: 20) { nodes { name } } }
 """
@@ -62,6 +60,8 @@ query($owner: String!, $name: String!, $number: Int!) {
 }
 """
 
+VIEWER = "query { viewer { login } }"
+
 
 class GitHubProvider:
     name = "github"
@@ -69,14 +69,39 @@ class GitHubProvider:
     def __init__(self, repo: str, host: str = "github.com"):
         self.repo = repo
         self.host = host
+        self.states = IssueStates(self._issue_states)
 
     def fetch(self, query: Query) -> list[Ticket]:
         """The sub-issue parent is the native child→map link; `Part of #<map>` is the fallback."""
-        return resolve_maps(self._fetch(query), self._map)
+        return with_body_blockers(resolve_maps(self._fetch(query), self._map), self.states)
 
     def _fetch(self, query: Query) -> list[Ticket]:
-        if query.parent is not None:
-            return self._sub_issues(query)
+        return self._sub_issues(query) if query.parent is not None else self._search(query)
+
+    def viewer(self) -> str | None:
+        return (self._graphql(VIEWER, {}).get("viewer") or {}).get("login")
+
+    def _issue_states(self, numbers: list[int]) -> dict[int, bool]:
+        """One query for every number; a number that is no issue or PR answers NOT_FOUND, and is left out."""
+        owner, name = self.repo.split("/", 1)
+        state = "... on Issue { state } ... on PullRequest { state }"
+        fields = " ".join(f"i{n}: issueOrPullRequest(number: {n}) {{ {state} }}" for n in numbers)
+        gql = f"query($owner: String!, $name: String!) {{ repository(owner: $owner, name: $name) {{ {fields} }} }}"
+        body = {"query": gql, "variables": {"owner": owner, "name": name}}
+        try:
+            data = json.loads(run_cli(self._args(), stdin=json.dumps(body), check=False))
+        except json.JSONDecodeError as exc:
+            raise ProviderError(f"`gh` returned non-JSON output: {exc}") from exc
+        errors = [e for e in data.get("errors") or [] if e.get("type") != "NOT_FOUND"]
+        if errors or not (data.get("data") or {}).get("repository"):
+            raise tracker_error("; ".join(e.get("message", "") for e in errors) or f"{self.repo} not found")
+        found = data["data"]["repository"]
+        return {n: found[f"i{n}"]["state"] == "OPEN" for n in numbers if found.get(f"i{n}")}
+
+    def _args(self) -> list[str]:
+        return ["gh", "api", "graphql", "--hostname", self.host, "-H", "Content-Type: application/json", "--input", "-"]
+
+    def _search(self, query: Query) -> list[Ticket]:
         since = (datetime.now(timezone.utc) - timedelta(days=query.done_days)).date().isoformat()
         base = f"repo:{self.repo} is:issue"
         if query.label:
@@ -86,7 +111,7 @@ class GitHubProvider:
         for q in searches:
             for node in self._paginate(SEARCH, {"q": q}, ["search"], query.limit):
                 if node and node["number"] not in seen:
-                    seen[node["number"]] = to_ticket(node, order=0)
+                    seen[node["number"]] = to_ticket(node, order=0, repo=self.repo)
         return list(seen.values())
 
     def delete(self, number: int) -> None:
@@ -98,7 +123,7 @@ class GitHubProvider:
 
         def new(nodes: list[dict], links=lambda body: True) -> list[Ticket]:
             taken = {query.parent} | {t.number for t in tickets}
-            return [to_ticket(node, order=0) for node in nodes if node["number"] not in taken and links(node.get("body"))]
+            return [to_ticket(node, order=0, repo=self.repo) for node in nodes if node["number"] not in taken and links(node.get("body"))]
 
         found, subs, refs = self._children(query.parent, query.limit)
         tickets += new(subs)
@@ -145,9 +170,7 @@ class GitHubProvider:
         return (issue["url"], tuple(label["name"] for label in issue["labels"]["nodes"])) if issue else None
 
     def _graphql(self, gql: str, variables: dict) -> dict:
-        body = {"query": gql, "variables": variables}
-        args = ["gh", "api", "graphql", "--hostname", self.host, "-H", "Content-Type: application/json", "--input", "-"]
-        data = run_json(args, stdin=json.dumps(body))
+        data = run_json(self._args(), stdin=json.dumps({"query": gql, "variables": variables}))
         if errors := data.get("errors"):
             message = "; ".join(e.get("message", "") for e in errors)
             if all(e.get("type") == "NOT_FOUND" for e in errors):
@@ -171,9 +194,11 @@ class GitHubProvider:
         return nodes[:limit]
 
 
-def to_ticket(node: dict, order: int) -> Ticket:
+def to_ticket(node: dict, order: int, repo: str = "") -> Ticket:
     prs = node.get("closedByPullRequestsReferences", {}).get("nodes", [])
-    deps = node.get("issueDependenciesSummary") or {}
+    deps = node.get("blockedBy")
+    blocked_by = tuple(blocker_ref(b["number"], (b.get("repository") or {}).get("nameWithOwner", ""), repo)
+                       for b in (deps or {}).get("nodes") or [] if b and b.get("state") == "OPEN")
     parent = node.get("parent") or {}
     return Ticket(
         number=node["number"],
@@ -185,7 +210,8 @@ def to_ticket(node: dict, order: int) -> Ticket:
         author=(node.get("author") or {}).get("login", ""),
         assignees=tuple(a["login"] for a in node["assignees"]["nodes"]),
         labels=tuple(label["name"] for label in node["labels"]["nodes"]),
-        open_blockers=deps.get("blockedBy"),
+        open_blockers=None if deps is None else len(blocked_by),
+        blocked_by=blocked_by,
         has_open_change_request=any(pr.get("state") == "OPEN" for pr in prs),
         order=order,
         parent_number=parent.get("number"),

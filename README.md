@@ -68,7 +68,7 @@ switch columns, `1`–`5` jump to one, `v` shows all side by side (`--columns` s
 | Key            | Column            | Effect                                                              |
 | -------------- | ----------------- | ------------------------------------------------------------------- |
 | `Enter` / double-click | any       | go to the ticket's herdr workspace; with none: start (Ready, In progress) or review (Review) |
-| `s`            | all but Done      | start the ticket in a **new** worktree (always new; asks first)     |
+| `s`            | all but Done      | start the ticket in a **new** worktree (always new; asks first); refused while it is blocked or assigned to someone else |
 | `c`            | Review            | start a review session in a new `review-<n>` worktree               |
 | `x`            | Done              | remove the ticket's worktrees (herdr refuses if one has uncommitted changes) |
 | `a`            | any               | toggle auto-remove of Done tickets' worktrees (see below; saved)    |
@@ -199,7 +199,7 @@ Each issue lands in the first column whose rule matches:
 | ----------- | -------------------------------------------------------------------------- |
 | Done        | closed within `--done-days` (default 7); older closed issues are hidden    |
 | Review      | has a `review:<type>` (or GitLab scoped `review::<type>`) label, or an open PR/MR that closes it |
-| Blocked     | has an open blocking issue, or a `blocked` label                           |
+| Blocked     | has an open blocking issue (native, or listed in the body), or a `blocked` label |
 | In progress | has an assignee                                                            |
 | Ready       | everything else                                                            |
 
@@ -236,8 +236,14 @@ Flags override the file, and the file overrides the remote.
 | GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | issues mentioning `#<parent>`, plus the spec's tickets | closing MRs        |
 | Gitea / Forgejo | REST with the `tea` login token, or `GITEA_TOKEN` / `FORGEJO_TOKEN` | `/dependencies` API | issues mentioning `#<parent>`, plus the spec's tickets | open PRs whose body says `closes/fixes/resolves #<n>` |
 
-Where a provider lacks a feature, the board falls back: no dependency support means only a
-`blocked` label marks an issue Blocked, and no sub-issues means a parent board shows issues
+Besides native links, every provider counts the open issues a body lists on a `Blocked by: #3, #4`
+line (or the older Norwegian `Blokkert av: #3`) or under a `## Blocked by` heading as `- #3` bullets.
+A ticket leaves Blocked once every listed blocker is closed. `s` and `Enter` refuse to start a
+blocked ticket, naming its blockers, and a ticket assigned to someone other than the tracker login
+the board runs as; your own claimed tickets still start.
+
+Where a provider lacks a feature, the board falls back: no dependency support means only body-listed
+blockers or a `blocked` label mark an issue Blocked, and no sub-issues means a parent board shows issues
 whose body mentions `#<parent>`.
 
 GitHub's GraphQL budget is 5,000 points an hour. Every board makes 2 searches per refresh
