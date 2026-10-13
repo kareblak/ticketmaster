@@ -103,8 +103,8 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
     if column is Column.REVIEW and not ticket.review_tags and ticket.has_open_change_request:
         chips.append(" PR open ", style="black on grey70")
         chips.append(" ")
-    if column is Column.BLOCKED and ticket.open_blockers:
-        chips.append(f"⛔ {ticket.open_blockers} ", style="red")
+    if column is Column.BLOCKED and (ticket.blocked_by or ticket.open_blockers):
+        chips.append(f"⛔ {' '.join(ticket.blocked_by) or ticket.open_blockers} ", style="red")
     as_chips = {hold.lower()} if hold else set()
     if ticket.is_out_of_scope:
         as_chips.add(OUT_OF_SCOPE_LABEL)

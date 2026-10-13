@@ -5,9 +5,9 @@ from datetime import datetime, timezone
 import pytest
 
 from ticketmaster.board import (BoardApp, Card, FilterPicker, HelpScreen, Pacer, PickerOption, passes_authors,
-                               passes_labels, tag_style)
+                               passes_labels, render_card, tag_style)
 from ticketmaster.herdr import Session
-from ticketmaster.model import Ticket
+from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
 from ticketmaster.upgrade import UPGRADE_NOTICE as NOTICE
 
@@ -1411,3 +1411,35 @@ def test_no_notice_when_the_check_finds_nothing_or_fails(update_check):
             assert "upgrade" not in str(app.query_one("#status").render())
 
     run(scenario())
+
+
+def blocked_card(**fields) -> str:
+    return render_card(Ticket(number=5, title="Waits", url="u5", is_open=True, **fields), Column.BLOCKED).plain
+
+
+def test_blocked_card_lists_each_open_blocker_in_order():
+    assert "⛔ #12 " in blocked_card(blocked_by=("#12",), open_blockers=1)
+    many = tuple(f"#{n}" for n in range(20, 0, -1))
+    assert f"⛔ {' '.join(many)} " in blocked_card(blocked_by=many, open_blockers=len(many))
+
+
+def test_blocked_card_names_blockers_in_another_repo():
+    assert "⛔ #3 other/lib#12 " in blocked_card(blocked_by=("#3", "other/lib#12"), open_blockers=2)
+
+
+def test_blocked_card_without_refs_keeps_the_count_and_a_label_only_card_shows_no_chip():
+    assert "⛔ 2 " in blocked_card(open_blockers=2)
+    assert "⛔" not in blocked_card(labels=("blocked",))
+    assert "⛔" not in blocked_card(labels=("blocked",), open_blockers=0)
+
+
+def test_snapshot_lists_a_blocked_tickets_open_blockers(monkeypatch, capsys):
+    from ticketmaster import cli, config
+
+    tickets = [BLOCKED, Ticket(number=7, title="Free", url="u7", is_open=True),
+               Ticket(number=8, title="Counted", url="u8", is_open=True, open_blockers=1)]
+    monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(tickets))
+    assert cli.main(["snapshot"]) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "  #5 Waits blocked by #1, #9" in lines
+    assert "  #7 Free" in lines and "  #8 Counted" in lines
