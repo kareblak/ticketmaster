@@ -155,6 +155,102 @@ class ConfirmStart(ModalScreen[Placement | None]):
         self.dismiss(chosen)
 
 
+PLACEMENT_HELP = {
+    Placement.WORKSPACE: "herdr creates a worktree workspace and starts Claude in it as a herdr agent",
+    Placement.TAB: "a new tab running claude -w issue-<n>",
+    Placement.SPLIT_RIGHT: "a pane to the right running claude -w issue-<n>",
+    Placement.SPLIT_DOWN: "a pane below running claude -w issue-<n>",
+    Placement.AUTO: "tiles session panes around the board (Ghostty on macOS)",
+}
+
+
+def key_help(app: App) -> list[tuple[str, str]]:
+    """(keys, description) for each described binding; neighbours sharing a description merge."""
+    rows: list[tuple[str, str]] = []
+    for binding in app.BINDINGS:
+        if not isinstance(binding, Binding) or not binding.description:
+            continue
+        keys = " ".join(app.get_key_display(Binding(key.strip(), binding.action)) for key in binding.key.split(","))
+        if rows and rows[-1][1] == binding.description:
+            keys = f"{rows.pop()[0]} {keys}"
+        rows.append((keys, binding.description))
+    return rows
+
+
+def help_text(keys: list[tuple[str, str]], placements: tuple[Placement, ...], query: Query) -> Text:
+    text = Text()
+
+    def heading(title: str) -> None:
+        text.append(("\n" if text else "") + title + "\n", style="bold underline")
+
+    heading("Keys")
+    width = max(len(k) for k, _ in keys)
+    for keys_, description in keys:
+        text.append(f"  {keys_:<{width}}  ", style="bold cyan")
+        text.append(description + "\n")
+    text.append("  Click selects a card, double-click starts a session on it.\n", style="dim")
+
+    heading("Columns")
+    for column, rule in [
+        (Column.BLOCKED, "open, with an open blocking issue or a 'blocked' label"),
+        (Column.READY, "open, unassigned and not blocked: these can be started"),
+        (Column.IN_PROGRESS, "open and assigned to someone"),
+        (Column.REVIEW, "a review:<kind> label or an open pull/merge request"),
+        (Column.DONE, f"closed in the last {query.done_days} days"),
+    ]:
+        text.append(f"  {column.value:<13}", style=f"bold {COLUMN_COLORS[column]}")
+        text.append(rule + "\n")
+
+    heading("Scope")
+    current = "parent" if query.parent else "--label" if query.label else "no filter"
+    for name, rule in [
+        ("no filter", "your open issues, unassigned open issues and your recently closed ones"),
+        ("parent", "the sub-issues of one issue, e.g. a wayfinder map (ticketmaster 42)"),
+        ("--label", "issues with that label (ticketmaster --label NAME)"),
+    ]:
+        active = name == current
+        text.append(f"  {name:<11}", style="bold" if active else "")
+        text.append(rule + ("  ← this board" if active else "") + "\n")
+
+    heading("Starting a session")
+    text.append("  Select a Ready card and press s. Pick where it opens (n or Esc cancels):\n")
+    for placement in placements:
+        key, label = PLACEMENT_KEYS[placement]
+        text.append(f"  {key}  ", style="bold cyan")
+        text.append(f"{label}: {PLACEMENT_HELP[placement]}\n")
+    text.append("  Each issue gets its own git worktree, issue-<n>. The prompt depends on the ticket:\n")
+    for kind, prompt in [
+        ("wayfinder map", "the wayfinder skill with the map's URL"),
+        ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs"),
+        ("plain issue", "work on the issue, assigning it to yourself first"),
+    ]:
+        text.append(f"  {kind:<18}", style="bold")
+        text.append(prompt + "\n")
+
+    heading("The board only reads")
+    text.append("  It never writes to the tracker. A session claims its ticket by assigning it, so the\n"
+                "  card moves to In progress on the next refresh; until then it shows ▶ session started.")
+    return text
+
+
+class HelpScreen(ModalScreen[None]):
+    """What the board shows and how to drive it. Esc, ? or q closes it."""
+
+    DEFAULT_CSS = """
+    HelpScreen { align: center middle; }
+    #help { width: 100; max-width: 100%; height: auto; max-height: 100%; padding: 1 2; border: thick $accent; background: $surface; }
+    """
+    BINDINGS = [Binding("escape,question_mark,q", "dismiss", "Close")]
+
+    def __init__(self, keys: list[tuple[str, str]], placements: tuple[Placement, ...], query: Query):
+        super().__init__()
+        self.text = help_text(keys, placements, query)
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="help"):
+            yield Static(self.text)
+
+
 class BoardApp(App):
     TITLE = "ticketmaster"
     AUTO_FOCUS = None  # otherwise the hidden filter input grabs focus and eats keystrokes
@@ -178,12 +274,13 @@ class BoardApp(App):
         Binding("enter", "open", "Open"),
         Binding("s", "start", "Start session"),
         Binding("v", "toggle_view", "One/all columns"),
-        *[Binding(str(i + 1), f"column({i})", show=False) for i in range(len(COLUMN_ORDER))],
-        Binding("up,k", "move(0,-1)", show=False),
-        Binding("down,j", "move(0,1)", show=False),
-        Binding("left,h", "move(-1,0)", show=False),
-        Binding("right,l", "move(1,0)", show=False),
-        Binding("escape", "clear_filter", show=False),
+        Binding("question_mark", "help", "Help"),
+        *[Binding(str(i + 1), f"column({i})", "Show column", show=False) for i in range(len(COLUMN_ORDER))],
+        Binding("up,k", "move(0,-1)", "Move up", show=False),
+        Binding("down,j", "move(0,1)", "Move down", show=False),
+        Binding("left,h", "move(-1,0)", "Move left", show=False),
+        Binding("right,l", "move(1,0)", "Move right", show=False),
+        Binding("escape", "clear_filter", "Clear the filter", show=False),
     ]
 
     def __init__(
@@ -393,6 +490,9 @@ class BoardApp(App):
     def _start(self, ticket: Ticket, placement: Placement) -> None:
         message = self.starter(ticket, placement)
         self.call_from_thread(self.notify, message)
+
+    def action_help(self) -> None:
+        self.push_screen(HelpScreen(key_help(self), self.placements, self.board_query))
 
     def action_filter(self) -> None:
         box = self.query_one("#filter", Input)

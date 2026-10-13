@@ -56,7 +56,8 @@ Scope:
 
 Keys: arrows or `hjkl` move between cards (or click one), `Enter` opens the issue in the
 browser, `s` or a double-click starts a session on it (see below), `/` filters (every word must
-match title, body, labels or assignees), `Esc` clears the filter, `r` refreshes now, `q` quits.
+match title, body, labels or assignees), `Esc` clears the filter, `r` refreshes now, `?` shows
+help (keys, columns, scope and session starting), `q` quits.
 
 ## Starting work from the board
 

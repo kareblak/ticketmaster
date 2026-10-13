@@ -1,6 +1,6 @@
 import asyncio
 
-from ticketmaster.board import HERDR_PLACEMENTS, BoardApp, Card
+from ticketmaster.board import HERDR_PLACEMENTS, BoardApp, Card, HelpScreen
 from ticketmaster.launch import Placement
 from ticketmaster.model import Ticket
 from ticketmaster.providers import ProviderError, Query
@@ -260,5 +260,28 @@ def test_herdr_placements_offer_a_workspace():
             await pilot.press("w")
             await loaded(app, pilot)
             assert calls == [(1, Placement.WORKSPACE)]
+
+    run(scenario())
+
+
+def test_help_lists_every_visible_binding_and_closes_without_quitting():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, placements=HERDR_PLACEMENTS)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            for close in ("escape", "question_mark", "q"):
+                await pilot.press("question_mark")
+                await pilot.pause()
+                assert isinstance(app.screen, HelpScreen)
+                text = app.screen.text.plain
+                for binding in app.BINDINGS:
+                    if binding.show:
+                        assert binding.description in text
+                        assert app.get_key_display(binding) in text
+                assert "Worktree workspace" in text and "herdr agent" in text
+                await pilot.press(close)
+                await pilot.pause()
+                assert not isinstance(app.screen, HelpScreen) and app.is_running
 
     run(scenario())
