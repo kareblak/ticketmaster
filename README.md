@@ -72,6 +72,7 @@ switch columns, `1`–`5` jump to one, `v` shows all side by side (`--columns` s
 | `x`            | Done              | remove the ticket's worktrees (herdr refuses if one has uncommitted changes) |
 | `a`            | any               | toggle auto-remove of Done tickets' worktrees (see below; saved)    |
 | `o`            | any               | open the issue in the browser                                       |
+| `Backspace` `Delete` | Blocked, Ready, Done | delete the issue from the tracker (asks first; cannot be undone; its worktrees are left behind) |
 | `/` `Esc` `r` `q` |                | filter, clear both filters, refresh now, quit                       |
 | `f`            | any               | filter picker: labels cycle include → exclude → off, authors on/off (see below; saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
@@ -137,9 +138,16 @@ restored when the board reopens; a saved label or author that is no longer on th
 until it comes back. This filters what the board shows, unlike
 `--label`, which scopes the query.
 
-The board never writes to the tracker: wayfinder claims its tickets by assigning them, and the
-implement prompt tells the session to do the same, so the card moves to In progress on the next
-refresh.
+The board writes to the tracker only to delete an issue: wayfinder claims its tickets by assigning
+them, and the implement prompt tells the session to do the same, so the card moves to In progress
+on the next refresh.
+
+`Backspace` or `Delete` on a Blocked, Ready or Done card deletes the issue after a confirm dialog
+(`gh issue delete`, GitLab's and Gitea's issue `DELETE` endpoints). In progress and Review cards
+are refused. The ticket's worktrees are not removed; the dialog lists them so you can remove them
+in herdr yourself. All three trackers let only admins or owners delete issues; the tracker's refusal shows as an
+error notification and the board stays as it was. In the `/` filter input, `Backspace` edits the
+text as usual.
 
 ## Wayfinding rules
 

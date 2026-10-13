@@ -7,10 +7,11 @@ issues whose description mentions `#<parent>`.
 from __future__ import annotations
 
 import json
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, mentions_parent, on_map_board, resolve_maps, run_json, tracker_error
+from . import ProviderError, Query, mentions_parent, on_map_board, resolve_maps, run_cli, run_json, tracker_error
 
 ISSUES = """
 query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
@@ -64,6 +65,10 @@ class GitLabProvider:
             tickets = [t for t in tickets if t.number != query.parent and mentions_parent(t.body, query.parent)]
             tickets = on_map_board(tickets, query.parent, self._map(query.parent))
         return resolve_maps(tickets, self._map)
+
+    def delete(self, number: int) -> None:
+        project = urllib.parse.quote(self.repo, safe="")
+        run_cli(["glab", "api", "--hostname", self.host, "-X", "DELETE", f"projects/{project}/issues/{number}"])
 
     def _map(self, iid: int) -> tuple[str, tuple[str, ...]] | None:
         issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(iid)}).get("project") or {}).get("issue")
