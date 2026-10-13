@@ -1,8 +1,8 @@
 # ticketmaster
 
 A live terminal kanban board of issue-tracker work, packaged as a Claude Code skill. Run
-`/ticketmaster` in Claude Code (or `ticketmaster` in a shell) and the board opens in a new
-terminal window, refreshing every 5 seconds.
+`/ticketmaster` in Claude Code and the board opens in a split pane beside the session; run
+`ticketmaster` in a shell and it takes over that pane. It refreshes every 5 seconds.
 
 ```
 Blocked (2)        Ready (3)          In progress (1)    Review (1)               Done (2)
@@ -31,8 +31,11 @@ ticketmaster [open|board|snapshot] [parent] [--label NAME] [--repo OWNER/NAME]
 
 | Command    | Effect                                                    |
 | ---------- | --------------------------------------------------------- |
-| `open`     | default; opens the board in a new terminal window         |
+| `open`     | opens the board beside the caller: split pane, else tab, else window |
 | `board`    | runs the board in the current terminal                    |
+
+With no command, `ticketmaster` runs `board` when started from a terminal and `open` otherwise
+(Claude Code's shell has no TTY, so `/ticketmaster` gets a split).
 | `snapshot` | prints every column once as plain text                    |
 
 Scope:
@@ -48,7 +51,7 @@ match title, body, labels or assignees), `Esc` clears the filter, `r` refreshes 
 ## Starting work from the board
 
 Select a card in **Ready** and press `s` or double-click it. After you confirm with `y`, a new
-terminal window opens running:
+tab opens running:
 
 ```
 claude -w issue-<n> -n "#<n> <title>" "<prompt>"
@@ -67,6 +70,23 @@ The board never writes to the tracker: wayfinder claims its tickets by assigning
 plain prompt tells the session to do the same, so the card moves to In progress on the next
 refresh. Until then it shows "▶ session started", and the board refuses to start the same
 ticket twice. Only Ready tickets can be started.
+
+## Terminal support
+
+| Terminal        | Split (board)                  | Tab (sessions)           |
+| --------------- | ------------------------------ | ------------------------ |
+| tmux (any host) | `split-window -h`              | `new-window`             |
+| Ghostty 1.3+ (macOS) | AppleScript split of the focused pane | AppleScript new tab |
+| iTerm2          | split current session          | new tab                  |
+| WezTerm         | `wezterm cli split-pane`       | `wezterm cli spawn`      |
+| kitty           | `kitty @ launch` vsplit (needs `allow_remote_control`) | `--type=tab` |
+| Terminal.app    | new window                     | new window (no tab API)  |
+| gnome-terminal  | new tab                        | `--tab`                  |
+| others (Linux)  | new window (ghostty, konsole, x-terminal-emulator) | new window |
+
+tmux is checked first, so inside tmux everything opens as tmux panes and windows regardless of
+the host terminal. Ghostty targets the focused pane of its front window, which is the pane you
+typed `/ticketmaster` in.
 
 Settings in `.ticketmaster.toml`:
 

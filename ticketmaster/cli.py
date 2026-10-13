@@ -1,4 +1,8 @@
-"""Command line: `open` (new window), `board` (run here), `snapshot` (print once)."""
+"""Command line: `open` (split beside the caller), `board` (run here), `snapshot` (print once).
+
+With no command, a terminal runs the board in place; anything else (e.g. Claude Code's shell,
+which has no TTY) opens it beside the caller.
+"""
 
 from __future__ import annotations
 
@@ -11,9 +15,15 @@ from .model import COLUMN_ORDER, build_board
 from .providers import ProviderError, Query
 
 
+COMMANDS = ("open", "board", "snapshot")
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(prog="ticketmaster", description="Live kanban board of issue-tracker work.")
-    parser.add_argument("command", nargs="?", default="open", choices=["open", "board", "snapshot"])
+    parser = argparse.ArgumentParser(
+        prog="ticketmaster",
+        usage="ticketmaster [open|board|snapshot] [parent] [options]",
+        description="Live kanban board of issue-tracker work.",
+    )
     parser.add_argument("parent", nargs="?", type=parse_number, help="parent issue: show its sub-issues")
     parser.add_argument("--label", help="show issues with this label")
     parser.add_argument("--repo", help="owner/name (default: from the git remote)")
@@ -23,7 +33,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--done-days", type=int, default=7, help="days closed issues stay in Done (default 7)")
     parser.add_argument("--limit", type=int, default=300, help="max issues per query (default 300)")
     parser.add_argument("--no-worktree", action="store_true", help="start sessions without `claude -w`")
-    return parser.parse_args(argv)
+    command = argv[0] if argv and argv[0] in COMMANDS else None
+    args = parser.parse_args(argv[1:] if command else argv)
+    args.command = command
+    return args
 
 
 def parse_number(value: str) -> int:
@@ -43,8 +56,13 @@ def passthrough(args: argparse.Namespace) -> list[str]:
     return out
 
 
+def default_command() -> str:
+    return "board" if sys.stdin.isatty() and sys.stdout.isatty() else "open"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    args.command = args.command or default_command()
     cwd = Path.cwd()
     from .config import resolve_provider
 
@@ -56,13 +74,13 @@ def main(argv: list[str] | None = None) -> int:
     query = Query(parent=args.parent, label=args.label, done_days=args.done_days, limit=args.limit)
 
     if args.command == "open":
-        from .launch import board_command, open_window
+        from .launch import Placement, board_command, describe, open_beside
 
         entrypoint = Path(os.environ.get("TICKETMASTER_BIN", sys.argv[0])).resolve()
         command = board_command(entrypoint, passthrough(args))
-        terminal = open_window(cwd, command)
-        if terminal:
-            print(f"Board opened in a new {terminal} window for {provider.name}:{provider.repo}.")
+        launch = open_beside(cwd, command, Placement.SPLIT)
+        if launch:
+            print(f"Board opened in {describe(launch)} for {provider.name}:{provider.repo}.")
         else:
             print(f"No terminal launcher worked. Run this in another window:\n  {command}")
         return 0

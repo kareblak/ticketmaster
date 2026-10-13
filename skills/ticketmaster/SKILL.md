@@ -1,10 +1,12 @@
 ---
 name: ticketmaster
-description: Open a live terminal kanban board (Blocked, Ready, In progress, Review, Done) of the current repo's issues in a new terminal window. Works with GitHub, GitLab and Gitea/Forgejo. Use when the user wants to see or track the work being done, e.g. a wayfinder map's tickets.
+description: Open a live terminal kanban board (Blocked, Ready, In progress, Review, Done) of the current repo's issues in a split pane beside the Claude session. Works with GitHub, GitLab and Gitea/Forgejo. Use when the user wants to see or track the work being done, e.g. a wayfinder map's tickets.
 argument-hint: "[parent-issue] [--label <name>] [--repo owner/name] [--provider github|gitlab|gitea] [--host <host>]"
 ---
 
-Open the board for the repo in the current working directory:
+Open the board for the repo in the current working directory. It appears in a split pane next to
+this session (tmux, Ghostty, iTerm2, WezTerm, kitty), or in a new tab or window where the terminal
+can't split:
 
 ```bash
 ~/.claude/skills/ticketmaster/scripts/ticketmaster open $ARGUMENTS
@@ -15,18 +17,18 @@ Open the board for the repo in the current working directory:
 - `--label <name>`: issues with that label.
 
 Then reply with the script's one-line result. If it printed a command because no terminal
-launcher worked, give the user that command to paste into another window.
+launcher worked, give the user that command to run in a pane of their own.
 
 If the script exits with "not installed", run the `install.sh` it names, then retry once.
 If it fails with a provider error (CLI missing or not logged in, unknown host), report the error
 as printed and the fix: `gh auth login`, `glab auth login`, `tea login add`, or a
 `.ticketmaster.toml` with `provider`/`host`/`repo` for self-hosted trackers.
 
-To answer a question about the board's contents without opening a window, run the same script
+To answer a question about the board's contents without opening a pane, run the same script
 with `snapshot` instead of `open`; it prints every column once as plain text.
 
 The board never changes issues. Selecting a Ready card and pressing `s` (or double-clicking it)
-opens a new `claude -w issue-<n>` session in its own window, started with
+opens a new `claude -w issue-<n>` session in a new tab, started with
 `/mattpocock-skills:wayfinder <map> <ticket>` for wayfinder tickets or a plain "work on issue"
 prompt otherwise. Column rules (first match wins):
 

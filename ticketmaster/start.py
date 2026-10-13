@@ -1,4 +1,4 @@
-"""Start a Ready ticket in a new Claude Code session, in its own window and git worktree."""
+"""Start a Ready ticket in a new Claude Code session, in a new tab and its own git worktree."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import shlex
 from dataclasses import dataclass
 from pathlib import Path
 
-from .launch import open_window
+from .launch import Placement, describe, open_beside
 from .model import Ticket
 
 DEFAULT_WAYFINDER_COMMAND = "/mattpocock-skills:wayfinder"
@@ -47,9 +47,9 @@ def session_command(ticket: Ticket, options: StartOptions) -> str:
 
 
 def start_session(ticket: Ticket, options: StartOptions) -> str:
-    """Opens the session window. Returns a one-line status for the board."""
+    """Opens the session in a new tab (a window where tabs aren't supported). Returns a status line."""
     command = session_command(ticket, options)
-    terminal = open_window(options.cwd, command)
-    if terminal is None:
+    launch = open_beside(options.cwd, command, Placement.TAB)
+    if launch is None:
         return f"No terminal launcher worked; run: {command}"
-    return f"Started #{ticket.number} in a new {terminal} window"
+    return f"Started #{ticket.number} in {describe(launch)}"
