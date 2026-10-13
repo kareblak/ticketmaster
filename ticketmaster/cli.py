@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from . import herdr
-from .model import COLUMN_ORDER, build_board
+from .model import COLUMN_ORDER, Column, build_board
 from .providers import ProviderError, Query
 
 
@@ -130,7 +130,8 @@ def main(argv: list[str] | None = None) -> int:
                 tags = "".join(f" [{k}]" for k in t.review_tags)
                 who = " " + ",".join("@" + a for a in t.assignees) if t.assignees else ""
                 warn = f" ⚠ {t.map_warning}" if t.map_missing else ""
-                print(f"  #{t.number} {t.title}{tags}{who}{warn}")
+                blockers = f" blocked by {', '.join(t.blocked_by)}" if column is Column.BLOCKED and t.blocked_by else ""
+                print(f"  #{t.number} {t.title}{tags}{who}{warn}{blockers}")
         return 0
 
     from .board import BoardApp
