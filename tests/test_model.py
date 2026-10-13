@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from ticketmaster.model import Column, Ticket, build_board, classify, parse_blockers, summarize
+from ticketmaster.model import Column, Ticket, build_board, classify, parse_blockers, part_of, summarize
 
 NOW = datetime(2026, 10, 13, 12, tzinfo=timezone.utc)
 
@@ -101,3 +101,41 @@ def test_start_refusal_lets_the_claimant_and_unknown_viewers_start():
     assert ticket().start_refusal("me") is None
     assert ticket(assignees=("Me", "bob")).start_refusal("me") is None
     assert ticket(assignees=("bob",)).start_refusal(None) is None
+
+
+MAP = ("wayfinder:map",)
+
+
+def test_only_the_four_known_wayfinder_types_count():
+    for kind in ("research", "prototype", "grilling", "task"):
+        assert ticket(labels=(f"wayfinder:{kind}",)).wayfinder_type == kind
+    assert ticket(labels=("wayfinder:epic",)).wayfinder_type is None
+    assert ticket(labels=("wayfinder:",)).wayfinder_type is None
+    assert ticket(labels=MAP).wayfinder_type is None
+
+
+def test_gitlab_scoped_wayfinder_labels_are_accepted():
+    assert ticket(labels=("wayfinder::grilling",)).wayfinder_type == "grilling"
+    assert ticket(labels=("wayfinder::map",)).is_wayfinder_map
+    t = ticket(labels=("wayfinder::task",), parent_url="https://gl/1", parent_labels=("wayfinder::map",))
+    assert t.is_wayfinder_ticket
+
+
+def test_typed_ticket_without_a_map_parent_has_its_map_missing():
+    assert ticket(labels=("wayfinder:research",)).map_missing
+    assert ticket(labels=("wayfinder:task",), parent_url="https://gh/9", parent_labels=("epic",)).map_missing
+    resolved = ticket(labels=("wayfinder:task",), parent_url="https://gh/9", parent_labels=MAP)
+    assert resolved.is_wayfinder_ticket and not resolved.map_missing
+    assert not ticket(labels=("wayfinder:epic",)).map_missing and not ticket().map_missing
+
+
+def test_part_of_reads_the_first_line_of_the_body():
+    assert part_of("Part of #12\n\nMore") == 12
+    assert part_of("\n  Part of #7 \r\nrest") == 7
+    assert part_of("Intro\nPart of #12") is None
+    assert part_of("Part of #x") is None and part_of("") is None
+    assert part_of("Part of #12, and of #13") is None
+
+
+def test_wayfinder_label_prefix_is_case_insensitive():
+    assert ticket(labels=("Wayfinder:Task",)).wayfinder_type == "task"

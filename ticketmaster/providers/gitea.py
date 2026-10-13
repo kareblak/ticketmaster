@@ -15,13 +15,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..model import Ticket, parse_time
-from . import (IssueStates, ProviderError, Query, RateLimited, blocker_ref, mentions_parent, tracker_error,
-               with_body_blockers)
+from . import (IssueStates, NotFound, ProviderError, Query, RateLimited, blocker_ref, mentions_parent,
+               on_map_board, resolve_maps, tracker_error, with_body_blockers)
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -60,13 +59,15 @@ class GiteaProvider:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
         tickets = [to_ticket(i, blockers.get(i["number"]), pr_bodies) for i in raw]
         if query.parent is not None:
-            parent = self._get(f"/repos/{self.repo}/issues/{query.parent}")
-            labels = tuple(label["name"] for label in parent.get("labels") or [])
-            tickets = [
-                replace(t, parent_number=query.parent, parent_url=parent["html_url"], parent_labels=labels)
-                for t in tickets
-            ]
-        return with_body_blockers(tickets, self.states)
+            tickets = on_map_board(tickets, query.parent, self._map(query.parent))
+        return with_body_blockers(resolve_maps(tickets, self._map), self.states)
+
+    def _map(self, number: int) -> tuple[str, tuple[str, ...]] | None:
+        try:
+            issue = self._get(f"/repos/{self.repo}/issues/{number}")
+        except NotFound:
+            return None
+        return issue["html_url"], tuple(label["name"] for label in issue.get("labels") or [])
 
     def delete(self, number: int) -> None:
         self._request("DELETE", f"/repos/{self.repo}/issues/{number}")
@@ -89,10 +90,8 @@ class GiteaProvider:
     def _issue_or_none(self, number: int) -> dict | None:
         try:
             return self._get(f"/repos/{self.repo}/issues/{number}")
-        except ProviderError as exc:
-            if "HTTP 404" in str(exc):
-                return None  # deleted, or not visible to this login
-            raise
+        except NotFound:
+            return None  # deleted, or not visible to this login
 
     def _list(self, path: str, params: dict, limit: int) -> list[dict]:
         items: list[dict] = []
@@ -120,6 +119,8 @@ class GiteaProvider:
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 raise RateLimited(f"{self.host}{path}: HTTP 429 rate limit exceeded") from exc
+            if exc.code == 404:
+                raise NotFound(f"{self.host}{path}: HTTP 404 {exc.reason}") from exc
             raise tracker_error(f"{self.host}{path}: HTTP {exc.code} {exc.reason}") from exc
         except urllib.error.URLError as exc:
             raise ProviderError(f"{self.host}: {exc.reason}") from exc

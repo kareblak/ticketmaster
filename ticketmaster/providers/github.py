@@ -6,7 +6,8 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import IssueStates, ProviderError, Query, blocker_ref, run_cli, run_json, tracker_error, with_body_blockers
+from . import (IssueStates, NotFound, ProviderError, Query, blocker_ref, resolve_maps, run_cli, run_json,
+               tracker_error, with_body_blockers)
 
 ISSUE_FIELDS = """
   number title url body state closedAt
@@ -40,6 +41,12 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
 }
 """ % ISSUE_FIELDS
 
+ISSUE = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { issue(number: $number) { url labels(first: 30) { nodes { name } } } }
+}
+"""
+
 VIEWER = "query { viewer { login } }"
 
 
@@ -52,12 +59,14 @@ class GitHubProvider:
         self.states = IssueStates(self._issue_states)
 
     def fetch(self, query: Query) -> list[Ticket]:
-        tickets = self._sub_issues(query) if query.parent is not None else self._search(query)
-        return with_body_blockers(tickets, self.states)
+        """The sub-issue parent is the native child→map link; `Part of #<map>` is the fallback."""
+        return with_body_blockers(resolve_maps(self._fetch(query), self._map), self.states)
+
+    def _fetch(self, query: Query) -> list[Ticket]:
+        return self._sub_issues(query) if query.parent is not None else self._search(query)
 
     def viewer(self) -> str | None:
-        data = run_json(self._args(), stdin=json.dumps({"query": VIEWER}))
-        return ((data.get("data") or {}).get("viewer") or {}).get("login")
+        return (self._graphql(VIEWER, {}).get("viewer") or {}).get("login")
 
     def _issue_states(self, numbers: list[int]) -> dict[int, bool]:
         """One query for every number; a number that is no issue or PR answers NOT_FOUND, and is left out."""
@@ -102,15 +111,29 @@ class GitHubProvider:
         nodes = self._paginate(SUB_ISSUES, variables, path, query.limit)
         return [to_ticket(node, order=index, repo=self.repo) for index, node in enumerate(nodes)]
 
+    def _map(self, number: int) -> tuple[str, tuple[str, ...]] | None:
+        owner, name = self.repo.split("/", 1)
+        try:
+            data = self._graphql(ISSUE, {"owner": owner, "name": name, "number": number})
+        except NotFound:
+            return None
+        issue = (data.get("repository") or {}).get("issue")
+        return (issue["url"], tuple(label["name"] for label in issue["labels"]["nodes"])) if issue else None
+
+    def _graphql(self, gql: str, variables: dict) -> dict:
+        data = run_json(self._args(), stdin=json.dumps({"query": gql, "variables": variables}))
+        if errors := data.get("errors"):
+            message = "; ".join(e.get("message", "") for e in errors)
+            if all(e.get("type") == "NOT_FOUND" for e in errors):
+                raise NotFound(message)
+            raise tracker_error(message)
+        return data["data"]
+
     def _paginate(self, gql: str, variables: dict, path: list[str], limit: int) -> list[dict]:
         nodes: list[dict] = []
         after = None
         while len(nodes) < limit:
-            body = {"query": gql, "variables": {**variables, "after": after}}
-            data = run_json(self._args(), stdin=json.dumps(body))
-            if data.get("errors"):
-                raise tracker_error("; ".join(e.get("message", "") for e in data["errors"]))
-            page = data["data"]
+            page = self._graphql(gql, {**variables, "after": after})
             for key in path:
                 page = (page or {}).get(key)
             if page is None:

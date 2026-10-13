@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import json
 import urllib.parse
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import (IssueStates, ProviderError, Query, blocker_ref, mentions_parent, run_cli, run_json, tracker_error,
-               with_body_blockers)
+from . import (IssueStates, ProviderError, Query, blocker_ref, mentions_parent, on_map_board, resolve_maps, run_cli,
+               run_json, tracker_error, with_body_blockers)
 
 ISSUES = """
 query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
@@ -87,19 +86,16 @@ class GitLabProvider:
         tickets = list(seen.values())
         if query.parent is not None:
             tickets = [t for t in tickets if t.number != query.parent and mentions_parent(t.body, query.parent)]
-            tickets = self._with_parent(tickets, query.parent)
-        return with_body_blockers(tickets, self.states)
+            tickets = on_map_board(tickets, query.parent, self._map(query.parent))
+        return with_body_blockers(resolve_maps(tickets, self._map), self.states)
 
     def delete(self, number: int) -> None:
         project = urllib.parse.quote(self.repo, safe="")
         run_cli(["glab", "api", "--hostname", self.host, "-X", "DELETE", f"projects/{project}/issues/{number}"])
 
-    def _with_parent(self, tickets: list[Ticket], parent: int) -> list[Ticket]:
-        issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(parent)}).get("project") or {}).get("issue")
-        if not issue:
-            return tickets
-        labels = tuple(label["title"] for label in issue["labels"]["nodes"])
-        return [replace(t, parent_number=parent, parent_url=issue["webUrl"], parent_labels=labels) for t in tickets]
+    def _map(self, iid: int) -> tuple[str, tuple[str, ...]] | None:
+        issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(iid)}).get("project") or {}).get("issue")
+        return (issue["webUrl"], tuple(label["title"] for label in issue["labels"]["nodes"])) if issue else None
 
     def _issues(self, variables: dict, limit: int) -> list[dict]:
         nodes: list[dict] = []

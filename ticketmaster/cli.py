@@ -129,7 +129,8 @@ def main(argv: list[str] | None = None) -> int:
             for t in tickets:
                 tags = "".join(f" [{k}]" for k in t.review_tags)
                 who = " " + ",".join("@" + a for a in t.assignees) if t.assignees else ""
-                print(f"  #{t.number} {t.title}{tags}{who}")
+                warn = f" ⚠ {t.map_warning}" if t.map_missing else ""
+                print(f"  #{t.number} {t.title}{tags}{who}{warn}")
         return 0
 
     from .board import BoardApp

@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from ..model import Ticket, parse_blockers
+from ..model import Ticket, parse_blockers, part_of
 
 
 class ProviderError(RuntimeError):
@@ -18,6 +18,10 @@ class ProviderError(RuntimeError):
 
 class RateLimited(ProviderError):
     """The tracker refused the call for exceeding its rate limit; the board backs off."""
+
+
+class NotFound(ProviderError):
+    """The tracker has no such issue."""
 
 
 RATE_LIMIT = re.compile(r"rate.?limit|too many requests|\bHTTP 429\b|\b429 Too Many\b", re.IGNORECASE)
@@ -75,6 +79,45 @@ def run_json(args: list[str], stdin: str | None = None):
 def mentions_parent(body: str, parent: int) -> bool:
     """Fallback parent link for providers without sub-issues: body mentions `#<parent>`."""
     return re.search(rf"(?<![\w&])#{parent}\b", body or "") is not None
+
+
+# A map issue's URL and labels, or None when there is no such issue.
+MapLookup = Callable[[int], tuple[str, tuple[str, ...]] | None]
+
+
+def resolve_maps(tickets: list[Ticket], fetch_map: MapLookup) -> list[Ticket]:
+    """Typed wayfinder tickets without a native map parent take the map their body's `Part of #<map>` names.
+
+    A map already on the board is used as is; any other is fetched once. A missing issue (fetch_map returns
+    None) leaves the ticket without a map, which the board warns about; any other tracker error surfaces.
+    """
+    known = {t.number: (t.url, t.labels) for t in tickets}
+
+    def lookup(number: int):
+        if number not in known:
+            known[number] = fetch_map(number)
+        return known[number]
+
+    resolved = []
+    for ticket in tickets:
+        number = part_of(ticket.body) if ticket.map_missing else None
+        found = lookup(number) if number is not None and number != ticket.number else None
+        if found:
+            ticket = with_map(ticket, number, found)
+        resolved.append(ticket)
+    return resolved
+
+
+def with_map(ticket: Ticket, number: int, found: tuple[str, tuple[str, ...]]) -> Ticket:
+    url, labels = found
+    return replace(ticket, parent_number=number, parent_url=url, parent_labels=labels)
+
+
+def on_map_board(tickets: list[Ticket], number: int, found: tuple[str, tuple[str, ...]] | None) -> list[Ticket]:
+    """A map board's map is each ticket's parent, unless its `Part of #<map>` line names another map."""
+    if not found:
+        return tickets
+    return [with_map(t, number, found) if part_of(t.body) in (None, number) else t for t in tickets]
 
 
 class IssueStates:
