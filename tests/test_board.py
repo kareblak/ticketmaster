@@ -560,6 +560,67 @@ def test_clicking_a_picker_option_cycles_that_option(tmp_path):
     run(scenario())
 
 
+def status_of(app):
+    return str(app.query_one("#status").render())
+
+
+def test_status_warns_until_the_skills_setup_exists_and_rechecks_on_refresh(tmp_path):
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, repo_root=tmp_path)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "/setup-matt-pocock-skills" in status_of(app)
+            (tmp_path / "docs" / "agents").mkdir(parents=True)
+            (tmp_path / "docs" / "agents" / "issue-tracker.md").write_text("# Issue tracker\n")
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert "/setup-matt-pocock-skills" not in status_of(app)
+
+    run(scenario())
+
+
+def test_no_warning_when_the_skills_setup_exists(tmp_path):
+    (tmp_path / "docs" / "agents").mkdir(parents=True)
+    (tmp_path / "docs" / "agents" / "issue-tracker.md").write_text("# Issue tracker\n")
+
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, repo_root=tmp_path)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "setup-matt-pocock-skills" not in status_of(app)
+
+    run(scenario())
+
+
+def test_sessions_still_start_while_the_setup_warning_shows(tmp_path):
+    async def scenario():
+        bench = FakeBench()
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, workbench=bench, repo_root=tmp_path)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "/setup-matt-pocock-skills" in status_of(app)
+            await pilot.press("down", "s", "y")
+            await loaded(app, pilot)
+            await pilot.press("right", "right", "c", "y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 1), ("review", 3)]
+
+    run(scenario())
+
+
+def test_help_mentions_the_skills_setup():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            text = app.screen.text.plain
+            assert "/setup-matt-pocock-skills" in text and "docs/agents/issue-tracker.md" in text
+
+    run(scenario())
+
+
 AUTHORED = [
     Ticket(number=1, title="Login bug", url="u1", is_open=True, labels=("bug",), author="alice"),
     Ticket(number=2, title="Dark mode", url="u2", is_open=True, labels=("ux",), author="bob"),

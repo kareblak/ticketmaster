@@ -141,5 +141,6 @@ def main(argv: list[str] | None = None) -> int:
         + f"\nworktree: issue-{ticket.number}, in its own herdr workspace",
         columns=args.columns,
         settings_path=settings_path(),
+        repo_root=herdr.repo_root(cwd),
     ).run()
     return 0

@@ -33,6 +33,8 @@ TAG_COLORS = {
     "a11y": "black on green",
     "docs": "black on white",
 }
+SETUP_DOC = Path("docs/agents/issue-tracker.md")  # written by /setup-matt-pocock-skills
+SETUP_COMMAND = "/setup-matt-pocock-skills"
 NARROW_WIDTH = 100  # below this the "auto" view shows one column at a time
 FALLBACK_COLORS = ["white on dark_green", "white on purple4", "black on orange3", "white on grey37", "black on gold3"]
 COLUMN_COLORS = {
@@ -88,6 +90,11 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         text.append("\n")
         text.append(chips)
     return text
+
+
+def setup_missing(root: Path | None) -> bool:
+    """The mattpocock skills a session runs stop to ask for their setup when the repo has no issue-tracker doc."""
+    return root is not None and not (root / SETUP_DOC).is_file()
 
 
 def matches(ticket: Ticket, needle: str) -> bool:
@@ -368,6 +375,8 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     text.append("  c on a Review card does the same in a review-<n> worktree with the code-review skill\n"
                 "  (review_command in .ticketmaster.toml): check out the PR that closes the issue, review\n"
                 "  it from the PR's base branch against the issue, and report in the session only.\n")
+    text.append(f"  Those skills need the repo set up once with {SETUP_COMMAND} (it writes\n"
+                f"  {SETUP_DOC}); without it a session stops to ask, so the status line warns.\n")
 
     heading("The board only reads")
     text.append("  It never writes to the tracker. A session claims its ticket by assigning it, so the\n"
@@ -439,6 +448,7 @@ class BoardApp(App):
         describe_start: Callable[[Ticket], str] | None = None,
         columns: str = "auto",
         settings_path: Path | None = None,
+        repo_root: Path | None = None,
     ):
         super().__init__()
         self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
@@ -454,6 +464,8 @@ class BoardApp(App):
         self.auto_remove = bool(self.settings.get("auto_remove", False))
         self.auto_tried: set[str] = set()  # worktree paths auto-remove has handled, so a kept one is not retried
         self.herdr_error: str | None = None
+        self.repo_root = repo_root  # None: the skills setup is not checked
+        self.setup_missing = False
         self.board_query = query
         self.interval = interval
         self.board = Board()
@@ -490,6 +502,7 @@ class BoardApp(App):
 
     def _fetch(self) -> None:
         sessions, herdr_error = self.sessions, None
+        self.setup_missing = setup_missing(self.repo_root)
         if self.workbench is not None:
             try:
                 sessions = self.workbench.sessions()
@@ -576,6 +589,8 @@ class BoardApp(App):
             status.append(f" · authors: {', '.join(authors)}", style="yellow")
         if self.auto_remove:
             status.append(" · auto-remove on", style="green")
+        if self.setup_missing:
+            status.append(f"  ⚠ run {SETUP_COMMAND} before starting sessions (no {SETUP_DOC})", style="bold yellow")
         for error in (self.last_error, self.herdr_error):
             if error:
                 status.append(f"  ⚠ {error}", style="bold red")

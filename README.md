@@ -93,6 +93,11 @@ claude -n "#<n> <title>" "<prompt>"
 | has a `wayfinder:<type>` label and its parent is a map        | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
 | anything else                                                 | `/mattpocock-skills:implement <ticket-url>` plus a brief: assign it to yourself first, implement via the skill, then push and open a ready PR that closes it (body via the `pr` skill) |
 
+The mattpocock skills a session runs stop to ask for `/setup-matt-pocock-skills` when the repo
+has no `docs/agents/issue-tracker.md`, which would leave the session waiting. Until that file
+exists, the status line warns and names the command, so it can be run once before starting
+sessions. The board checks again on every refresh, and `s` and `c` still work while the warning shows.
+
 A review session (`c`) gets a `review-<n>` worktree and starts `/mattpocock-skills:code-review`
 the same way: the prompt tells it to find the PR that closes the issue, check out its branch, and
 review it with the PR's base branch (e.g. `origin/main`) as the fixed point and the issue URL as
