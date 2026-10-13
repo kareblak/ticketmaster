@@ -56,7 +56,8 @@ ticketmaster [open|snapshot|adopt|setup|install-skill] [parent] [--label NAME] [
 Scope:
 
 - no filter: every open issue, and every issue closed within `--done-days`
-- `parent` (`42`, `#42` or an issue URL): the parent's sub-issues, e.g. a wayfinder map
+- `parent` (`42`, `#42` or an issue URL): the parent's sub-issues, e.g. a wayfinder map; for a map,
+  also the spec linked to it and that spec's implementation tickets (see [Wayfinding rules](#wayfinding-rules))
 - `--label NAME`: issues with that label
 
 The board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
@@ -149,8 +150,22 @@ of the file alone, or creates the doc when there is none. It pins these encoding
 | GitLab          | `Part of #<map>` as the description's first line | native `blocks` issue link (GitLab Premium) | `out-of-scope` label, closed |
 | Gitea / Forgejo | `Part of #<map>` as the body's first line | native issue dependency (`/dependencies`)  | `out-of-scope` label, closed    |
 
-Blocking is always the native link, never a `Blocked by:` body line. The keyword `Part of` and the
-`out-of-scope` label are always English, even when the rest of the issue is in another language. While the repo's section is missing or differs
+Once the map is resolved, its destination becomes a spec (`/to-spec`) and then implementation tickets
+(`/to-tickets`). The section pins how they link back, so `ticketmaster <map>` shows the decision
+tickets, the spec and the spec's implementation tickets on one board:
+
+| Tracker         | Spec → map                       | Implementation ticket → spec                                          |
+| --------------- | -------------------------------- | --------------------------------------------------------------------- |
+| GitHub          | `Part of #<map>` as the first line | native sub-issue of the spec, and `## Parent` naming `#<spec>`      |
+| GitLab          | `Part of #<map>` as the first line | `## Parent` section naming `#<spec>`                                |
+| Gitea / Forgejo | `Part of #<map>` as the first line | `## Parent` section naming `#<spec>`                                |
+
+The spec and its tickets carry no `wayfinder:` label, so `s` starts them with the implement skill;
+decision tickets keep wayfinder. On GitHub the board also counts a sub-issue of the map without a
+`wayfinder:` label as a spec, and a spec's ticket linked by only one of the two links.
+
+Blocking is always the native link, never a `Blocked by:` body line. The keywords `Part of` and
+`## Parent` and the `out-of-scope` label are always English, even when the rest of the issue is in another language. While the repo's section is missing or differs
 from what this version writes, the status line warns and names `ticketmaster setup`; when the doc
 itself is missing, it names `/setup-matt-pocock-skills` first, then `ticketmaster setup`.
 
@@ -202,16 +217,17 @@ Flags override the file, and the file overrides the remote.
 
 | Provider        | Access                                   | Blocking                  | Parent filter                       | Review via         |
 | --------------- | ---------------------------------------- | ------------------------- | ----------------------------------- | ------------------ |
-| GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | native sub-issues, in order         | open closing PRs   |
-| GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | issues mentioning `#<parent>`       | closing MRs        |
-| Gitea / Forgejo | REST with the `tea` login token, or `GITEA_TOKEN` / `FORGEJO_TOKEN` | `/dependencies` API | issues mentioning `#<parent>` | open PRs whose body says `closes/fixes/resolves #<n>` |
+| GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | native sub-issues, in order, plus the spec and its tickets | open closing PRs   |
+| GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | issues mentioning `#<parent>`, plus the spec's tickets | closing MRs        |
+| Gitea / Forgejo | REST with the `tea` login token, or `GITEA_TOKEN` / `FORGEJO_TOKEN` | `/dependencies` API | issues mentioning `#<parent>`, plus the spec's tickets | open PRs whose body says `closes/fixes/resolves #<n>` |
 
 Where a provider lacks a feature, the board falls back: no dependency support means only a
 `blocked` label marks an issue Blocked, and no sub-issues means a parent board shows issues
 whose body mentions `#<parent>`.
 
 GitHub's GraphQL budget is 5,000 points an hour. Every board makes 2 searches per refresh
-(about 1,500 an hour at 5s), so lengthen `--interval` if you run several boards at once.
+(about 1,500 an hour at 5s); a map board makes one query for the map and one per spec instead.
+Lengthen `--interval` if you run several boards at once.
 
 When the tracker rate-limits the board (GitHub's primary or secondary limit, or an HTTP 429 from
 GitLab or Gitea/Forgejo), ticket fetches drop to once a minute and herdr session states to every

@@ -2,7 +2,9 @@
 
 Token lookup order: GITEA_TOKEN / FORGEJO_TOKEN env vars, then the `tea` config login whose
 URL matches the repo host. Dependencies come from `/issues/{n}/dependencies`; there are no
-sub-issues, so a parent board falls back to issues whose body mentions `#<parent>`. Open
+sub-issues, so a parent board falls back to issues whose body mentions `#<parent>`, plus the
+implementation tickets of a spec among them (`Part of #<parent>`), which name the spec in their
+`## Parent` section. Open
 pull requests count as review when their body says `closes/fixes/resolves #<n>`.
 """
 
@@ -20,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, RateLimited, mentions_parent, tracker_error
+from . import ProviderError, Query, RateLimited, map_family, tracker_error
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -45,23 +47,22 @@ class GiteaProvider:
         closed_issues = self._list(f"/repos/{self.repo}/issues", closed_params, query.limit)
         raw = open_issues + closed_issues
 
-        if query.parent is not None:
-            raw = [i for i in raw if i["number"] != query.parent and mentions_parent(i.get("body", ""), query.parent)]
-
         pulls = self._list(f"/repos/{self.repo}/pulls", {"state": "open"}, 200)
         pr_bodies = [f"{p.get('title', '')}\n{p.get('body') or ''}" for p in pulls]
-        open_numbers = [i["number"] for i in raw if i["state"] == "open"]
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
-        tickets = [to_ticket(i, blockers.get(i["number"]), pr_bodies) for i in raw]
+        tickets = [to_ticket(i, None, pr_bodies) for i in raw]
         if query.parent is not None:
+            children, family = map_family(tickets, query.parent)
             parent = self._get(f"/repos/{self.repo}/issues/{query.parent}")
             labels = tuple(label["name"] for label in parent.get("labels") or [])
-            tickets = [
+            children = [
                 replace(t, parent_number=query.parent, parent_url=parent["html_url"], parent_labels=labels)
-                for t in tickets
+                for t in children
             ]
-        return tickets
+            tickets = children + family
+        open_numbers = [t.number for t in tickets if t.is_open]
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
+        return [replace(t, open_blockers=blockers.get(t.number)) for t in tickets]
 
     def _open_blockers(self, number: int) -> int | None:
         try:

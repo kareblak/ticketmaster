@@ -14,7 +14,8 @@ ticketmaster open $ARGUMENTS
 ```
 
 - No arguments: every open issue, and every issue closed in the last 7 days.
-- A number (`42`, `#42`, or an issue URL): the sub-issues of that parent, e.g. a wayfinder map.
+- A number (`42`, `#42`, or an issue URL): the sub-issues of that parent, e.g. a wayfinder map; for a
+  map, also the spec linked to it (`Part of #<map>`) and that spec's implementation tickets.
 - `--label <name>`: issues with that label.
 
 Then reply with the script's one-line result.
@@ -30,7 +31,8 @@ as printed and the fix: `gh auth login`, `glab auth login`, `tea login add`, or 
 If the board's status line says to run `ticketmaster setup`, or the user wants wayfinder and the
 board to agree on how tickets are linked, run `ticketmaster setup` in the repo: it writes the
 "Wayfinding operations" section of `docs/agents/issue-tracker.md` for the repo's tracker (child →
-map, blocking, out-of-scope, English keywords), replacing an older copy in place. Read that section
+map, spec → map, implementation ticket → spec, blocking, out-of-scope, English keywords), replacing
+an older copy in place. Read that section
 before creating or linking wayfinder tickets.
 
 To answer a question about the board's contents without opening a pane, run the same script

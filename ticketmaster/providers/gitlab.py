@@ -1,7 +1,8 @@
 """GitLab via `glab api graphql`: `blocks` links and closing merge requests.
 
 GitLab issues have no sub-issue list in the Issue API, so a parent board falls back to
-issues whose description mentions `#<parent>`.
+issues whose description mentions `#<parent>`, plus the implementation tickets of a spec among
+them (`Part of #<parent>`), which name the spec in their `## Parent` section.
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, mentions_parent, run_json, tracker_error
+from . import ProviderError, Query, map_family, run_json, tracker_error
 
 ISSUES = """
 query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
@@ -62,8 +63,8 @@ class GitLabProvider:
                 seen.setdefault(ticket.number, ticket)
         tickets = list(seen.values())
         if query.parent is not None:
-            tickets = [t for t in tickets if t.number != query.parent and mentions_parent(t.body, query.parent)]
-            tickets = self._with_parent(tickets, query.parent)
+            children, family = map_family(tickets, query.parent)
+            tickets = self._with_parent(children, query.parent) + family
         return tickets
 
     def _with_parent(self, tickets: list[Ticket], parent: int) -> list[Ticket]:
