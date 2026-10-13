@@ -76,8 +76,10 @@ class Ticket:
 
     @property
     def is_wont_fix(self) -> bool:
-        """Closed as not planned or labelled `wontfix`: not finished work, so it stays off Done."""
-        return self.not_planned or any(label.lower() == WONTFIX_LABEL for label in self.labels)
+        """Labelled `wontfix`, or closed as not planned without being ruled out of scope: not finished work, so
+        it stays off Done. Wayfinder closes out-of-scope tickets as not planned too, and those stay on Done."""
+        labels = {label.lower() for label in self.labels}
+        return WONTFIX_LABEL in labels or (self.not_planned and OUT_OF_SCOPE_LABEL not in labels)
 
     def start_refusal(self, viewer: str | None, holds: dict[str, str] | None = None) -> str | None:
         """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart.

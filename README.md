@@ -162,10 +162,16 @@ on the next refresh.
 `Backspace` or `Delete` on a Blocked or Ready card closes the issue as not planned after a confirm
 dialog, and labels it `wontfix`: `gh issue close --reason "not planned"` on GitHub, and on GitLab and
 Gitea, which have no close reason, the label is the marker. Plain write access is enough on all
-three trackers. On a Done card the keys do nothing; In progress and Review cards are refused. The
+three trackers. GitLab creates a missing `wontfix` label; on GitHub and Gitea it must already exist
+(GitHub's default labels include it, as does Gitea's Default label set). The issue is labelled
+before it is closed, so a missing label leaves it open. On a Done card the keys do nothing; In progress and Review cards are refused. The
 ticket's worktrees are not removed; the dialog lists them so you can remove them in herdr yourself.
 A tracker refusal shows as an error notification and the board stays as it was. In the `/` filter
 input, `Backspace` edits the text as usual.
+
+Done hides issues closed this way: a `wontfix` label, or on GitHub the close reason "not planned".
+An issue closed as not planned with the `out-of-scope` label (wayfinder's out-of-scope rule) is the
+exception: it stays on Done, marked `out of scope`.
 
 ## Wayfinding rules
 

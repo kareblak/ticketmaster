@@ -51,6 +51,13 @@ def test_closed_wontfix_or_not_planned_is_hidden_from_done():
     assert classify(ticket(is_open=False, closed_at=recent, labels=("bug",)), NOW, 7) is Column.DONE
 
 
+def test_out_of_scope_closed_as_not_planned_stays_in_done():
+    recent = NOW - timedelta(days=2)
+    ruled_out = ticket(is_open=False, closed_at=recent, not_planned=True, labels=("out-of-scope",))
+    assert classify(ruled_out, NOW, 7) is Column.DONE
+    assert classify(ticket(is_open=False, closed_at=recent, labels=("out-of-scope", "wontfix")), NOW, 7) is None
+
+
 def test_an_open_wontfix_ticket_still_shows():
     assert classify(ticket(labels=("wontfix",)), NOW, 7) is Column.READY
 
