@@ -1,6 +1,6 @@
 import asyncio
 
-from ticketmaster.board import BoardApp, Card
+from ticketmaster.board import HERDR_PLACEMENTS, BoardApp, Card
 from ticketmaster.launch import Placement
 from ticketmaster.model import Ticket
 from ticketmaster.providers import ProviderError, Query
@@ -208,5 +208,57 @@ def test_auto_key():
             await pilot.press("down", "s", "a")
             await loaded(app, pilot)
             assert calls == [(1, Placement.AUTO)]
+
+    run(scenario())
+
+
+def test_narrow_board_shows_one_column_and_switches_with_arrows():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(60, 30)) as pilot:
+            await loaded(app, pilot)
+            visible = lambda: [c.id for c in app.query(".column") if c.display]
+            assert app.single and visible() == ["column-READY"]
+            assert "Ready 1" in str(app.query_one("#tabs").render())
+            await pilot.press("down")
+            assert app.focused.ticket.number == 1
+            await pilot.press("right")
+            assert visible() == ["column-IN_PROGRESS"] and app.focused.ticket.number == 2
+            await pilot.press("left", "left")
+            assert visible() == ["column-BLOCKED"] and app.focused is None  # empty columns still show
+            await pilot.press("4")
+            assert visible() == ["column-REVIEW"] and app.focused.ticket.number == 3
+            await pilot.press("v")
+            assert len(visible()) == 5 and app.focused.ticket.number == 3
+
+    run(scenario())
+
+
+def test_wide_board_can_be_forced_to_one_column():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, columns="one")
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert [c.id for c in app.query(".column") if c.display] == ["column-READY"]
+
+    run(scenario())
+
+
+def test_herdr_placements_offer_a_workspace():
+    async def scenario():
+        calls = []
+        app = BoardApp(
+            FakeProvider(TICKETS), Query(), interval=60,
+            starter=lambda ticket, placement: calls.append((ticket.number, placement)) or "ok",
+            placements=HERDR_PLACEMENTS,
+        )
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "s", "a")  # auto is not offered in herdr
+            await pilot.pause()
+            assert type(app.screen).__name__ == "ConfirmStart"
+            await pilot.press("w")
+            await loaded(app, pilot)
+            assert calls == [(1, Placement.WORKSPACE)]
 
     run(scenario())

@@ -29,6 +29,7 @@ TAG_COLORS = {
     "a11y": "black on green",
     "docs": "black on white",
 }
+NARROW_WIDTH = 100  # below this the "auto" view shows one column at a time
 FALLBACK_COLORS = ["white on dark_green", "white on purple4", "black on orange3", "white on grey37", "black on gold3"]
 COLUMN_COLORS = {
     Column.BLOCKED: "red",
@@ -101,28 +102,34 @@ class ColumnScroll(VerticalScroll, can_focus=False):
     """Scrolls with the mouse wheel and follows the focused card, but never takes focus itself."""
 
 
+PLACEMENT_KEYS = {
+    Placement.WORKSPACE: ("w", "Worktree workspace"),
+    Placement.TAB: ("t", "New tab"),
+    Placement.SPLIT_RIGHT: ("r", "Pane right"),
+    Placement.SPLIT_DOWN: ("d", "Pane down"),
+    Placement.AUTO: ("a", "Auto"),
+}
+DEFAULT_PLACEMENTS = (Placement.TAB, Placement.SPLIT_RIGHT, Placement.SPLIT_DOWN, Placement.AUTO)
+HERDR_PLACEMENTS = (Placement.WORKSPACE, Placement.TAB, Placement.SPLIT_RIGHT, Placement.SPLIT_DOWN)
+
+
 class ConfirmStart(ModalScreen[Placement | None]):
     """Asks where to open the session; a stray double-click is cancelled with n or Esc."""
 
     DEFAULT_CSS = """
     ConfirmStart { align: center middle; }
-    #dialog { width: 96; height: auto; padding: 1 2; border: thick $accent; background: $surface; }
+    #dialog { width: 96; max-width: 100%; height: auto; padding: 1 2; border: thick $accent; background: $surface; }
     #prompt { margin-bottom: 1; }
     #buttons { height: auto; align-horizontal: right; }
     #buttons Button { margin-left: 2; }
     """
-    BINDINGS = [
-        Binding("t", "answer('tab')", "New tab"),
-        Binding("r", "answer('split right')", "Pane right"),
-        Binding("d", "answer('split down')", "Pane down"),
-        Binding("a", "answer('auto')", "Auto layout"),
-        Binding("n,escape", "answer('')", "Cancel"),
-    ]
+    BINDINGS = [Binding("n,escape", "answer('')", "Cancel")]
 
-    def __init__(self, ticket: Ticket, detail: str):
+    def __init__(self, ticket: Ticket, detail: str, placements: tuple[Placement, ...] = DEFAULT_PLACEMENTS):
         super().__init__()
         self.ticket = ticket
         self.detail = detail
+        self.placements = placements
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
@@ -130,16 +137,22 @@ class ConfirmStart(ModalScreen[Placement | None]):
             yield Label(Text(self.detail, style="dim"))
             with Horizontal(id="buttons"):
                 yield Button("Cancel (n)", id="cancel")
-                yield Button("New tab (t)", id="tab", variant="primary")
-                yield Button("Pane right (r)", id="split-right", variant="primary")
-                yield Button("Pane down (d)", id="split-down", variant="primary")
-                yield Button("Auto (a)", id="auto", variant="primary")
+                for placement in self.placements:
+                    key, text = PLACEMENT_KEYS[placement]
+                    yield Button(f"{text} ({key})", id=placement.value.replace(" ", "-"), variant="primary")
+
+    def on_key(self, event: events.Key) -> None:
+        for placement in self.placements:
+            if event.key == PLACEMENT_KEYS[placement][0]:
+                event.stop()
+                self.dismiss(placement)
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         self.action_answer(event.button.id.replace("-", " "))
 
     def action_answer(self, answer: str) -> None:
-        self.dismiss(Placement(answer) if answer in {p.value for p in Placement} else None)
+        chosen = next((p for p in self.placements if p.value == answer), None)
+        self.dismiss(chosen)
 
 
 class BoardApp(App):
@@ -147,7 +160,9 @@ class BoardApp(App):
     AUTO_FOCUS = None  # otherwise the hidden filter input grabs focus and eats keystrokes
     CSS = """
     Screen { layout: vertical; }
-    #status { height: 1; padding: 0 1; background: $panel; }
+    #status { height: auto; padding: 0 1; background: $panel; }
+    #tabs { height: auto; padding: 0 1; display: none; }
+    #tabs.visible { display: block; }
     #columns { height: 1fr; }
     .column { width: 1fr; border: round $panel-lighten-2; padding: 0 0; }
     .column-title { height: 1; padding: 0 1; text-style: bold; }
@@ -162,6 +177,8 @@ class BoardApp(App):
         Binding("slash", "filter", "Filter"),
         Binding("enter", "open", "Open"),
         Binding("s", "start", "Start session"),
+        Binding("v", "toggle_view", "One/all columns"),
+        *[Binding(str(i + 1), f"column({i})", show=False) for i in range(len(COLUMN_ORDER))],
         Binding("up,k", "move(0,-1)", show=False),
         Binding("down,j", "move(0,1)", show=False),
         Binding("left,h", "move(-1,0)", show=False),
@@ -176,8 +193,14 @@ class BoardApp(App):
         interval: float = 5.0,
         starter: Callable[[Ticket, Placement], str] | None = None,
         describe_start: Callable[[Ticket], str] | None = None,
+        placements: tuple[Placement, ...] = DEFAULT_PLACEMENTS,
+        columns: str = "auto",
     ):
         super().__init__()
+        self.placements = placements
+        self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
+        self.single = False
+        self.column_index = COLUMN_ORDER.index(Column.READY)
         self.provider = provider
         self.starter = starter
         self.describe_start = describe_start or (lambda ticket: "")
@@ -193,15 +216,17 @@ class BoardApp(App):
 
     def compose(self) -> ComposeResult:
         yield Static("loading…", id="status")
+        yield Static(id="tabs")
         with Horizontal(id="columns"):
             for column in COLUMN_ORDER:
-                with Vertical(classes="column"):
+                with Vertical(classes="column", id=f"column-{column.name}"):
                     yield Static(column.value, classes="column-title", id=f"title-{column.name}")
                     yield ColumnScroll(id=f"col-{column.name}")
         yield Input(placeholder="filter: words match title, body, labels, assignees · esc clears", id="filter")
         yield Footer()
 
     def on_mount(self) -> None:
+        self._apply_view()
         self.action_refresh()
         self.set_interval(self.interval, self.action_refresh)
 
@@ -243,6 +268,7 @@ class BoardApp(App):
         if refocus is not None:
             self.call_after_refresh(refocus.focus, scroll_visible=False)
         self._render_status()
+        self._render_tabs()
 
     def _render_status(self) -> None:
         status = Text(self.sub_title, style="bold")
@@ -255,11 +281,65 @@ class BoardApp(App):
             status.append(f"  ⚠ {self.last_error}", style="bold red")
         self.query_one("#status", Static).update(status)
 
+    # --- one column at a time (narrow panes, e.g. a herdr side pane) ------------------------------
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._apply_view()
+
+    def _apply_view(self) -> None:
+        single = self.view == "one" or (self.view == "auto" and self.size.width < NARROW_WIDTH)
+        if single and not self.single and isinstance(self.focused, Card):
+            self.column_index = COLUMN_ORDER.index(self.focused.column)  # keep the selection in view
+        self.single = single
+        for i, column in enumerate(COLUMN_ORDER):
+            self.query_one(f"#column-{column.name}").display = not single or i == self.column_index
+        self.query_one("#tabs", Static).set_class(single, "visible")
+        self._render_tabs()
+
+    def _render_tabs(self) -> None:
+        tabs = Text("‹ ", style="dim")
+        for i, column in enumerate(COLUMN_ORDER):
+            if i:
+                tabs.append(" · ", style="dim")
+            label = f"{i + 1} {column.value} {self._visible_count(column)}"
+            tabs.append(f" {label} " if i == self.column_index else label,
+                        style=f"bold black on {COLUMN_COLORS[column]}" if i == self.column_index else COLUMN_COLORS[column])
+        tabs.append(" ›", style="dim")
+        self.query_one("#tabs", Static).update(tabs)
+
+    def _visible_count(self, column: Column) -> int:
+        return sum(1 for t in self.board.columns[column] if matches(t, self.needle))
+
+    def action_toggle_view(self) -> None:
+        self.view = "all" if self.single else "one"
+        self._apply_view()
+
+    def action_column(self, index: int) -> None:
+        self._show_column(index)
+
+    def _show_column(self, index: int, row: int = 0) -> None:
+        self.column_index = max(0, min(len(COLUMN_ORDER) - 1, index))
+        self._apply_view()
+        cards = self._cards_by_column()[self.column_index]
+        if cards:
+            self._select(cards[min(row, len(cards) - 1)])
+        elif self.single:
+            self.set_focus(None)
+
     def _cards_by_column(self) -> list[list[Card]]:
         return [list(self.query_one(f"#col-{c.name}", VerticalScroll).query(Card)) for c in COLUMN_ORDER]
 
     def action_move(self, dx: int, dy: int) -> None:
         grid = self._cards_by_column()
+        if self.single:
+            current = grid[self.column_index]
+            focused = isinstance(self.focused, Card) and self.focused in current
+            row = current.index(self.focused) if focused else 0
+            if dx:
+                self._show_column(self.column_index + dx, row)
+            elif current:
+                self._select(current[max(0, min(len(current) - 1, row + dy)) if focused else 0])
+            return
         if not any(grid):
             return
         if not isinstance(self.focused, Card):
@@ -277,6 +357,8 @@ class BoardApp(App):
             self._select(grid[target][min(row, len(grid[target]) - 1)])
 
     def _select(self, card: Card) -> None:
+        self.column_index = COLUMN_ORDER.index(card.column)
+        self._render_tabs()
         card.focus(scroll_visible=False)
         card.scroll_visible(animate=False)
 
@@ -306,7 +388,7 @@ class BoardApp(App):
                 self._render_board()
                 self.run_worker(lambda: self._start(ticket, placement), thread=True, group="start")
 
-        self.push_screen(ConfirmStart(ticket, self.describe_start(ticket)), confirmed)
+        self.push_screen(ConfirmStart(ticket, self.describe_start(ticket), self.placements), confirmed)
 
     def _start(self, ticket: Ticket, placement: Placement) -> None:
         message = self.starter(ticket, placement)
