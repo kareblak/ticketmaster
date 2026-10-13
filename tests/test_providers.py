@@ -1,6 +1,11 @@
+import io
 import json
+import urllib.error
 
-from ticketmaster.providers import github, gitlab, gitea, mentions_parent
+import pytest
+
+from ticketmaster import providers
+from ticketmaster.providers import ProviderError, Query, RateLimited, github, gitlab, gitea, mentions_parent
 from ticketmaster.providers.gitea import token_from_tea_config
 
 
@@ -139,3 +144,73 @@ def test_mentions_parent():
     assert mentions_parent("Part of #12.", 12)
     assert not mentions_parent("see #123", 12)
     assert not mentions_parent("&#12;", 12)
+
+
+class FakeCompleted:
+    def __init__(self, stderr, returncode=1, stdout=""):
+        self.stderr, self.returncode, self.stdout = stderr, returncode, stdout
+
+
+@pytest.mark.parametrize("stderr", [
+    "gh: API rate limit exceeded for user ID 842012.",
+    "gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)",
+    "glab: 429 Too Many Requests",
+    "ERROR: Too Many Requests (HTTP 429)",
+])
+def test_cli_rate_limit_errors_are_rate_limited(monkeypatch, stderr):
+    monkeypatch.setattr(providers.subprocess, "run", lambda *a, **k: FakeCompleted(stderr))
+    with pytest.raises(RateLimited):
+        providers.run_cli(["gh", "api", "graphql"])
+
+
+def test_other_cli_errors_are_not_rate_limited(monkeypatch):
+    monkeypatch.setattr(providers.subprocess, "run", lambda *a, **k: FakeCompleted("gh: Could not resolve issue 429"))
+    with pytest.raises(ProviderError) as raised:
+        providers.run_cli(["gh", "api", "graphql"])
+    assert not isinstance(raised.value, RateLimited)
+
+
+@pytest.mark.parametrize("module, path", [(github, ["search"]), (gitlab, ["project"])])
+def test_graphql_rate_limit_errors_are_rate_limited(monkeypatch, module, path):
+    errors = [{"type": "RATE_LIMITED", "message": "API rate limit exceeded for user ID 1."}]
+    monkeypatch.setattr(module, "run_json", lambda args, stdin=None: {"errors": errors})
+    provider = github.GitHubProvider("o/r") if module is github else gitlab.GitLabProvider("g/p")
+    with pytest.raises(RateLimited):
+        provider.fetch(Query())
+
+
+def http_error(code, reason):
+    return urllib.error.HTTPError("https://codeberg.org/api/v1/x", code, reason, {}, io.BytesIO(b""))
+
+
+def test_gitea_http_429_is_rate_limited(monkeypatch):
+    def urlopen(request, timeout=None):
+        raise http_error(429, "Too Many Requests")
+
+    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    with pytest.raises(RateLimited):
+        gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+
+
+def test_gitea_rate_limit_on_dependencies_is_not_swallowed(monkeypatch):
+    def fake_get(self, path, params=None):
+        if path.endswith("/dependencies"):
+            raise RateLimited("codeberg.org: HTTP 429 rate limit exceeded")
+        if path.endswith("/issues"):
+            return [{"number": 1, "title": "t", "html_url": "u", "state": "open", "labels": []}] \
+                if params["state"] == "open" else []
+        return []
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    with pytest.raises(RateLimited):
+        gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+
+
+def test_gitea_other_http_errors_are_not_rate_limited(monkeypatch):
+    def urlopen(request, timeout=None):
+        raise http_error(404, "Not Found")
+
+    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    with pytest.raises(ProviderError) as raised:
+        gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+    assert not isinstance(raised.value, RateLimited)
