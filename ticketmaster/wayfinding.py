@@ -10,10 +10,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .model import OUT_OF_SCOPE_LABEL
+
 TRACKER_DOC = Path("docs/agents/issue-tracker.md")
 HEADING = "## Wayfinding operations"
 SETUP_COMMAND = "ticketmaster setup"
-OUT_OF_SCOPE_LABEL = "out-of-scope"
 TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo"}
 
 PREAMBLE = f"""{HEADING}

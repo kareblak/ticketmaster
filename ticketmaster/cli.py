@@ -1,8 +1,8 @@
 """Command line: `open` (the board in a herdr pane beside the caller, or right here when the caller is that
 pane), `snapshot` (print once), `adopt` (open herdr workspaces for existing `claude -w` worktrees), `setup`
-(write the wayfinding linking rules into the repo's issue-tracker doc).
+(write the wayfinding linking rules into the repo's issue-tracker doc), `upgrade` (reinstall from GitHub).
 
-Everything but `snapshot`, `setup` and `install-skill` runs inside herdr (HERDR_ENV=1).
+Everything but `snapshot`, `setup`, `install-skill` and `upgrade` runs inside herdr (HERDR_ENV=1).
 """
 
 from __future__ import annotations
@@ -17,16 +17,17 @@ from .model import COLUMN_ORDER, Column, build_board
 from .providers import ProviderError, Query
 
 
-COMMANDS = ("open", "snapshot", "adopt", "setup", "install-skill")
+COMMANDS = ("open", "snapshot", "adopt", "setup", "install-skill", "upgrade")
 NEEDS_HERDR = ("open", "adopt")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ticketmaster",
-        usage="ticketmaster [open|snapshot|adopt|setup|install-skill] [parent] [options]",
+        usage="ticketmaster [open|snapshot|adopt|setup|install-skill|upgrade] [parent] [options]",
         description="Live kanban board of issue-tracker work, in herdr.",
     )
+    parser.add_argument("--version", action="store_true", help="print the version and the commit it was built from")
     parser.add_argument("parent", nargs="?", type=parse_number, help="parent issue: show its sub-issues")
     parser.add_argument("--label", help="show issues with this label")
     parser.add_argument("--repo", help="owner/name (default: from the git remote)")
@@ -62,12 +63,21 @@ def passthrough(args: argparse.Namespace) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.version:
+        from .upgrade import version_line
+
+        print(version_line())
+        return 0
     if args.command == "install-skill":
         from .install_skill import install_skill
 
         path = install_skill()
         print(f"Installed /ticketmaster skill at {path}. Restart Claude Code sessions to pick it up.")
         return 0
+    if args.command == "upgrade":
+        from .upgrade import installed, upgrade
+
+        return upgrade(installed())
     if args.command in NEEDS_HERDR and not herdr.available():
         print(f"ticketmaster: `{args.command}` runs inside herdr; start herdr and run it from a herdr pane", file=sys.stderr)
         return 2
