@@ -22,6 +22,8 @@ COLUMN_ORDER = [Column.BLOCKED, Column.READY, Column.IN_PROGRESS, Column.REVIEW,
 # `review:security` (GitHub/Gitea) and `review::security` (GitLab scoped labels).
 REVIEW_LABEL = re.compile(r"^review::?(?P<kind>.+)$", re.IGNORECASE)
 BLOCKED_LABEL = "blocked"
+# Marks an issue closed from the board as not planned; GitLab and Gitea have no close reason, so it is the marker.
+WONTFIX_LABEL = "wontfix"
 WAYFINDER_TYPES = ("research", "prototype", "grilling", "task")
 # `wayfinder:<kind>` (GitHub/Gitea) and `wayfinder::<kind>` (GitLab scoped labels).
 WAYFINDER_LABEL = re.compile(r"^wayfinder::?(?P<kind>[^:].*)$", re.IGNORECASE)
@@ -37,6 +39,8 @@ class Ticket:
     is_open: bool
     body: str = ""
     closed_at: datetime | None = None
+    # Closed as not planned (GitHub's close reason); trackers without one leave it False.
+    not_planned: bool = False
     # Login/username of whoever opened the issue; empty when the provider did not say.
     author: str = ""
     assignees: tuple[str, ...] = ()
@@ -65,6 +69,11 @@ class Ticket:
         if self.open_blockers:
             return True
         return any(label.lower() == BLOCKED_LABEL for label in self.labels)
+
+    @property
+    def is_wont_fix(self) -> bool:
+        """Closed as not planned or labelled `wontfix`: not finished work, so it stays off Done."""
+        return self.not_planned or any(label.lower() == WONTFIX_LABEL for label in self.labels)
 
     def start_refusal(self, viewer: str | None) -> str | None:
         """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart."""
@@ -174,7 +183,7 @@ class Board:
 def classify(ticket: Ticket, now: datetime, done_days: int) -> Column | None:
     """Return the column a ticket belongs in, or None if it should not be shown."""
     if not ticket.is_open:
-        if ticket.closed_at is None or now - ticket.closed_at > timedelta(days=done_days):
+        if ticket.is_wont_fix or ticket.closed_at is None or now - ticket.closed_at > timedelta(days=done_days):
             return None
         return Column.DONE
     if ticket.review_tags or ticket.has_open_change_request:

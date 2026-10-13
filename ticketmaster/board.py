@@ -21,7 +21,7 @@ from textual.widgets import Button, Footer, Input, Label, Static
 
 from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
-from .model import COLUMN_ORDER, Board, Column, Ticket, build_board, frontier, map_progress, MapProgress
+from .model import COLUMN_ORDER, WONTFIX_LABEL, Board, Column, Ticket, build_board, frontier, map_progress, MapProgress
 from .providers import Provider, ProviderError, Query, RateLimited
 from .wayfinding import SETUP_COMMAND as WAYFINDING_SETUP, drift
 
@@ -55,7 +55,7 @@ STATUS_STYLES = {  # herdr agent states
     "unknown": ("? unknown", "grey62"),
     None: ("○ no agent", "grey50"),
 }
-DELETABLE = (Column.BLOCKED, Column.READY, Column.DONE)  # not while someone works on it or it is in review
+CLOSABLE = (Column.BLOCKED, Column.READY)  # not while someone works on it or it is in review; Done is closed already
 ACTIVE_STATES = ("working", "blocked")  # auto-remove waits until the agent is no longer busy or asking
 LIMITED_TICKETS_EVERY = 60.0  # ticket fetches while the tracker rate-limits the board
 LIMITED_SESSIONS_EVERY = 10.0  # herdr session refreshes meanwhile
@@ -220,7 +220,7 @@ class Workbench(Protocol):
 
 
 class Confirm(ModalScreen[bool]):
-    """Yes/no before anything that makes or removes a worktree or deletes an issue; n or Esc cancels."""
+    """Yes/no before anything that makes or removes a worktree or closes an issue; n or Esc cancels."""
 
     DEFAULT_CSS = """
     Confirm { align: center middle; }
@@ -362,7 +362,7 @@ KEY_DETAILS = {
     "remove": "on a Done card, remove its worktrees (herdr refuses if one has uncommitted changes)",
     "toggle_auto_remove": "remove Done tickets' worktrees once their agent is idle; unpushed work is kept",
     "open": "open the issue in the browser",
-    "delete": "delete the issue from the tracker after asking; Blocked, Ready and Done only, needs admin/owner rights",
+    "close": "close the issue as not planned (label wontfix) after asking; Blocked and Ready only, write access is enough",
     "pick_filter": "include or exclude labels, select authors (Enter cycles); combines with /, Esc on the board clears all",
 }
 
@@ -399,7 +399,8 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
 
     heading("Columns (the first rule that matches)")
     for column, rule in [
-        (Column.DONE, f"closed in the last {query.done_days} days; older closed issues are hidden"),
+        (Column.DONE, f"closed in the last {query.done_days} days; older ones, and those closed as not planned "
+                      f"or labelled {WONTFIX_LABEL}, are hidden"),
         (Column.REVIEW, "a review:<kind> label, or an open PR/MR that closes it"),
         (Column.BLOCKED, "an open blocking issue (native or a 'Blocked by: #n' body line), or a 'blocked' label"),
         (Column.IN_PROGRESS, "assigned to someone"),
@@ -443,9 +444,10 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 f"  scope) into that doc's Wayfinding operations section; the status line warns while\n"
                 f"  they are missing or differ from what this version writes.\n")
 
-    heading("The board only reads, except for deleting")
-    text.append("  It writes to the tracker only when you delete an issue. A session claims its ticket by\n"
-                "  assigning it, so the card moves to In progress on the next refresh.")
+    heading("The board only reads, except for closing")
+    text.append("  It writes to the tracker only when you close an issue as not planned; it stays off Done.\n"
+                "  A session claims its ticket by assigning it, so the card moves to In progress on the next\n"
+                "  refresh.")
     return text
 
 
@@ -494,7 +496,7 @@ class BoardApp(App):
         Binding("x", "remove", "Remove worktree"),
         Binding("a", "toggle_auto_remove", "Auto-remove"),
         Binding("o", "open", "Browser"),
-        Binding("backspace,delete", "delete", "Delete issue", show=False),
+        Binding("backspace,delete", "close", "Close issue", show=False),
         Binding("v", "toggle_view", "One/all columns"),
         Binding("question_mark", "help", "Help"),
         *[Binding(str(i + 1), f"column({i})", "Show column", show=False) for i in range(len(COLUMN_ORDER))],
@@ -950,36 +952,38 @@ class BoardApp(App):
         self.push_screen(Confirm(f"Remove the worktrees of #{ticket.number}?",
                                  f"{paths}\nherdr refuses if one has uncommitted changes", "Remove"), confirmed)
 
-    def action_delete(self) -> None:
-        """Backspace/Delete: deletes the issue from the tracker; its worktrees stay."""
+    def action_close(self) -> None:
+        """Backspace/Delete: closes the issue as not planned with the `wontfix` label; its worktrees stay."""
         if not isinstance(self.focused, Card):
             self.notify("Select a ticket first", severity="warning")
             return
         card = self.focused
         ticket, sessions = card.ticket, self.sessions.get(card.ticket.number, [])
-        if card.column not in DELETABLE:
-            self.notify(f"#{ticket.number} is {card.column.value}; only Blocked, Ready and Done tickets can be deleted",
+        if card.column is Column.DONE:
+            return
+        if card.column not in CLOSABLE:
+            self.notify(f"#{ticket.number} is {card.column.value}; only Blocked and Ready tickets can be closed",
                         severity="warning")
             return
 
-        def delete() -> None:
+        def close() -> None:
             try:
-                self.provider.delete(ticket.number)
+                self.provider.close(ticket.number)
             except ProviderError as exc:
-                self.call_from_thread(self.notify, f"Delete #{ticket.number}: {exc}", severity="error")
+                self.call_from_thread(self.notify, f"Close #{ticket.number}: {exc}", severity="error")
                 return
-            self.call_from_thread(self.notify, f"Deleted #{ticket.number} {ticket.title}")
+            self.call_from_thread(self.notify, f"Closed #{ticket.number} {ticket.title} as not planned")
             self.call_from_thread(self._refresh_now)
 
         def confirmed(yes: bool | None) -> None:
             if yes:
-                self.run_worker(delete, thread=True, group="tracker")
+                self.run_worker(close, thread=True, group="tracker")
 
-        detail = "This cannot be undone."
+        detail = f"It is labelled {WONTFIX_LABEL} and stays off Done."
         if sessions:
             paths = "\n".join(s.path for s in sessions)
             detail += f"\nIts worktrees are left behind, not removed:\n{paths}"
-        self.push_screen(Confirm(f"Delete #{ticket.number} {ticket.title}?", detail, "Delete"), confirmed)
+        self.push_screen(Confirm(f"Close #{ticket.number} {ticket.title} as not planned?", detail, "Close"), confirmed)
 
     def action_toggle_auto_remove(self) -> None:
         self.auto_remove = not self.auto_remove

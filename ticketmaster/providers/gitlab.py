@@ -11,7 +11,7 @@ import json
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
-from ..model import Ticket, parse_time
+from ..model import WONTFIX_LABEL, Ticket, parse_time
 from . import (IssueStates, ProviderError, Query, blocker_ref, map_family, resolve_maps, run_cli, run_json,
                tracker_error, with_body_blockers)
 
@@ -89,9 +89,11 @@ class GitLabProvider:
             tickets = map_family(tickets, query.parent, self._map(query.parent))
         return with_body_blockers(resolve_maps(tickets, self._map), self.states)
 
-    def delete(self, number: int) -> None:
+    def close(self, number: int) -> None:
+        """GitLab has no close reason, so the `wontfix` label (created if missing) marks it not planned."""
         project = urllib.parse.quote(self.repo, safe="")
-        run_cli(["glab", "api", "--hostname", self.host, "-X", "DELETE", f"projects/{project}/issues/{number}"])
+        run_cli(["glab", "api", "--hostname", self.host, "-X", "PUT", f"projects/{project}/issues/{number}",
+                 "-f", "state_event=close", "-f", f"add_labels={WONTFIX_LABEL}"])
 
     def _map(self, iid: int) -> tuple[str, tuple[str, ...]] | None:
         issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(iid)}).get("project") or {}).get("issue")

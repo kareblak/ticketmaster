@@ -44,6 +44,17 @@ def test_recently_closed_is_done_and_old_closed_hidden():
     assert classify(ticket(is_open=False, closed_at=None), NOW, 7) is None
 
 
+def test_closed_wontfix_or_not_planned_is_hidden_from_done():
+    recent = NOW - timedelta(days=2)
+    assert classify(ticket(is_open=False, closed_at=recent, labels=("WontFix",)), NOW, 7) is None
+    assert classify(ticket(is_open=False, closed_at=recent, not_planned=True), NOW, 7) is None
+    assert classify(ticket(is_open=False, closed_at=recent, labels=("bug",)), NOW, 7) is Column.DONE
+
+
+def test_an_open_wontfix_ticket_still_shows():
+    assert classify(ticket(labels=("wontfix",)), NOW, 7) is Column.READY
+
+
 def test_board_sorts_by_order_then_number_and_done_newest_first():
     tickets = [
         ticket(number=5, order=1),

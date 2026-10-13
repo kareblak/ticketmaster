@@ -535,18 +535,30 @@ def test_gitlab_map_board_follows_a_part_of_line_naming_another_map(monkeypatch)
     assert (ticket.parent_number, ticket.parent_url) == (7, "https://gl/7")
 
 
-def test_github_delete_runs_gh_issue_delete(monkeypatch):
+def test_github_close_labels_wontfix_then_closes_as_not_planned(monkeypatch):
     calls = []
     monkeypatch.setattr(github, "run_cli", lambda args, stdin=None: calls.append(args) or "")
-    github.GitHubProvider("o/r", host="ghe.example.com").delete(7)
-    assert calls == [["gh", "issue", "delete", "7", "--repo", "ghe.example.com/o/r", "--yes"]]
+    github.GitHubProvider("o/r", host="ghe.example.com").close(7)
+    assert calls == [
+        ["gh", "issue", "edit", "7", "--repo", "ghe.example.com/o/r", "--add-label", "wontfix"],
+        ["gh", "issue", "close", "7", "--repo", "ghe.example.com/o/r", "--reason", "not planned"],
+    ]
 
 
-def test_gitlab_delete_calls_the_issue_delete_api(monkeypatch):
+def test_github_not_planned_close_reason_is_read():
+    node = {"number": 1, "title": "T", "url": "u", "state": "CLOSED", "stateReason": "NOT_PLANNED",
+            "assignees": {"nodes": []}, "labels": {"nodes": []}}
+    assert github.to_ticket(node, 0).not_planned is True
+    assert github.to_ticket({**node, "stateReason": "COMPLETED"}, 0).not_planned is False
+    assert "stateReason" in github.ISSUE_FIELDS
+
+
+def test_gitlab_close_closes_and_labels_wontfix_in_one_call(monkeypatch):
     calls = []
     monkeypatch.setattr(gitlab, "run_cli", lambda args, stdin=None: calls.append(args) or "")
-    gitlab.GitLabProvider("g/sub/p", host="gl.example.com").delete(12)
-    assert calls == [["glab", "api", "--hostname", "gl.example.com", "-X", "DELETE", "projects/g%2Fsub%2Fp/issues/12"]]
+    gitlab.GitLabProvider("g/sub/p", host="gl.example.com").close(12)
+    assert calls == [["glab", "api", "--hostname", "gl.example.com", "-X", "PUT", "projects/g%2Fsub%2Fp/issues/12",
+                      "-f", "state_event=close", "-f", "add_labels=wontfix"]]
 
 
 class FakeResponse(io.BytesIO):
@@ -557,36 +569,50 @@ class FakeResponse(io.BytesIO):
         return False
 
 
-def test_gitea_delete_sends_delete_with_the_token(monkeypatch):
+def test_gitea_close_labels_wontfix_then_closes_with_the_token(monkeypatch):
     requests = []
 
     def urlopen(request, timeout=None):
         requests.append(request)
-        return FakeResponse(b"")  # 204 No Content
+        return FakeResponse(b"{}")
 
     monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
-    gitea.GiteaProvider("o/r", "codeberg.org", token="x").delete(4)
-    [request] = requests
-    assert (request.get_method(), request.full_url) == ("DELETE", "https://codeberg.org/api/v1/repos/o/r/issues/4")
-    assert request.get_header("Authorization") == "token x"
+    gitea.GiteaProvider("o/r", "codeberg.org", token="x").close(4)
+    label, close = requests
+    assert (label.get_method(), label.full_url) == ("POST", "https://codeberg.org/api/v1/repos/o/r/issues/4/labels")
+    assert json.loads(label.data) == {"labels": ["wontfix"]}
+    assert (close.get_method(), close.full_url) == ("PATCH", "https://codeberg.org/api/v1/repos/o/r/issues/4")
+    assert json.loads(close.data) == {"state": "closed"}
+    assert all(r.get_header("Authorization") == "token x" for r in requests)
+    assert all(r.get_header("Content-type") == "application/json" for r in requests)
 
 
 @pytest.mark.parametrize("module", [github, gitlab])
-def test_cli_delete_errors_are_provider_errors(monkeypatch, module):
-    stderr = "GraphQL: kareblak does not have the correct permissions to execute `DeleteIssue`"
+def test_cli_close_errors_are_provider_errors(monkeypatch, module):
+    stderr = "GraphQL: kareblak does not have the correct permissions to execute `CloseIssue`"
     monkeypatch.setattr(providers.subprocess, "run", lambda *a, **k: FakeCompleted(stderr))
     provider = github.GitHubProvider("o/r") if module is github else gitlab.GitLabProvider("g/p")
     with pytest.raises(ProviderError, match="permissions"):
-        provider.delete(1)
+        provider.close(1)
 
 
-def test_gitea_delete_forbidden_is_a_provider_error(monkeypatch):
+def test_gitea_close_forbidden_is_a_provider_error_and_does_not_close(monkeypatch):
+    requests = []
+
     def urlopen(request, timeout=None):
+        requests.append(request)
         raise http_error(403, "Forbidden")
 
     monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
     with pytest.raises(ProviderError, match="403 Forbidden"):
-        gitea.GiteaProvider("o/r", "codeberg.org", token="x").delete(4)
+        gitea.GiteaProvider("o/r", "codeberg.org", token="x").close(4)
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("provider", [github.GitHubProvider("o/r"), gitlab.GitLabProvider("g/p"),
+                                      gitea.GiteaProvider("o/r", "codeberg.org", token="x")])
+def test_no_provider_can_delete(provider):
+    assert not hasattr(provider, "delete")
 
 
 def test_spec_is_part_of_the_map_without_a_wayfinder_label():
