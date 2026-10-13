@@ -93,6 +93,11 @@ claude -n "#<n> <title>" "<prompt>"
 | has a `wayfinder:<type>` label and its parent is a map        | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
 | anything else                                                 | "Work on issue #n … assign it to yourself before doing any work" |
 
+The mattpocock skills a session runs stop to ask for `/setup-matt-pocock-skills` when the repo
+has no `docs/agents/issue-tracker.md`, which would leave the session waiting. Until that file
+exists, the status line warns and names the command, so it can be run once before starting
+sessions. The board checks again on every refresh, and `s` and `c` still work while the warning shows.
+
 A review session (`c`) gets a `review-<n>` worktree and a prompt to check out the PR that closes
 the issue and review it, without pushing or commenting.
 
