@@ -93,8 +93,10 @@ claude -n "#<n> <title>" "<prompt>"
 | has a `wayfinder:<type>` label and its parent is a map        | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
 | anything else                                                 | "Work on issue #n … assign it to yourself before doing any work" |
 
-A review session (`c`) gets a `review-<n>` worktree and a prompt to check out the PR that closes
-the issue and review it, without pushing or commenting.
+A review session (`c`) gets a `review-<n>` worktree and starts `/mattpocock-skills:code-review`
+the same way: the prompt tells it to find the PR that closes the issue, check out its branch, and
+review it with the PR's base branch (e.g. `origin/main`) as the fixed point and the issue URL as
+the spec. Findings stay in the session; it does not push or comment on the PR without asking.
 
 The board finds a ticket's sessions through its worktrees: any checkout named `issue-<n>`,
 `issue-<n>-<k>` or `review-<n>`, including older `claude -w issue-<n>` ones under
@@ -131,6 +133,7 @@ Settings in `.ticketmaster.toml`:
 
 ```toml
 wayfinder_command = "/wayfinder"          # if wayfinder is installed under another name
+review_command = "/code-review"           # default /mattpocock-skills:code-review
 ```
 
 ## Columns

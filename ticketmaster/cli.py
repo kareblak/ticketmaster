@@ -127,10 +127,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from .board import BoardApp
     from .config import load_config, settings_path
-    from .start import DEFAULT_WAYFINDER_COMMAND, Workbench, build_prompt
+    from .start import build_prompt, workbench_for
 
-    config = load_config(cwd)
-    workbench = Workbench(cwd, wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND))
+    workbench = workbench_for(cwd, load_config(cwd))
     BoardApp(
         provider,
         query,
