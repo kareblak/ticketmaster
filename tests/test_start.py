@@ -1,5 +1,7 @@
+from pathlib import Path
+
 from ticketmaster.model import Ticket
-from ticketmaster.start import build_prompt, claude_args, review_prompt
+from ticketmaster.start import build_prompt, claude_args, review_prompt, workbench_for
 
 MAP = ("wayfinder:map",)
 
@@ -62,6 +64,24 @@ def test_claude_args_are_single_line_because_herdr_rejects_newlines():
     )
 
 
-def test_review_prompt_points_at_the_issue_and_forbids_pushing():
+def test_review_prompt_runs_code_review_from_the_pr_base_against_the_issue():
     prompt = review_prompt(ticket())
-    assert "https://gh/686" in prompt and "do not push" in prompt
+    assert prompt.startswith("/mattpocock-skills:code-review Review the open pull request for issue #686")
+    assert "check out its branch" in prompt and "base branch (e.g. origin/main) as the fixed point" in prompt
+    assert "https://gh/686 as the spec" in prompt
+    assert "do not push or comment on the PR without asking" in prompt
+
+
+def test_custom_review_command():
+    assert review_prompt(ticket(), "/code-review").startswith("/code-review Review the open pull request")
+
+
+def test_workbench_reads_commands_from_config():
+    default = workbench_for(Path("/r"), {})
+    assert default.implement_command == "/mattpocock-skills:implement"
+    assert (default.wayfinder_command, default.review_command) == (
+        "/mattpocock-skills:wayfinder", "/mattpocock-skills:code-review")
+    configured = workbench_for(Path("/r"), {"review_command": "/code-review", "wayfinder_command": "/wayfinder",
+                                            "implement_command": "/implement"})
+    assert configured.implement_command == "/implement"
+    assert (configured.wayfinder_command, configured.review_command) == ("/wayfinder", "/code-review")
