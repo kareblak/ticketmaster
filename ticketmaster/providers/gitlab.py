@@ -22,6 +22,7 @@ query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
       pageInfo { hasNextPage endCursor }
       nodes {
         iid title webUrl description state closedAt
+        author { username }
         assignees { nodes { username } }
         labels { nodes { title } }
         blockedByCount
@@ -104,6 +105,7 @@ def to_ticket(node: dict) -> Ticket:
         body=node.get("description") or "",
         is_open=node["state"] == "opened",
         closed_at=parse_time(node.get("closedAt")),
+        author=(node.get("author") or {}).get("username", ""),
         assignees=tuple(a["username"] for a in node["assignees"]["nodes"]),
         labels=tuple(label["title"] for label in node["labels"]["nodes"]),
         open_blockers=node.get("blockedByCount"),

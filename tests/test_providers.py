@@ -7,6 +7,7 @@ from ticketmaster.providers.gitea import token_from_tea_config
 def test_github_node_to_ticket():
     node = {
         "number": 7, "title": "T", "url": "https://x/7", "body": "b", "state": "OPEN", "closedAt": None,
+        "author": {"login": "opener"},
         "assignees": {"nodes": [{"login": "kareblak"}]},
         "labels": {"nodes": [{"name": "review:security"}]},
         "issueDependenciesSummary": {"blockedBy": 1},
@@ -17,6 +18,13 @@ def test_github_node_to_ticket():
     assert (t.parent_number, t.parent_url, t.parent_labels) == (2, "https://x/2", ("wayfinder:map",))
     assert (t.number, t.is_open, t.open_blockers, t.has_open_change_request, t.order) == (7, True, 1, True, 3)
     assert t.assignees == ("kareblak",) and t.review_tags == ["security"]
+    assert t.author == "opener"
+
+
+def test_github_ghost_author_is_empty():
+    node = {"number": 1, "title": "T", "url": "u", "state": "OPEN", "author": None,
+            "assignees": {"nodes": []}, "labels": {"nodes": []}}
+    assert github.to_ticket(node, 0).author == ""
 
 
 def test_github_merged_pr_alone_is_not_review():
@@ -59,12 +67,12 @@ def test_github_default_scope_is_every_issue(monkeypatch):
 def test_gitlab_node_to_ticket():
     node = {
         "iid": "12", "title": "T", "webUrl": "https://gl/12", "description": "d", "state": "opened",
-        "closedAt": None, "assignees": {"nodes": []},
+        "closedAt": None, "author": {"username": "gl-user"}, "assignees": {"nodes": []},
         "labels": {"nodes": [{"title": "review::ux"}]}, "blockedByCount": 0, "mergeRequestsCount": 1,
     }
     t = gitlab.to_ticket(node)
     assert (t.number, t.is_open, t.open_blockers, t.has_open_change_request) == (12, True, 0, True)
-    assert t.review_tags == ["ux"]
+    assert t.review_tags == ["ux"] and t.author == "gl-user"
 
 
 def test_gitlab_parent_falls_back_to_mentions(monkeypatch):
@@ -89,9 +97,10 @@ def test_gitlab_parent_falls_back_to_mentions(monkeypatch):
 
 def test_gitea_issue_to_ticket_detects_closing_pr():
     issue = {"number": 4, "title": "T", "html_url": "https://gt/4", "body": "", "state": "open",
-             "closed_at": None, "assignees": None, "labels": [{"name": "review:perf"}]}
+             "closed_at": None, "user": {"login": "gt-user"}, "assignees": None, "labels": [{"name": "review:perf"}]}
     t = gitea.to_ticket(issue, 0, ["Refactor\nFixes #4"])
     assert t.has_open_change_request and t.review_tags == ["perf"] and t.assignees == ()
+    assert t.author == "gt-user"
     assert gitea.to_ticket(issue, 0, ["Fixes #40"]).has_open_change_request is False
 
 
