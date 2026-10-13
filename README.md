@@ -50,8 +50,8 @@ match title, body, labels or assignees), `Esc` clears the filter, `r` refreshes 
 
 ## Starting work from the board
 
-Select a card in **Ready** and press `s` or double-click it. After you confirm with `y`, a new
-tab opens running:
+Select a card in **Ready** and press `s` or double-click it. The board asks where to open the
+session: `t` new tab, `r` pane to the right, `d` pane below (`n` or `Esc` cancels). It runs:
 
 ```
 claude -w issue-<n> -n "#<n> <title>" "<prompt>"
@@ -73,7 +73,7 @@ ticket twice. Only Ready tickets can be started.
 
 ## Terminal support
 
-| Terminal        | Split (board)                  | Tab (sessions)           |
+| Terminal        | Split (board, `r`/`d`)         | Tab (`t`)                |
 | --------------- | ------------------------------ | ------------------------ |
 | tmux (any host) | `split-window -h`              | `new-window`             |
 | Ghostty 1.3+ (macOS) | AppleScript split of the focused pane | AppleScript new tab |
@@ -85,8 +85,9 @@ ticket twice. Only Ready tickets can be started.
 | others (Linux)  | new window (ghostty, konsole, x-terminal-emulator) | new window |
 
 tmux is checked first, so inside tmux everything opens as tmux panes and windows regardless of
-the host terminal. Ghostty targets the focused pane of its front window, which is the pane you
-typed `/ticketmaster` in.
+the host terminal. Ghostty splits the focused pane of its front window: the pane you typed `/ticketmaster` in,
+or the board itself when starting a session. Where a terminal can't split, `r`/`d` fall back to
+a tab, then a window.
 
 Settings in `.ticketmaster.toml`:
 

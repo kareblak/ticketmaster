@@ -15,6 +15,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Label, Static
 
+from .launch import Placement
 from .model import COLUMN_ORDER, Board, Column, Ticket, build_board
 from .providers import Provider, ProviderError, Query
 
@@ -77,6 +78,14 @@ def matches(ticket: Ticket, needle: str) -> bool:
 
 
 class Card(Static, can_focus=True):
+    # Bound on the card itself: otherwise the column's VerticalScroll handles up/down as scrolling.
+    BINDINGS = [
+        Binding("up,k", "app.move(0,-1)", show=False),
+        Binding("down,j", "app.move(0,1)", show=False),
+        Binding("left,h", "app.move(-1,0)", show=False),
+        Binding("right,l", "app.move(1,0)", show=False),
+    ]
+
     def __init__(self, ticket: Ticket, column: Column, started: bool = False):
         super().__init__(render_card(ticket, column, started), classes="card")
         self.ticket = ticket
@@ -88,17 +97,26 @@ class Card(Static, can_focus=True):
             self.app.action_start()
 
 
-class ConfirmStart(ModalScreen[bool]):
-    """Asks before spawning a session, so a stray double-click does nothing."""
+class ColumnScroll(VerticalScroll, can_focus=False):
+    """Scrolls with the mouse wheel and follows the focused card, but never takes focus itself."""
+
+
+class ConfirmStart(ModalScreen[Placement | None]):
+    """Asks where to open the session; a stray double-click is cancelled with n or Esc."""
 
     DEFAULT_CSS = """
     ConfirmStart { align: center middle; }
-    #dialog { width: 72; height: auto; padding: 1 2; border: thick $accent; background: $surface; }
+    #dialog { width: 80; height: auto; padding: 1 2; border: thick $accent; background: $surface; }
     #prompt { margin-bottom: 1; }
     #buttons { height: auto; align-horizontal: right; }
     #buttons Button { margin-left: 2; }
     """
-    BINDINGS = [Binding("y", "answer(True)", "Start"), Binding("n,escape", "answer(False)", "Cancel")]
+    BINDINGS = [
+        Binding("t", "answer('tab')", "New tab"),
+        Binding("r", "answer('split right')", "Pane right"),
+        Binding("d", "answer('split down')", "Pane down"),
+        Binding("n,escape", "answer('')", "Cancel"),
+    ]
 
     def __init__(self, ticket: Ticket, detail: str):
         super().__init__()
@@ -110,14 +128,16 @@ class ConfirmStart(ModalScreen[bool]):
             yield Label(Text(f"Start #{self.ticket.number} {self.ticket.title} in a new session?", style="bold"), id="prompt")
             yield Label(Text(self.detail, style="dim"))
             with Horizontal(id="buttons"):
-                yield Button("Cancel (n)", id="no")
-                yield Button("Start (y)", id="yes", variant="primary")
+                yield Button("Cancel (n)", id="cancel")
+                yield Button("New tab (t)", id="tab", variant="primary")
+                yield Button("Pane right (r)", id="split-right", variant="primary")
+                yield Button("Pane down (d)", id="split-down", variant="primary")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "yes")
+        self.action_answer(event.button.id.replace("-", " "))
 
-    def action_answer(self, answer: bool) -> None:
-        self.dismiss(answer)
+    def action_answer(self, answer: str) -> None:
+        self.dismiss(Placement(answer) if answer in {p.value for p in Placement} else None)
 
 
 class BoardApp(App):
@@ -152,7 +172,7 @@ class BoardApp(App):
         provider: Provider,
         query: Query,
         interval: float = 5.0,
-        starter: Callable[[Ticket], str] | None = None,
+        starter: Callable[[Ticket, Placement], str] | None = None,
         describe_start: Callable[[Ticket], str] | None = None,
     ):
         super().__init__()
@@ -175,7 +195,7 @@ class BoardApp(App):
             for column in COLUMN_ORDER:
                 with Vertical(classes="column"):
                     yield Static(column.value, classes="column-title", id=f"title-{column.name}")
-                    yield VerticalScroll(id=f"col-{column.name}")
+                    yield ColumnScroll(id=f"col-{column.name}")
         yield Input(placeholder="filter: words match title, body, labels, assignees · esc clears", id="filter")
         yield Footer()
 
@@ -241,18 +261,22 @@ class BoardApp(App):
         if not any(grid):
             return
         if not isinstance(self.focused, Card):
-            next(col for col in grid if col)[0].focus()
+            self._select(next(col for col in grid if col)[0])
             return
         col = next(i for i, cards in enumerate(grid) if self.focused in cards)
         row = grid[col].index(self.focused)
         if dy:
-            grid[col][max(0, min(len(grid[col]) - 1, row + dy))].focus()
+            self._select(grid[col][max(0, min(len(grid[col]) - 1, row + dy))])
             return
         target = col + dx
         while 0 <= target < len(grid) and not grid[target]:
             target += dx
         if 0 <= target < len(grid):
-            grid[target][min(row, len(grid[target]) - 1)].focus()
+            self._select(grid[target][min(row, len(grid[target]) - 1)])
+
+    def _select(self, card: Card) -> None:
+        card.focus(scroll_visible=False)
+        card.scroll_visible(animate=False)
 
     def action_open(self) -> None:
         if isinstance(self.focused, Card):
@@ -274,16 +298,16 @@ class BoardApp(App):
             self.notify(f"A session for #{ticket.number} was already started from this board", severity="warning")
             return
 
-        def confirmed(answer: bool | None) -> None:
-            if answer:
+        def confirmed(placement: Placement | None) -> None:
+            if placement is not None:
                 self.started.add(ticket.number)
                 self._render_board()
-                self.run_worker(lambda: self._start(ticket), thread=True, group="start")
+                self.run_worker(lambda: self._start(ticket, placement), thread=True, group="start")
 
         self.push_screen(ConfirmStart(ticket, self.describe_start(ticket)), confirmed)
 
-    def _start(self, ticket: Ticket) -> None:
-        message = self.starter(ticket)
+    def _start(self, ticket: Ticket, placement: Placement) -> None:
+        message = self.starter(ticket, placement)
         self.call_from_thread(self.notify, message)
 
     def action_filter(self) -> None:

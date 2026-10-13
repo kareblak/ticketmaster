@@ -1,6 +1,7 @@
 import asyncio
 
 from ticketmaster.board import BoardApp, Card
+from ticketmaster.launch import Placement
 from ticketmaster.model import Ticket
 from ticketmaster.providers import ProviderError, Query
 
@@ -85,8 +86,8 @@ def test_provider_error_is_shown_in_status():
 
 
 def start_app(starter_calls):
-    def starter(ticket):
-        starter_calls.append(ticket.number)
+    def starter(ticket, placement):
+        starter_calls.append((ticket.number, placement))
         return f"Started #{ticket.number}"
 
     return BoardApp(FakeProvider(TICKETS), Query(), interval=60, starter=starter)
@@ -106,14 +107,14 @@ def test_start_ready_ticket_after_confirm():
             await pilot.press("down", "s")
             await pilot.pause()
             assert type(app.screen).__name__ == "ConfirmStart"
-            await pilot.press("y")
+            await pilot.press("t")
             await loaded(app, pilot)
-            assert calls == [1]
+            assert calls == [(1, Placement.TAB)]
             card = app.query_one("#col-READY").query(Card).first()
             assert "session started" in str(card.render())
             await pilot.press("down", "s")
             await pilot.pause()
-            assert type(app.screen).__name__ != "ConfirmStart" and calls == [1]
+            assert type(app.screen).__name__ != "ConfirmStart" and len(calls) == 1
 
     run(scenario())
 
@@ -155,8 +156,44 @@ def test_double_click_opens_confirm():
             await pilot.click(card, times=2)
             await pilot.pause()
             assert type(app.screen).__name__ == "ConfirmStart"
-            await pilot.click("#yes")
+            await pilot.click("#split-right")
             await loaded(app, pilot)
-            assert calls == [1]
+            assert calls == [(1, Placement.SPLIT_RIGHT)]
+
+    run(scenario())
+
+
+def test_pane_down_key():
+    async def scenario():
+        calls = []
+        app = start_app(calls)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "s", "d")
+            await loaded(app, pilot)
+            assert calls == [(1, Placement.SPLIT_DOWN)]
+
+    run(scenario())
+
+
+def test_up_down_move_between_cards_in_a_column():
+    async def scenario():
+        tickets = TICKETS + [
+            Ticket(number=4, title="Ready two", url="u4", is_open=True),
+            Ticket(number=5, title="Ready three", url="u5", is_open=True),
+        ]
+        app = BoardApp(FakeProvider(tickets), Query(), interval=60)
+        async with app.run_test(size=(160, 9)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down")
+            assert app.focused.ticket.number == 1
+            await pilot.press("down", "down")
+            await pilot.pause()
+            assert app.focused.ticket.number == 5
+            column = app.query_one("#col-READY")
+            assert column.max_scroll_y > 0 and column.scroll_y > 0  # focused card scrolled into view
+            await pilot.press("up", "up")
+            await pilot.pause()
+            assert app.focused.ticket.number == 1 and column.scroll_y == 0
 
     run(scenario())

@@ -1,4 +1,4 @@
-"""Start a Ready ticket in a new Claude Code session, in a new tab and its own git worktree."""
+"""Start a Ready ticket in a new Claude Code session (tab or split pane) in its own git worktree."""
 
 from __future__ import annotations
 
@@ -46,10 +46,10 @@ def session_command(ticket: Ticket, options: StartOptions) -> str:
     return shlex.join(args)
 
 
-def start_session(ticket: Ticket, options: StartOptions) -> str:
-    """Opens the session in a new tab (a window where tabs aren't supported). Returns a status line."""
+def start_session(ticket: Ticket, options: StartOptions, placement: Placement = Placement.TAB) -> str:
+    """Opens the session as asked, falling back (split → tab → window). Returns a status line."""
     command = session_command(ticket, options)
-    launch = open_beside(options.cwd, command, Placement.TAB)
+    launch = open_beside(options.cwd, command, placement)
     if launch is None:
         return f"No terminal launcher worked; run: {command}"
     return f"Started #{ticket.number} in {describe(launch)}"

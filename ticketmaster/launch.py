@@ -19,13 +19,19 @@ from pathlib import Path
 
 
 class Placement(Enum):
-    SPLIT = "split"
+    SPLIT_RIGHT = "split right"
+    SPLIT_DOWN = "split down"
     TAB = "tab"
     WINDOW = "window"
 
+    @property
+    def is_split(self) -> bool:
+        return self in (Placement.SPLIT_RIGHT, Placement.SPLIT_DOWN)
+
 
 FALLBACKS = {
-    Placement.SPLIT: [Placement.SPLIT, Placement.TAB, Placement.WINDOW],
+    Placement.SPLIT_RIGHT: [Placement.SPLIT_RIGHT, Placement.TAB, Placement.WINDOW],
+    Placement.SPLIT_DOWN: [Placement.SPLIT_DOWN, Placement.TAB, Placement.WINDOW],
     Placement.TAB: [Placement.TAB, Placement.WINDOW],
     Placement.WINDOW: [Placement.WINDOW],
 }
@@ -62,7 +68,8 @@ def candidates(cwd: Path, command: str, placement: Placement, env: Mapping[str, 
     for step in FALLBACKS[placement]:
         if env.get("TMUX") and shutil.which("tmux"):
             tmux = {
-                Placement.SPLIT: ["tmux", "split-window", "-h", "-c", str(cwd), shlex.join(in_shell)],
+                Placement.SPLIT_RIGHT: ["tmux", "split-window", "-h", "-c", str(cwd), shlex.join(in_shell)],
+                Placement.SPLIT_DOWN: ["tmux", "split-window", "-v", "-c", str(cwd), shlex.join(in_shell)],
                 Placement.TAB: ["tmux", "new-window", "-c", str(cwd), shlex.join(in_shell)],
             }
             if step in tmux:
@@ -80,7 +87,8 @@ def candidates(cwd: Path, command: str, placement: Placement, env: Mapping[str, 
         if program == "WezTerm" and shutil.which("wezterm"):
             pane = ["--pane-id", env["WEZTERM_PANE"]] if env.get("WEZTERM_PANE") else []
             wezterm = {
-                Placement.SPLIT: ["wezterm", "cli", "split-pane", "--right", *pane, "--cwd", str(cwd), "--", *in_shell],
+                Placement.SPLIT_RIGHT: ["wezterm", "cli", "split-pane", "--right", *pane, "--cwd", str(cwd), "--", *in_shell],
+                Placement.SPLIT_DOWN: ["wezterm", "cli", "split-pane", "--bottom", *pane, "--cwd", str(cwd), "--", *in_shell],
                 Placement.TAB: ["wezterm", "cli", "spawn", *pane, "--cwd", str(cwd), "--", *in_shell],
                 Placement.WINDOW: ["wezterm", "cli", "spawn", "--new-window", "--cwd", str(cwd), "--", *in_shell],
             }
@@ -88,8 +96,12 @@ def candidates(cwd: Path, command: str, placement: Placement, env: Mapping[str, 
             continue
 
         if env.get("KITTY_WINDOW_ID") and shutil.which("kitty"):
-            kind = {Placement.SPLIT: ["--type=window", "--location=vsplit"], Placement.TAB: ["--type=tab"],
-                    Placement.WINDOW: ["--type=os-window"]}[step]
+            kind = {
+                Placement.SPLIT_RIGHT: ["--type=window", "--location=vsplit"],
+                Placement.SPLIT_DOWN: ["--type=window", "--location=hsplit"],
+                Placement.TAB: ["--type=tab"],
+                Placement.WINDOW: ["--type=os-window"],
+            }[step]
             out.append(Launch("kitty", step, ["kitty", "@", "launch", *kind, f"--cwd={cwd}", *in_shell]))
             continue
 
@@ -137,7 +149,8 @@ def ghostty_script(placement: Placement, cwd: Path, command: str) -> str:
     """Ghostty 1.3+ AppleScript. Targets the focused pane of the front window, i.e. where the user is."""
     config = f"{{command:{applescript_string(command)}, initial working directory:{applescript_string(str(cwd))}}}"
     action = {
-        Placement.SPLIT: f"split (focused terminal of selected tab of front window) direction right with configuration {config}",
+        Placement.SPLIT_RIGHT: f"split (focused terminal of selected tab of front window) direction right with configuration {config}",
+        Placement.SPLIT_DOWN: f"split (focused terminal of selected tab of front window) direction down with configuration {config}",
         Placement.TAB: f"new tab in front window with configuration {config}",
         Placement.WINDOW: f"new window with configuration {config}",
     }[placement]
@@ -149,7 +162,8 @@ def ghostty_script(placement: Placement, cwd: Path, command: str) -> str:
 def iterm_script(placement: Placement, command: str) -> str:
     quoted = applescript_string(command)
     action = {
-        Placement.SPLIT: f"tell current session of current window to split vertically with default profile command {quoted}",
+        Placement.SPLIT_RIGHT: f"tell current session of current window to split vertically with default profile command {quoted}",
+        Placement.SPLIT_DOWN: f"tell current session of current window to split horizontally with default profile command {quoted}",
         Placement.TAB: f"tell current window to create tab with default profile command {quoted}",
         Placement.WINDOW: f"create window with default profile command {quoted}",
     }[placement]
@@ -170,7 +184,8 @@ def open_beside(cwd: Path, command: str, placement: Placement) -> Launch | None:
 
 def describe(launch: Launch) -> str:
     return {
-        Placement.SPLIT: f"a {launch.terminal} split pane",
+        Placement.SPLIT_RIGHT: f"a {launch.terminal} pane to the right",
+        Placement.SPLIT_DOWN: f"a {launch.terminal} pane below",
         Placement.TAB: f"a new {launch.terminal} tab",
         Placement.WINDOW: f"a new {launch.terminal} window",
     }[launch.placement]

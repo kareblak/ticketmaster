@@ -78,7 +78,7 @@ def main(argv: list[str] | None = None) -> int:
 
         entrypoint = Path(os.environ.get("TICKETMASTER_BIN", sys.argv[0])).resolve()
         command = board_command(entrypoint, passthrough(args))
-        launch = open_beside(cwd, command, Placement.SPLIT)
+        launch = open_beside(cwd, command, Placement.SPLIT_RIGHT)
         if launch:
             print(f"Board opened in {describe(launch)} for {provider.name}:{provider.repo}.")
         else:
@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         provider,
         query,
         interval=args.interval,
-        starter=lambda ticket: start_session(ticket, options),
+        starter=lambda ticket, placement: start_session(ticket, options, placement),
         describe_start=lambda ticket: build_prompt(ticket, options.wayfinder_command).splitlines()[0]
         + (f"\nworktree: issue-{ticket.number}" if options.worktree else ""),
     ).run()
