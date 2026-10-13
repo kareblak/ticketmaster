@@ -61,6 +61,27 @@ class Session:
     status: str | None = None  # the agent's idle/working/blocked/done/unknown; None without one
 
 
+@dataclass(frozen=True)
+class BoardOpened:
+    pane: str
+    beside: str  # the caller pane it was split off, or whose workspace board was restarted
+    restarted: bool
+
+
+def pane_workspace(pane: dict) -> str:
+    return pane.get("workspace_id") or pane["pane_id"].split(":")[0]
+
+
+def belongs(pane: dict, cwd: Path, session: str | None) -> bool:
+    """Whether a listed pane is the calling Claude session's: by herdr's agent session id when both sides
+    have one, else by its working directory lying in the repo being opened."""
+    agent_session = (pane.get("agent_session") or {}).get("value")
+    if agent_session and session:
+        return agent_session == session
+    root = repo_root(cwd)
+    return any(d and Path(d).resolve().is_relative_to(root) for d in (pane.get("cwd"), pane.get("foreground_cwd")))
+
+
 def ticket_number(worktree: dict) -> tuple[str, int] | None:
     for name in (Path(worktree["path"]).name, worktree.get("branch") or ""):
         if match := WORKTREE_NAME.match(name):
@@ -84,27 +105,35 @@ class Herdr:
 
     # --- the board pane -------------------------------------------------------------------------
 
-    def board_pane(self, caller: str | None = None) -> str | None:
-        """The caller's own pane when it is the board, else the board in the caller's workspace. One board
-        per workspace: a board in another workspace belongs to other work, even when it shows this repo."""
-        panes = self.call("pane", "list").get("panes", [])
-        if caller is None:
-            return None  # no workspace to look in
-        if any(p["pane_id"] == caller and p.get("label") == BOARD_LABEL for p in panes):
-            return caller
-        # A freshly split pane may not be listed yet, but its id (`w3:p2`) still names its workspace.
-        workspace = next((p.get("workspace_id") for p in panes if p["pane_id"] == caller), None) or caller.split(":")[0]
-        return next((p["pane_id"] for p in panes
-                     if p.get("label") == BOARD_LABEL and (p.get("workspace_id") or p["pane_id"].split(":")[0]) == workspace), None)
+    def caller_pane(self, panes: list[dict], cwd: Path, env_pane: str | None, session: str | None) -> tuple[str, bool]:
+        """The pane `open` was run from, and whether it is this process's own pane. The inherited
+        HERDR_PANE_ID counts only when it is listed and belongs to this Claude session (or, without a
+        session id from herdr, sits in this repo): a background session may carry another project's
+        pane, or one that is gone. Otherwise the focused pane, where the user just typed the command."""
+        listed = next((p for p in panes if p["pane_id"] == env_pane), None)
+        if listed is not None and belongs(listed, cwd, session):
+            return env_pane, True
+        focused = next((p["pane_id"] for p in panes if p.get("focused")), None)
+        if focused is None:
+            raise HerdrError(f"pane {env_pane or '(unset)'} is not this session's and no pane is focused")
+        return focused, False
 
-    def open_board(self, cwd: Path, command: str, caller: str | None = None) -> str | None:
-        """Restarts the board in its existing pane, or splits one off the caller. Returns the pane id,
-        or None when the caller is the board pane itself, which then runs the board in place."""
+    def board_pane(self, panes: list[dict], caller: str) -> str | None:
+        """The board in the caller's workspace, which may be the caller itself. One board per workspace:
+        a board in another workspace belongs to other work, even when it shows this repo."""
+        workspace = next(pane_workspace(p) for p in panes if p["pane_id"] == caller)
+        return next((p["pane_id"] for p in panes if p.get("label") == BOARD_LABEL and pane_workspace(p) == workspace), None)
+
+    def open_board(self, cwd: Path, command: str, caller: str | None = None, session: str | None = None) -> BoardOpened | None:
+        """Restarts the board in the caller's workspace, or splits one off the caller. Returns where it
+        went, or None when this process runs in the board pane itself, which then runs the board in place."""
         if os.environ.get(BOARD_ENV):
             return None  # launched by a board pane; it may not be in `pane list` yet, so don't look it up
         command = f"{BOARD_ENV}=1 {command}"
-        existing = self.board_pane(caller)
-        if existing and existing == caller:
+        panes = self.call("pane", "list").get("panes", [])
+        caller, own = self.caller_pane(panes, cwd, caller, session)
+        existing = self.board_pane(panes, caller)
+        if existing and existing == caller and own:
             return None  # restarting would send q to, and close, the caller's own pane
         if existing:
             if not self.at_prompt(existing):  # a q typed at the shell would prefix the command below
@@ -112,16 +141,16 @@ class Herdr:
             for _ in range(20):
                 if self.at_prompt(existing):
                     self.call("pane", "run", existing, f"cd {shlex.quote(str(cwd))} && {command}")
-                    return existing
+                    return BoardOpened(existing, caller, restarted=True)
                 time.sleep(0.1)
             self.call("pane", "close", existing)
         pane = self.call(
-            "pane", "split", *(["--pane", caller] if caller else ["--current"]), "--direction", "right", "--ratio", str(BOARD_RATIO),
+            "pane", "split", "--pane", caller, "--direction", "right", "--ratio", str(BOARD_RATIO),
             "--cwd", str(cwd), "--no-focus",
         )["pane"]["pane_id"]
         self.call("pane", "rename", pane, BOARD_LABEL)
         self.call("pane", "run", pane, command)
-        return pane
+        return BoardOpened(pane, caller, restarted=False)
 
     def at_prompt(self, pane: str) -> bool:
         info = self.call("pane", "process-info", "--pane", pane).get("process_info", {})
@@ -216,6 +245,11 @@ class Herdr:
             self.call("worktree", "open", "--cwd", str(cwd), "--path", str(path), "--label", label, "--no-focus")
             opened.append(label)
         return opened
+
+
+def repo_root(cwd: Path) -> Path:
+    result = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True)
+    return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else cwd.resolve()
 
 
 def local_branches(cwd: Path) -> list[str]:

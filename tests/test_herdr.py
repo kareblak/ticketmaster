@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from ticketmaster import herdr
-from ticketmaster.herdr import Herdr, HerdrError, Session
+from ticketmaster.herdr import BoardOpened, Herdr, HerdrError, Session
 from ticketmaster.model import Ticket
 from ticketmaster.start import Workbench
 
@@ -39,6 +39,7 @@ class FakeHerdr:
 @pytest.fixture(autouse=True)
 def no_git(monkeypatch):
     monkeypatch.setattr(herdr, "local_branches", lambda cwd: [])
+    monkeypatch.setattr(herdr, "repo_root", lambda cwd: cwd)
 
 
 def worktrees(*entries):
@@ -64,87 +65,155 @@ def test_available_needs_env_and_binary(monkeypatch):
 def test_error_code_from_stderr_json():
     fake = FakeHerdr({("pane", "list"): HerdrError("server_unavailable")})
     with pytest.raises(HerdrError, match="server_unavailable"):
-        Herdr(fake).board_pane()
+        Herdr(fake).open_board(REPO, "tm open", caller="w1:p1")
+
+
+def pane(pane_id, label=None, cwd=REPO, session=None, focused=False):
+    entry = {"pane_id": pane_id, "workspace_id": pane_id.split(":")[0], "cwd": str(cwd), "foreground_cwd": str(cwd), "focused": focused}
+    if label:
+        entry["label"] = label
+    if session:
+        entry["agent_session"] = {"agent": "claude", "kind": "id", "value": session}
+    return entry
+
+
+AT_PROMPT = {"process_info": {"shell_pid": 7, "foreground_process_group_id": 7}}
 
 
 def test_open_board_splits_and_labels_a_new_pane():
-    fake = FakeHerdr({("pane", "list"): {"panes": []}, ("pane", "split"): {"pane": {"pane_id": "w1:p2"}}})
-    assert Herdr(fake).open_board(REPO, "tm open 680") == "w1:p2"
+    fake = FakeHerdr({("pane", "list"): {"panes": [pane("w1:p1")]}, ("pane", "split"): {"pane": {"pane_id": "w1:p2"}}})
+    assert Herdr(fake).open_board(REPO, "tm open 680", caller="w1:p1") == BoardOpened("w1:p2", "w1:p1", restarted=False)
     split, rename, run = fake.calls[1:]
-    assert split[:6] == ["pane", "split", "--current", "--direction", "right", "--ratio"]
+    assert split[:7] == ["pane", "split", "--pane", "w1:p1", "--direction", "right", "--ratio"]
     assert rename == ["pane", "rename", "w1:p2", "ticketmaster"]
     assert run == ["pane", "run", "w1:p2", "TICKETMASTER_BOARD=1 tm open 680"]
 
 
+def test_open_board_splits_off_the_env_pane_of_this_claude_session():
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [pane("w1:p1", focused=True), pane("wN:p1", cwd="/elsewhere", session="me")]},
+        ("pane", "split"): {"pane": {"pane_id": "wN:p2"}},
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="wN:p1", session="me").beside == "wN:p1"
+    assert fake.first("pane", "split")[2:4] == ["--pane", "wN:p1"]
+
+
+def test_open_board_from_a_stale_env_pane_splits_off_the_focused_pane():
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [pane("w4:p1"), pane("wJ:p1", focused=True)]},
+        ("pane", "split"): {"pane": {"pane_id": "wJ:p2"}},
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w9:p7", session="me") == BoardOpened("wJ:p2", "wJ:p1", restarted=False)
+    assert fake.first("pane", "split")[2:4] == ["--pane", "wJ:p1"]
+
+
+def test_open_board_from_another_sessions_env_pane_splits_off_the_focused_pane():
+    """The observed bug: a session inherited HERDR_PANE_ID of a Claude pane in another project."""
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [pane("w4:pY", cwd="/code/tickets", session="other"), pane("wJ:p1", focused=True)]},
+        ("pane", "split"): {"pane": {"pane_id": "wJ:p2"}},
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w4:pY", session="me").beside == "wJ:p1"
+    assert not [c for c in fake.calls if "w4:pY" in c]
+
+
+def test_open_board_from_an_env_pane_in_another_project_splits_off_the_focused_pane():
+    """Without a herdr session id to compare, the pane's working directory must be in the repo."""
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [pane("w4:p0", cwd="/code/tickets"), pane("wJ:p1", focused=True)]},
+        ("pane", "split"): {"pane": {"pane_id": "wJ:p2"}},
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w4:p0", session="me").beside == "wJ:p1"
+
+
+def test_open_board_accepts_an_env_pane_in_a_subdirectory_of_the_repo():
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [pane("w1:p1", cwd=REPO / "src"), pane("w2:p1", focused=True)]},
+        ("pane", "split"): {"pane": {"pane_id": "w1:p2"}},
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p1").beside == "w1:p1"
+
+
+def test_open_board_without_a_valid_or_focused_pane_splits_nothing():
+    fake = FakeHerdr({("pane", "list"): {"panes": [pane("w4:p0", cwd="/code/tickets")]}})
+    with pytest.raises(HerdrError, match="no pane is focused"):
+        Herdr(fake).open_board(REPO, "tm open", caller="w4:p0")
+    assert fake.verbs() == [("pane", "list")]
+
+
 def test_open_board_restarts_in_the_existing_pane():
     fake = FakeHerdr({
-        ("pane", "list"): {"panes": [{"pane_id": "w1:p1", "workspace_id": "w1"}, {"pane_id": "w1:p5", "workspace_id": "w1", "label": "ticketmaster"}]},
-        ("pane", "process-info"): {"process_info": {"shell_pid": 7, "foreground_process_group_id": 7}},
+        ("pane", "list"): {"panes": [pane("w1:p1"), pane("w1:p5", label="ticketmaster")]},
+        ("pane", "process-info"): AT_PROMPT,
     })
-    assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p1") == "w1:p5"
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p1") == BoardOpened("w1:p5", "w1:p1", restarted=True)
     assert ["pane", "send-keys", "w1:p5", "q"] not in fake.calls  # already at the prompt
     assert fake.calls[-1] == ["pane", "run", "w1:p5", "cd /code/shiplog && TICKETMASTER_BOARD=1 tm open"]
     assert ("pane", "split") not in fake.verbs()
 
 
+def test_open_board_from_a_stale_env_pane_restarts_the_board_in_the_focused_panes_workspace():
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [
+            pane("w4:p1", cwd="/code/tickets", session="other"), pane("w4:p2", label="ticketmaster"),
+            pane("wJ:p1", focused=True), pane("wJ:p2", label="ticketmaster"),
+        ]},
+        ("pane", "process-info"): AT_PROMPT,
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w4:p1", session="me") == BoardOpened("wJ:p2", "wJ:p1", restarted=True)
+    assert not [c for c in fake.calls if "w4:p2" in c]
+
+
+def test_open_board_when_the_focused_fallback_is_the_board_restarts_it():
+    """Only this process's own pane runs the board in place; a focused board pane is restarted."""
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [pane("wJ:p2", label="ticketmaster", focused=True)]},
+        ("pane", "process-info"): AT_PROMPT,
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w9:p9") == BoardOpened("wJ:p2", "wJ:p2", restarted=True)
+
+
 def test_open_board_quits_a_running_board_before_restarting_it():
     states = iter([{"shell_pid": 7, "foreground_process_group_id": 9}, {"shell_pid": 7, "foreground_process_group_id": 7}])
     fake = FakeHerdr({
-        ("pane", "list"): {"panes": [{"pane_id": "w1:p1", "workspace_id": "w1"}, {"pane_id": "w1:p5", "workspace_id": "w1", "label": "ticketmaster"}]},
+        ("pane", "list"): {"panes": [pane("w1:p1"), pane("w1:p5", label="ticketmaster")]},
         ("pane", "process-info"): lambda argv: {"process_info": next(states)},
     })
-    assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p1") == "w1:p5"
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p1").pane == "w1:p5"
     assert fake.calls[2] == ["pane", "send-keys", "w1:p5", "q"]
     assert fake.calls[-1] == ["pane", "run", "w1:p5", "cd /code/shiplog && TICKETMASTER_BOARD=1 tm open"]
 
 
 def test_open_board_ignores_a_board_in_another_workspace_and_splits_beside_the_caller():
     fake = FakeHerdr({
-        ("pane", "list"): {"panes": [
-            {"pane_id": "w1:p2", "tab_id": "w1:t1", "label": "ticketmaster"},
-            {"pane_id": "wN:p1", "tab_id": "wN:t1"},
-        ]},
+        ("pane", "list"): {"panes": [{"pane_id": "w1:p2", "tab_id": "w1:t1", "label": "ticketmaster"}, pane("wN:p1")]},
         ("pane", "split"): {"pane": {"pane_id": "wN:p2"}},
     })
-    assert Herdr(fake).open_board(REPO, "tm open", caller="wN:p1") == "wN:p2"
+    assert Herdr(fake).open_board(REPO, "tm open", caller="wN:p1").pane == "wN:p2"
     assert not [c for c in fake.calls if "w1:p2" in c]
     assert fake.first("pane", "split")[2:4] == ["--pane", "wN:p1"]
 
 
 def test_open_board_restarts_the_callers_workspace_board_even_when_another_workspace_lists_first():
     fake = FakeHerdr({
-        ("pane", "list"): {"panes": [
-            {"pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "label": "ticketmaster"},
-            {"pane_id": "wN:p1", "tab_id": "wN:t1", "workspace_id": "wN"},
-            {"pane_id": "wN:p2", "tab_id": "wN:t2", "workspace_id": "wN", "label": "ticketmaster"},
-        ]},
-        ("pane", "process-info"): {"process_info": {"shell_pid": 7, "foreground_process_group_id": 7}},
+        ("pane", "list"): {"panes": [pane("w1:p2", label="ticketmaster"), pane("wN:p1"), pane("wN:p2", label="ticketmaster")]},
+        ("pane", "process-info"): AT_PROMPT,
     })
-    assert Herdr(fake).open_board(REPO, "tm open", caller="wN:p1") == "wN:p2"
+    assert Herdr(fake).open_board(REPO, "tm open", caller="wN:p1").pane == "wN:p2"
     assert not [c for c in fake.calls if "w1:p2" in c]
     assert ("pane", "split") not in fake.verbs()
-
-
-def test_open_board_from_a_pane_missing_from_the_list_never_takes_another_workspaces_board():
-    """A fresh pane may not be listed yet; its id still names its workspace."""
-    fake = FakeHerdr({
-        ("pane", "list"): {"panes": [{"pane_id": "w1:p2", "tab_id": "w1:t1", "workspace_id": "w1", "label": "ticketmaster"}]},
-        ("pane", "split"): {"pane": {"pane_id": "wN:p3"}},
-    })
-    assert Herdr(fake).open_board(REPO, "tm open", caller="wN:p2") == "wN:p3"
-    assert not [c for c in fake.calls if "w1:p2" in c]
 
 
 def test_open_board_launched_by_a_board_pane_runs_in_place_without_looking_it_up(monkeypatch):
     """A freshly split board pane may not be in `pane list` yet; the env var it was started with says it is the board."""
     monkeypatch.setenv(herdr.BOARD_ENV, "1")
-    fake = FakeHerdr({("pane", "list"): {"panes": [{"pane_id": "w1:p2", "workspace_id": "w1", "label": "ticketmaster"}]}})
+    fake = FakeHerdr({("pane", "list"): {"panes": [pane("w1:p2", label="ticketmaster")]}})
     assert Herdr(fake).open_board(REPO, "tm open", caller="wN:p2") is None
     assert fake.calls == []
 
 
 def test_open_board_from_the_board_pane_itself_leaves_the_pane_alone():
-    fake = FakeHerdr({("pane", "list"): {"panes": [{"pane_id": "w1:p5", "label": "ticketmaster"}]}})
+    fake = FakeHerdr({("pane", "list"): {"panes": [pane("w1:p5", label="ticketmaster")]}})
     assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p5") is None
     assert fake.verbs() == [("pane", "list")]
 

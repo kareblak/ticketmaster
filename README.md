@@ -45,7 +45,7 @@ ticketmaster [open|snapshot|adopt|install-skill] [parent] [--label NAME] [--repo
 
 | Command         | Effect                                                                         |
 | --------------- | ------------------------------------------------------------------------------ |
-| `open` (default)| opens the board in a herdr pane right of the caller, labelled `ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there |
+| `open` (default)| opens the board in a herdr pane right of the calling pane (the focused pane when `HERDR_PANE_ID` is stale or another session's), labelled `ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there |
 | `adopt`         | opens a herdr workspace for every `.claude/worktrees/*` checkout without one   |
 | `snapshot`      | prints every column once as plain text (works outside herdr)                   |
 | `install-skill` | writes the `/ticketmaster` skill into `~/.claude/skills`                       |

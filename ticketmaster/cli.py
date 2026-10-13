@@ -82,12 +82,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "open":
         try:
-            pane = herdr.Herdr().open_board(cwd, herdr.open_command(passthrough(args)), os.environ.get("HERDR_PANE_ID"))
+            board = herdr.Herdr().open_board(
+                cwd, herdr.open_command(passthrough(args)), os.environ.get("HERDR_PANE_ID"), os.environ.get("CLAUDE_CODE_SESSION_ID"),
+            )
         except herdr.HerdrError as exc:
             print(f"ticketmaster: herdr: {exc}", file=sys.stderr)
             return 1
-        if pane is not None:
-            print(f"Board opened in herdr pane {pane} ({herdr.BOARD_LABEL}) for {provider.name}:{provider.repo}.")
+        if board is not None:
+            how = f"restarted in {board.beside}'s workspace" if board.restarted else f"split off {board.beside}"
+            print(f"Board opened in herdr pane {board.pane} ({herdr.BOARD_LABEL}), {how}, for {provider.name}:{provider.repo}.")
             return 0
         # None: this is the board pane (a fresh one, or the user's), so the board runs here, below
 
