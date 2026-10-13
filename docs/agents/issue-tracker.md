@@ -39,11 +39,13 @@ Run `gh issue view <number> --comments`.
 
 Used by `/wayfinder`; the ticketmaster board reads the same encodings. The **map** is a single issue with
 **child** issues as tickets. Link tickets only as the bullets below say: blocking is always the tracker's
-native link, never a `Blocked by:` body line. Nothing goes in the body; the `out-of-scope` label is always English,
-even when the rest of the issue is written in another language.
+native link, never a `Blocked by:` body line. The keywords `Part of` and `## Parent` and the `out-of-scope` label are
+always English, even when the rest of the issue is written in another language.
 
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
 - **Child → map**: a GitHub **sub-issue** of the map, nothing in the body: `gh api --method POST repos/<owner>/<repo>/issues/<map>/sub_issues -F sub_issue_id=<child-db-id>`. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`).
+- **Spec → map**: once the map is resolved, its destination becomes a spec (`/to-spec`): an issue with no `wayfinder:` label whose first line is `Part of #<map>`. The board shows it, and its implementation tickets, beside the map's decision tickets.
+- **Implementation ticket → spec**: each ticket from `/to-tickets` is a GitHub **sub-issue** of the spec, `gh api --method POST repos/<owner>/<repo>/issues/<spec>/sub_issues -F sub_issue_id=<ticket-db-id>`; its `## Parent` section names `#<spec>`, and it has no `wayfinder:` label, so the board starts it with the implement skill.
 - **Blocking**: GitHub's **native issue dependencies**: `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`. A ticket is unblocked when every blocker is closed.
 - **Database ids**: the `<…-db-id>` values above are numeric database ids (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`), _not_ the `#number` or `node_id`.
 - **Out of scope**: label it `out-of-scope`, say why, and close it as not planned: `gh issue edit <n> --add-label out-of-scope`, then `gh issue close <n> --reason "not planned" --comment "<why>"`.
