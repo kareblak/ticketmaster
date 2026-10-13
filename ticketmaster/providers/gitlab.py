@@ -8,10 +8,11 @@ them (`Part of #<parent>`), which name the spec in their `## Parent` section.
 from __future__ import annotations
 
 import json
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, map_family, mentions_parent, run_json, tracker_error
+from . import ProviderError, Query, map_family, mentions_parent, run_cli, run_json, tracker_error
 
 ISSUES = """
 query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
@@ -69,6 +70,10 @@ class GitLabProvider:
             parent = Ticket(number=query.parent, title="", url=issue["webUrl"], is_open=True, labels=labels)
             tickets = map_family(tickets, parent)
         return tickets
+
+    def delete(self, number: int) -> None:
+        project = urllib.parse.quote(self.repo, safe="")
+        run_cli(["glab", "api", "--hostname", self.host, "-X", "DELETE", f"projects/{project}/issues/{number}"])
 
     def _issues(self, variables: dict, limit: int) -> list[dict]:
         nodes: list[dict] = []
