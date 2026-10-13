@@ -38,20 +38,19 @@ pipx app (code changes apply without reinstalling) and installs the skill.
 ## Usage
 
 ```
-ticketmaster [open|board|snapshot|adopt|install-skill] [parent] [--label NAME] [--repo OWNER/NAME]
+ticketmaster [open|snapshot|adopt|install-skill] [parent] [--label NAME] [--repo OWNER/NAME]
              [--provider github|gitlab|gitea|forgejo] [--host HOST] [--columns auto|one|all]
              [--interval SECONDS] [--done-days DAYS] [--limit N]
 ```
 
 | Command         | Effect                                                                         |
 | --------------- | ------------------------------------------------------------------------------ |
-| `open` (default)| opens the board in a herdr pane right of the caller, labelled `ticketmaster`; run again, it restarts there |
-| `board`         | runs the board in the current herdr pane                                       |
+| `open` (default)| opens the board in a herdr pane right of the caller, labelled `ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there |
 | `adopt`         | opens a herdr workspace for every `.claude/worktrees/*` checkout without one   |
 | `snapshot`      | prints every column once as plain text (works outside herdr)                   |
 | `install-skill` | writes the `/ticketmaster` skill into `~/.claude/skills`                       |
 
-`open`, `board` and `adopt` only run inside herdr (`HERDR_ENV=1`).
+`open` and `adopt` only run inside herdr (`HERDR_ENV=1`).
 
 Scope:
 

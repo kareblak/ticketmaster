@@ -42,9 +42,10 @@ def available(env: Mapping[str, str] | None = None) -> bool:
     return env.get("HERDR_ENV") == "1" and shutil.which("herdr") is not None
 
 
-def board_command(args: list[str]) -> str:
-    """Re-runs this interpreter, so it works for pipx, editable and `python -m` installs alike."""
-    return shlex.join([sys.executable, "-m", "ticketmaster", "board", *args])
+def open_command(args: list[str]) -> str:
+    """`open` again, run in the board pane, where it finds itself and runs the board in place. Re-runs this
+    interpreter, so it works for pipx, editable and `python -m` installs alike."""
+    return shlex.join([sys.executable, "-m", "ticketmaster", "open", *args])
 
 
 @dataclass(frozen=True)
@@ -93,7 +94,8 @@ class Herdr:
         if existing and existing == caller:
             return None  # restarting would send q to, and close, the caller's own pane
         if existing:
-            self.call("pane", "send-keys", existing, "q")  # Textual quits on q and drops to the shell
+            if not self.at_prompt(existing):  # a q typed at the shell would prefix the command below
+                self.call("pane", "send-keys", existing, "q")  # Textual quits on q and drops to the shell
             for _ in range(20):
                 if self.at_prompt(existing):
                     self.call("pane", "run", existing, f"cd {shlex.quote(str(cwd))} && {command}")
