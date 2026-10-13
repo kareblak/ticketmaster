@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, mentions_parent, run_json, tracker_error
+from . import ProviderError, Query, mentions_parent, resolve_maps, run_json, tracker_error
 
 ISSUES = """
 query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
@@ -64,14 +64,18 @@ class GitLabProvider:
         if query.parent is not None:
             tickets = [t for t in tickets if t.number != query.parent and mentions_parent(t.body, query.parent)]
             tickets = self._with_parent(tickets, query.parent)
-        return tickets
+        return resolve_maps(tickets, self._map)
 
     def _with_parent(self, tickets: list[Ticket], parent: int) -> list[Ticket]:
-        issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(parent)}).get("project") or {}).get("issue")
-        if not issue:
+        found = self._map(parent)
+        if not found:
             return tickets
-        labels = tuple(label["title"] for label in issue["labels"]["nodes"])
-        return [replace(t, parent_number=parent, parent_url=issue["webUrl"], parent_labels=labels) for t in tickets]
+        url, labels = found
+        return [replace(t, parent_number=parent, parent_url=url, parent_labels=labels) for t in tickets]
+
+    def _map(self, iid: int) -> tuple[str, tuple[str, ...]] | None:
+        issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(iid)}).get("project") or {}).get("issue")
+        return (issue["webUrl"], tuple(label["title"] for label in issue["labels"]["nodes"])) if issue else None
 
     def _issues(self, variables: dict, limit: int) -> list[dict]:
         nodes: list[dict] = []

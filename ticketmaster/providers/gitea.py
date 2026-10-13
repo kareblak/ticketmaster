@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, RateLimited, mentions_parent, tracker_error
+from . import ProviderError, Query, RateLimited, mentions_parent, resolve_maps, tracker_error
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -55,13 +55,13 @@ class GiteaProvider:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
         tickets = [to_ticket(i, blockers.get(i["number"]), pr_bodies) for i in raw]
         if query.parent is not None:
-            parent = self._get(f"/repos/{self.repo}/issues/{query.parent}")
-            labels = tuple(label["name"] for label in parent.get("labels") or [])
-            tickets = [
-                replace(t, parent_number=query.parent, parent_url=parent["html_url"], parent_labels=labels)
-                for t in tickets
-            ]
-        return tickets
+            url, labels = self._map(query.parent)
+            tickets = [replace(t, parent_number=query.parent, parent_url=url, parent_labels=labels) for t in tickets]
+        return resolve_maps(tickets, self._map)
+
+    def _map(self, number: int) -> tuple[str, tuple[str, ...]]:
+        issue = self._get(f"/repos/{self.repo}/issues/{number}")
+        return issue["html_url"], tuple(label["name"] for label in issue.get("labels") or [])
 
     def _open_blockers(self, number: int) -> int | None:
         try:

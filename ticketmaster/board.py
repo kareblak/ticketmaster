@@ -77,6 +77,8 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
     if ticket.summary:
         text.append("\n" + ticket.summary, style="dim")
     chips = Text()
+    if ticket.map_missing:
+        chips.append(f"⚠ wayfinder:{ticket.wayfinder_type}, map not found ", style="bold yellow")
     for kind in ticket.review_tags:
         chips.append(f" {kind} ", style=tag_style(kind))
         chips.append(" ")
@@ -413,7 +415,10 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  ◌ idle, ✓ done or ○ no agent. The prompt depends on the ticket:\n")
     for kind, prompt in [
         ("wayfinder map", "the wayfinder skill with the map's URL"),
-        ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs"),
+        ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs: a\n"
+                             + " " * 20 + "wayfinder:research/prototype/grilling/task ticket (or wayfinder::…),\n"
+                             + " " * 20 + "on any board; its map is the native parent, else `Part of #<map>`\n"
+                             + " " * 20 + "on the body's first line. Without a map it warns and won't start"),
         ("plain issue", "the implement skill with the ticket's URL, plus a brief: assign it to\n"
                         + " " * 20 + "yourself first, implement, then push and open a PR that closes it"),
     ]:
@@ -829,6 +834,11 @@ class BoardApp(App):
         ticket = card.ticket
         if card.column is Column.DONE:
             self.notify(f"#{ticket.number} is done", severity="warning")
+            return
+        if ticket.map_missing:
+            self.notify(f"#{ticket.number} is a wayfinder:{ticket.wayfinder_type} ticket, but its map was not "
+                        "found: link it to its map (sub-issue, or `Part of #<map>` as the body's first line)",
+                        severity="warning")
             return
         existing = [Path(s.path).name for s in self.sessions.get(ticket.number, [])]
         warn = f"\nalready has {', '.join(existing)}: this makes another" if existing else ""

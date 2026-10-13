@@ -15,16 +15,25 @@ DEFAULT_IMPLEMENT_COMMAND = "/mattpocock-skills:implement"
 DEFAULT_REVIEW_COMMAND = "/mattpocock-skills:code-review"
 
 
+class MapNotFound(ValueError):
+    """A `wayfinder:<type>` ticket belongs to wayfinder, but the board could not find its map."""
+
+
 def build_prompt(
     ticket: Ticket,
     wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND,
     implement_command: str = DEFAULT_IMPLEMENT_COMMAND,
 ) -> str:
-    """Wayfinder claims and resolves map tickets itself; anything else runs the implement skill with a brief."""
+    """Wayfinder claims and resolves map tickets itself; anything else runs the implement skill with a brief.
+
+    A typed wayfinder ticket never falls back to implement: without its map it raises MapNotFound.
+    """
     if ticket.is_wayfinder_map:
         return f"{wayfinder_command} {ticket.url}"
     if ticket.is_wayfinder_ticket:
         return f"{wayfinder_command} {ticket.parent_url} {ticket.url}"
+    if ticket.map_missing:
+        raise MapNotFound(f"#{ticket.number} is a wayfinder:{ticket.wayfinder_type} ticket, but its map was not found")
     return (
         f"{implement_command} {ticket.url}\n\n"
         "1. Read the issue and its comments, then assign it to yourself before doing any work.\n"

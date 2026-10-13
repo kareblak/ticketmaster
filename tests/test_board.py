@@ -877,3 +877,41 @@ def test_author_filter_is_saved_per_repo_and_restored(tmp_path):
         },
     }
     run(reopen())
+
+
+NO_MAP = Ticket(number=5, title="Which store?", url="u5", is_open=True, labels=("wayfinder:grilling",))
+
+
+def test_typed_ticket_without_a_map_warns_on_its_card_and_never_starts():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, [NO_MAP])
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            card = app.query_one("#col-READY").query(Card).first()
+            assert "map not found" in str(card.render())
+            await pilot.press("down", "s")
+            await pilot.pause()
+            assert not is_confirm(app)
+            await pilot.press("enter")
+            await loaded(app, pilot)
+            assert bench.calls == []
+            assert any("map" in n.message and "#5" in n.message for n in app._notifications)
+
+    run(scenario())
+
+
+def test_typed_ticket_with_its_map_starts():
+    async def scenario():
+        bench = FakeBench()
+        typed = Ticket(number=5, title="Which store?", url="u5", is_open=True, labels=("wayfinder::grilling",),
+                       parent_number=1, parent_url="u1", parent_labels=("wayfinder:map",))
+        app = bench_app(bench, [typed])
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "map not found" not in str(app.query_one("#col-READY").query(Card).first().render())
+            await pilot.press("down", "s", "y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 5)]
+
+    run(scenario())

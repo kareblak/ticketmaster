@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from typing import Protocol
 
-from ..model import Ticket
+from ..model import Ticket, part_of
 
 
 class ProviderError(RuntimeError):
@@ -67,3 +68,35 @@ def run_json(args: list[str], stdin: str | None = None):
 def mentions_parent(body: str, parent: int) -> bool:
     """Fallback parent link for providers without sub-issues: body mentions `#<parent>`."""
     return re.search(rf"(?<![\w&])#{parent}\b", body or "") is not None
+
+
+# A map issue's URL and labels, or None when there is no such issue.
+MapLookup = Callable[[int], tuple[str, tuple[str, ...]] | None]
+
+
+def resolve_maps(tickets: list[Ticket], fetch_map: MapLookup) -> list[Ticket]:
+    """Typed wayfinder tickets without a native map parent take the map their body's `Part of #<map>` names.
+
+    A map already on the board is used as is; any other is fetched once. A missing issue leaves the ticket
+    without a map (the board warns about it); a rate limit still surfaces.
+    """
+    known = {t.number: (t.url, t.labels) for t in tickets}
+
+    def lookup(number: int):
+        if number not in known:
+            try:
+                known[number] = fetch_map(number)
+            except RateLimited:
+                raise
+            except ProviderError:
+                known[number] = None
+        return known[number]
+
+    resolved = []
+    for ticket in tickets:
+        number = part_of(ticket.body) if ticket.map_missing else None
+        found = lookup(number) if number is not None and number != ticket.number else None
+        if found:
+            ticket = replace(ticket, parent_number=number, parent_url=found[0], parent_labels=found[1])
+        resolved.append(ticket)
+    return resolved

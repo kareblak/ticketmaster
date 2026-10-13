@@ -214,3 +214,135 @@ def test_gitea_other_http_errors_are_not_rate_limited(monkeypatch):
     with pytest.raises(ProviderError) as raised:
         gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
     assert not isinstance(raised.value, RateLimited)
+
+
+MAP_LABELS = ("wayfinder:map",)
+
+
+def test_resolve_maps_follows_part_of_to_a_map_in_the_board_or_fetched_once():
+    from ticketmaster.model import Ticket
+
+    fetched = []
+
+    def fetch_map(number):
+        fetched.append(number)
+        return {9: ("https://x/9", MAP_LABELS), 8: ("https://x/8", ("epic",))}.get(number)
+
+    tickets = [
+        Ticket(number=1, title="map", url="https://x/1", is_open=True, labels=MAP_LABELS),
+        Ticket(number=2, title="in board", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #1"),
+        Ticket(number=3, title="closed map", url="u", is_open=True, labels=("wayfinder::research",), body="Part of #9"),
+        Ticket(number=4, title="same map", url="u", is_open=True, labels=("wayfinder:grilling",), body="Part of #9"),
+        Ticket(number=5, title="not a map", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #8"),
+        Ticket(number=6, title="untyped", url="u", is_open=True, labels=("bug",), body="Part of #9"),
+        Ticket(number=7, title="native", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #9",
+               parent_number=1, parent_url="https://x/1", parent_labels=MAP_LABELS),
+        Ticket(number=10, title="gone", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #404"),
+    ]
+    resolved = {t.number: t for t in providers.resolve_maps(tickets, fetch_map)}
+    assert (resolved[2].parent_number, resolved[2].parent_url) == (1, "https://x/1")
+    assert resolved[3].is_wayfinder_ticket and resolved[4].parent_url == "https://x/9"
+    assert resolved[5].map_missing and resolved[10].map_missing
+    assert resolved[6].parent_url is None
+    assert resolved[7].parent_number == 1
+    assert sorted(fetched) == [8, 9, 404]  # each missing map fetched once, never one already on the board
+
+
+def test_resolve_maps_treats_a_missing_issue_as_no_map_but_not_a_rate_limit():
+    from ticketmaster.model import Ticket
+
+    typed = [Ticket(number=2, title="t", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #1")]
+
+    def missing(number):
+        raise ProviderError("not found")
+
+    def limited(number):
+        raise RateLimited("rate limit")
+
+    assert providers.resolve_maps(typed, missing)[0].map_missing
+    with pytest.raises(RateLimited):
+        providers.resolve_maps(typed, limited)
+
+
+def github_node(number, labels, body="", parent=None):
+    return {"number": number, "title": "t", "url": f"https://gh/{number}", "body": body, "state": "OPEN",
+            "assignees": {"nodes": []}, "labels": {"nodes": [{"name": n} for n in labels]}, "parent": parent}
+
+
+@pytest.mark.parametrize("query", [Query(), Query(label="wayfinder:task")])
+def test_github_whole_repo_and_label_boards_resolve_part_of_maps(monkeypatch, query):
+    def fake_run_json(args, stdin=None):
+        variables = json.loads(stdin)["variables"]
+        if "number" in variables:
+            assert variables["number"] == 5
+            issue = {"url": "https://gh/5", "labels": {"nodes": [{"name": "wayfinder:map"}]}}
+            return {"data": {"repository": {"issue": issue}}}
+        nodes = [github_node(2, ["wayfinder:task"], "Part of #5"),
+                 github_node(3, ["wayfinder:task"], parent={"number": 1, "url": "https://gh/1",
+                                                            "labels": {"nodes": [{"name": "wayfinder:map"}]}})]
+        nodes = nodes if "is:open" in variables["q"] else []
+        return {"data": {"search": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}
+
+    monkeypatch.setattr(github, "run_json", fake_run_json)
+    tickets = {t.number: t for t in github.GitHubProvider("o/r").fetch(query)}
+    assert (tickets[2].parent_url, tickets[2].is_wayfinder_ticket) == ("https://gh/5", True)
+    assert tickets[3].parent_url == "https://gh/1"
+
+
+def gitlab_node(iid, labels, body=""):
+    return {"iid": str(iid), "title": "t", "webUrl": f"https://gl/{iid}", "description": body, "state": "opened",
+            "closedAt": None, "assignees": {"nodes": []}, "labels": {"nodes": [{"title": n} for n in labels]},
+            "blockedByCount": 0, "mergeRequestsCount": 0}
+
+
+@pytest.mark.parametrize("query", [Query(), Query(label="wayfinder::grilling")])
+def test_gitlab_whole_repo_and_label_boards_resolve_part_of_maps(monkeypatch, query):
+    def fake_run_json(args, stdin=None):
+        variables = json.loads(stdin)["variables"]
+        if "iid" in variables:
+            if variables["iid"] != "5":
+                return {"data": {"project": {"issue": None}}}
+            issue = {"webUrl": "https://gl/5", "labels": {"nodes": [{"title": "wayfinder::map"}]}}
+            return {"data": {"project": {"issue": issue}}}
+        nodes = [gitlab_node(2, ["wayfinder::grilling"], "Part of #5\n\nWhy"),
+                 gitlab_node(3, ["wayfinder::grilling"], "Part of #6")]
+        nodes = nodes if variables["state"] == "opened" else []
+        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
+
+    monkeypatch.setattr(gitlab, "run_json", fake_run_json)
+    tickets = {t.number: t for t in gitlab.GitLabProvider("g/p").fetch(query)}
+    assert (tickets[2].parent_number, tickets[2].parent_url, tickets[2].is_wayfinder_ticket) == (5, "https://gl/5", True)
+    assert tickets[3].map_missing
+
+
+def gitea_issue(number, labels, body=""):
+    return {"number": number, "title": "t", "html_url": f"https://gt/{number}", "body": body, "state": "open",
+            "assignees": [], "labels": [{"name": n} for n in labels]}
+
+
+@pytest.mark.parametrize("query", [Query(), Query(label="wayfinder:research")])
+def test_gitea_whole_repo_and_label_boards_resolve_part_of_maps(monkeypatch, query):
+    def fake_get(self, path, params=None):
+        if path.endswith("/issues"):
+            return [gitea_issue(2, ["wayfinder:research"], "Part of #5")] if params["state"] == "open" else []
+        if path.endswith("/issues/5"):
+            return gitea_issue(5, ["wayfinder:map"])
+        return []
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    tickets = {t.number: t for t in gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(query)}
+    assert (tickets[2].parent_number, tickets[2].parent_url, tickets[2].is_wayfinder_ticket) == (5, "https://gt/5", True)
+
+
+def test_gitea_map_board_keeps_the_map_as_parent(monkeypatch):
+    def fake_get(self, path, params=None):
+        if path.endswith("/issues"):
+            return [gitea_issue(1, ["wayfinder:map"]), gitea_issue(2, ["wayfinder:task"], "Part of #1")] \
+                if params["state"] == "open" else []
+        if path.endswith("/issues/1"):
+            return gitea_issue(1, ["wayfinder:map"])
+        return []
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query(parent=1))
+    assert [(t.number, t.parent_url, t.is_wayfinder_ticket) for t in tickets] == [(2, "https://gt/1", True)]

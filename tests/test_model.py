@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from ticketmaster.model import Column, Ticket, build_board, classify, summarize
+from ticketmaster.model import Column, Ticket, build_board, classify, part_of, summarize
 
 NOW = datetime(2026, 10, 13, 12, tzinfo=timezone.utc)
 
@@ -69,3 +69,36 @@ def test_summary_skips_headings_comments_and_truncates():
     body = "# Title\n<!-- hidden -->\n" + "word " * 100
     out = summarize(body, max_chars=20)
     assert len(out) == 20 and out.endswith("…") and "hidden" not in out
+
+
+MAP = ("wayfinder:map",)
+
+
+def test_only_the_four_known_wayfinder_types_count():
+    for kind in ("research", "prototype", "grilling", "task"):
+        assert ticket(labels=(f"wayfinder:{kind}",)).wayfinder_type == kind
+    assert ticket(labels=("wayfinder:epic",)).wayfinder_type is None
+    assert ticket(labels=("wayfinder:",)).wayfinder_type is None
+    assert ticket(labels=MAP).wayfinder_type is None
+
+
+def test_gitlab_scoped_wayfinder_labels_are_accepted():
+    assert ticket(labels=("wayfinder::grilling",)).wayfinder_type == "grilling"
+    assert ticket(labels=("wayfinder::map",)).is_wayfinder_map
+    t = ticket(labels=("wayfinder::task",), parent_url="https://gl/1", parent_labels=("wayfinder::map",))
+    assert t.is_wayfinder_ticket
+
+
+def test_typed_ticket_without_a_map_parent_has_its_map_missing():
+    assert ticket(labels=("wayfinder:research",)).map_missing
+    assert ticket(labels=("wayfinder:task",), parent_url="https://gh/9", parent_labels=("epic",)).map_missing
+    resolved = ticket(labels=("wayfinder:task",), parent_url="https://gh/9", parent_labels=MAP)
+    assert resolved.is_wayfinder_ticket and not resolved.map_missing
+    assert not ticket(labels=("wayfinder:epic",)).map_missing and not ticket().map_missing
+
+
+def test_part_of_reads_the_first_line_of_the_body():
+    assert part_of("Part of #12\n\nMore") == 12
+    assert part_of("\n  Part of #7 \r\nrest") == 7
+    assert part_of("Intro\nPart of #12") is None
+    assert part_of("Part of #x") is None and part_of("") is None

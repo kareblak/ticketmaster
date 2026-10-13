@@ -91,13 +91,18 @@ claude -n "#<n> <title>" "<prompt>"
 | Ticket                                                        | Prompt                                         |
 | ------------------------------------------------------------- | ---------------------------------------------- |
 | a wayfinder map (`wayfinder:map`)                             | `/mattpocock-skills:wayfinder <map-url>`        |
-| has a `wayfinder:<type>` label and its parent is a map        | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
+| has a `wayfinder:<type>` label (`research`, `prototype`, `grilling`, `task`; GitLab's `wayfinder::<type>` too) | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
 | anything else                                                 | `/mattpocock-skills:implement <ticket-url>` plus a brief: assign it to yourself first, implement via the skill, then push and open a ready PR that closes it (body via the `pr` skill) |
 
 The mattpocock skills a session runs stop to ask for `/setup-matt-pocock-skills` when the repo
 has no `docs/agents/issue-tracker.md`, which would leave the session waiting. Until that file
 exists, the status line warns and names the command, so it can be run once before starting
 sessions. The board checks again on every refresh, and `s` and `c` still work while the warning shows.
+
+A typed wayfinder ticket never starts implement. The board finds its map on every board (whole
+repo, `--label` or map) by the rule `ticketmaster setup` writes: the native link (a GitHub
+sub-issue's parent), else `Part of #<map>` as the first line of the body. When neither leads to a
+`wayfinder:map` issue, the card says "map not found" and `s` / `Enter` only warn.
 
 A review session (`c`) gets a `review-<n>` worktree and starts `/mattpocock-skills:code-review`
 the same way: the prompt tells it to find the PR that closes the issue, check out its branch, and
@@ -195,8 +200,9 @@ repo = "group/project"      # optional; defaults to the remote's path
 remote = "upstream"         # optional; defaults to origin
 ```
 
-The parent's labels and URL (needed for the wayfinder prompt) come from GitHub's `parent` field;
-GitLab and Gitea boards only know a ticket's parent when the board is scoped to one.
+The map's labels and URL (needed for the wayfinder prompt) come from GitHub's `parent` field, else
+from the issue a typed ticket's `Part of #<map>` line names (fetched once per refresh when it is
+not on the board), on GitHub, GitLab and Gitea alike.
 
 Flags override the file, and the file overrides the remote.
 
