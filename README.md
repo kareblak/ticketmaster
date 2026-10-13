@@ -37,6 +37,11 @@ For development, clone the repo and run `./install.sh`. It installs the clone as
 pipx app (code changes apply without reinstalling) and installs the skill.
 `ticketmaster upgrade` leaves such an install alone and tells you to `git pull` in the clone.
 
+When the board opens it asks GitHub (`git ls-remote`, in the background, once per start) for the
+head of `main`. If that differs from the commit your install was built from, a toast and the status
+line say `a newer ticketmaster is available: run ticketmaster upgrade`. It stays silent when offline,
+when `git` is missing, on editable installs, and when the install does not know its commit.
+
 ## Usage
 
 ```

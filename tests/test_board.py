@@ -2,11 +2,14 @@ import json
 import asyncio
 from datetime import datetime, timezone
 
+import pytest
+
 from ticketmaster.board import (BoardApp, Card, FilterPicker, HelpScreen, Pacer, PickerOption, passes_authors,
                                passes_labels, render_card, tag_style)
 from ticketmaster.herdr import Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
+from ticketmaster.upgrade import UPGRADE_NOTICE as NOTICE
 
 
 class FakeProvider:
@@ -519,6 +522,7 @@ def test_help_lists_every_visible_binding_and_closes_without_quitting():
                         assert binding.description in text
                         assert app.get_key_display(binding) in text
                 assert "herdr agent issue-<n>" in text and "select authors" in text
+                assert "newer one is available: run `ticketmaster upgrade`" in text
                 await pilot.press(close)
                 await pilot.pause()
                 assert not isinstance(app.screen, HelpScreen) and app.is_running
@@ -1365,6 +1369,46 @@ def test_map_order_lookup_failure_falls_back_to_board_order():
             await pilot.press("s")
             await loaded(app, pilot)
             assert app.screen.question.startswith("Start #5 ")
+
+    run(scenario())
+
+
+def test_newer_version_shows_a_toast_and_stays_in_the_status_line_checked_once():
+    checks = []
+
+    def update_check():
+        checks.append(1)
+        return NOTICE
+
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, update_check=update_check)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert [n.message for n in app._notifications] == [NOTICE]
+            for _ in range(3):
+                await pilot.press("r")
+                await app.workers.wait_for_complete()
+                await pilot.pause()
+            assert NOTICE in str(app.query_one("#status").render())
+            assert len(checks) == 1
+
+    run(scenario())
+
+
+def failing_check():
+    raise RuntimeError("boom")
+
+
+@pytest.mark.parametrize("update_check", [lambda: None, failing_check])
+def test_no_notice_when_the_check_finds_nothing_or_fails(update_check):
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, update_check=update_check)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert list(app._notifications) == []
+            assert "upgrade" not in str(app.query_one("#status").render())
 
     run(scenario())
 

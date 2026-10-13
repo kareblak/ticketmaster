@@ -467,6 +467,12 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 f"  scope) into that doc's Wayfinding operations section; the status line warns while\n"
                 f"  they are missing or differ from what this version writes.\n")
 
+    heading("Updates")
+    text.append("  On start the board asks GitHub (git ls-remote, in the background) for the head of main.\n"
+                "  When it differs from the commit this ticketmaster was installed from, a toast and the\n"
+                "  status line say a newer one is available: run `ticketmaster upgrade`. Offline, editable\n"
+                "  (dev) installs and installs that do not know their commit stay quiet.\n")
+
     heading("The board only reads, except for deleting")
     text.append("  It writes to the tracker only when you delete an issue. A session claims its ticket by\n"
                 "  assigning it, so the card moves to In progress on the next refresh.")
@@ -540,6 +546,7 @@ class BoardApp(App):
         settings_path: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
         repo_root: Path | None = None,
+        update_check: Callable[[], str | None] | None = None,
     ):
         super().__init__()
         self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
@@ -558,6 +565,8 @@ class BoardApp(App):
         self.repo_root = repo_root  # None: the skills setup is not checked
         self.setup_missing = False
         self.wayfinding_drift: str | None = None  # "missing" / "outdated" when `ticketmaster setup` should run
+        self.update_check = update_check  # asked once per board start, in the background; None: never
+        self.upgrade_notice: str | None = None  # "a newer ticketmaster is available: …" once the check says so
         self.holds = dict(DEFAULT_HOLDS)  # triage label → why it keeps a ticket from an AFK start
         self.board_query = query
         self.interval = interval
@@ -594,6 +603,21 @@ class BoardApp(App):
         self._apply_view()
         self.tick()
         self.set_interval(min(self.interval, 1.0), self.tick)  # 1s at most, for the back-off countdown
+        if self.update_check is not None:
+            self.run_worker(self._check_for_update, thread=True, group="update")
+
+    def _check_for_update(self) -> None:
+        try:
+            notice = self.update_check()
+        except Exception:
+            return  # a nicety: whatever goes wrong, the board carries on without it
+        if notice:
+            self.call_from_thread(self._show_upgrade_notice, notice)
+
+    def _show_upgrade_notice(self, notice: str) -> None:
+        self.upgrade_notice = notice
+        self.notify(notice, severity="warning")
+        self._render_status()
 
     def tick(self) -> None:
         """Fetches whatever the pacer says is due."""
@@ -754,6 +778,8 @@ class BoardApp(App):
         elif self.wayfinding_drift:
             state = "missing from" if self.wayfinding_drift == "missing" else "out of date in"
             status.append(f"  ⚠ run {WAYFINDING_SETUP}: wayfinding rules {state} {SETUP_DOC}", style="bold yellow")
+        if self.upgrade_notice:
+            status.append(f"  ⚠ {self.upgrade_notice}", style="bold yellow")
         for error in (self.last_error, self.herdr_error):
             if error:
                 status.append(f"  ⚠ {error}", style="bold red")

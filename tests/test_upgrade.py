@@ -6,7 +6,7 @@ import pytest
 
 from ticketmaster import __version__
 from ticketmaster.cli import main
-from ticketmaster.upgrade import SOURCE, Install, describe, install_from, upgrade
+from ticketmaster.upgrade import SOURCE, Install, describe, UPGRADE_NOTICE, install_from, main_head, upgrade, upgrade_notice
 
 VENVS = "/home/me/.local/pipx/venvs"
 APP = f"{VENVS}/ticketmaster"
@@ -138,3 +138,55 @@ def test_cli_upgrade_runs_outside_herdr(monkeypatch):
     monkeypatch.setattr("ticketmaster.upgrade.upgrade", lambda install, **kw: calls.append(install) or 0)
     assert main(["upgrade"]) == 0
     assert calls == [GIT]
+
+
+def never_asked():
+    raise AssertionError("the remote must not be asked")
+
+
+def test_notice_when_main_has_moved_on():
+    assert upgrade_notice(GIT, lambda: SHA) == UPGRADE_NOTICE
+
+
+def test_no_notice_when_up_to_date():
+    assert upgrade_notice(Install(commit=SHA, editable_dir=None), lambda: SHA) is None
+
+
+def test_no_notice_and_no_lookup_for_editable_or_unknown_installs(tmp_path):
+    assert upgrade_notice(Install(commit=None, editable_dir=tmp_path), never_asked) is None
+    assert upgrade_notice(Install(commit=None, editable_dir=None), never_asked) is None
+
+
+def test_no_notice_when_main_cannot_be_reached():
+    assert upgrade_notice(GIT, lambda: None) is None
+
+
+def ls_remote(stdout="", code=0, raises=None):
+    calls = []
+
+    def fake(cmd, **kwargs):
+        calls.append((cmd, kwargs))
+        if raises:
+            raise raises
+        return subprocess.CompletedProcess(cmd, code, stdout=stdout, stderr="")
+
+    return fake, calls
+
+
+def test_main_head_asks_github_for_main_with_a_short_timeout():
+    fake, calls = ls_remote(f"{SHA}\trefs/heads/main\n")
+    assert main_head(run=fake) == SHA
+    [(cmd, kwargs)] = calls
+    assert cmd == ["git", "ls-remote", "https://github.com/kareblak/ticketmaster.git", "refs/heads/main"]
+    assert kwargs["timeout"] <= 10
+    assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+
+
+@pytest.mark.parametrize("fake", [
+    ls_remote(code=128)[0],  # offline, or GitHub unreachable
+    ls_remote("")[0],  # no main branch
+    ls_remote(raises=subprocess.TimeoutExpired(["git"], 5))[0],
+    ls_remote(raises=FileNotFoundError("git"))[0],  # git not installed
+])
+def test_main_head_is_none_when_github_cannot_say(fake):
+    assert main_head(run=fake) is None
