@@ -2,7 +2,7 @@ import json
 import asyncio
 from datetime import datetime, timezone
 
-from ticketmaster.board import BoardApp, Card, tag_style
+from ticketmaster.board import BoardApp, Card, HelpScreen, tag_style
 from ticketmaster.herdr import Session
 from ticketmaster.model import Ticket
 from ticketmaster.providers import ProviderError, Query
@@ -399,3 +399,26 @@ def test_a_toggles_auto_remove_saves_it_and_cleans_up_right_away(tmp_path):
 
 def test_sec_is_an_alias_for_the_security_colour():
     assert tag_style("sec") == tag_style("security") == "white on red"
+
+
+def test_help_lists_every_visible_binding_and_closes_without_quitting():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            for close in ("escape", "question_mark", "q"):
+                await pilot.press("question_mark")
+                await pilot.pause()
+                assert isinstance(app.screen, HelpScreen)
+                text = app.screen.text.plain
+                for binding in app.BINDINGS:
+                    if binding.show:
+                        assert binding.description in text
+                        assert app.get_key_display(binding) in text
+                assert "herdr agent issue-<n>" in text
+                await pilot.press(close)
+                await pilot.pause()
+                assert not isinstance(app.screen, HelpScreen) and app.is_running
+
+    run(scenario())

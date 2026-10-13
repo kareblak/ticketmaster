@@ -72,6 +72,7 @@ switch columns, `1`–`5` jump to one, `v` shows all side by side (`--columns` s
 | `a`            | any               | toggle auto-remove of Done tickets' worktrees (see below; saved)    |
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | filter, clear filter, refresh now, quit                             |
+| `?`            | any               | help: keys, columns, scope and how sessions start                   |
 
 Arrows or `hjkl` move between cards.
 
