@@ -1,8 +1,8 @@
 """GitHub via `gh api graphql`: native blockedBy, sub-issues and closing PRs.
 
-A parent board is the parent's sub-issues, plus a spec that links to it with a `Part of #<parent>`
-line and the spec's implementation tickets: its sub-issues and the issues whose `## Parent` section
-names it. Body links show up as cross-references in the linked issue's timeline.
+A parent board is the parent's sub-issues and, for a map, the spec that links to it with a
+`Part of #<map>` line (a sub-issue or not) and the spec's implementation tickets: its sub-issues and
+the issues whose `## Parent` section names it. Body links show up as cross-references in the linked issue's timeline.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, is_spec, names_parent, part_of, run_json, tracker_error, under
+from . import ProviderError, Query, is_spec, names_parent, run_json, tracker_error, with_parent
 
 ISSUE_FIELDS = """
   number title url body state closedAt
@@ -85,11 +85,11 @@ class GitHubProvider:
 
         parent, subs, refs = self._children(query.parent, query.limit)
         tickets += new(subs)
-        tickets += under([t for t in new(refs, lambda body: part_of(body, query.parent)) if is_spec(t)], parent)
-        for spec in [t for t in tickets if is_spec(t)]:
+        tickets += with_parent([t for t in new(refs) if is_spec(t, parent)], parent)
+        for spec in [t for t in tickets if is_spec(t, parent)]:
             _, subs, refs = self._children(spec.number, query.limit)
             tickets += new(subs)
-            tickets += under(new(refs, lambda body: names_parent(body, spec.number)), spec)
+            tickets += with_parent(new(refs, lambda body: names_parent(body, spec.number)), spec)
         return [replace(t, order=index) for index, t in enumerate(tickets[: query.limit])]
 
     def _children(self, number: int, limit: int) -> tuple[Ticket, list[dict], list[dict]]:

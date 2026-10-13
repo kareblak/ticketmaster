@@ -161,8 +161,8 @@ tickets, the spec and the spec's implementation tickets on one board:
 | Gitea / Forgejo | `Part of #<map>` as the first line | `## Parent` section naming `#<spec>`                                |
 
 The spec and its tickets carry no `wayfinder:` label, so `s` starts them with the implement skill;
-decision tickets keep wayfinder. On GitHub the board also counts a sub-issue of the map without a
-`wayfinder:` label as a spec, and a spec's ticket linked by only one of the two links.
+decision tickets keep wayfinder. Only a `wayfinder:map` parent gets this; on GitHub a spec's ticket
+linked by only one of its two links still counts.
 
 Blocking is always the native link, never a `Blocked by:` body line. The keywords `Part of` and
 `## Parent` and the `out-of-scope` label are always English, even when the rest of the issue is in another language. While the repo's section is missing or differs

@@ -311,26 +311,37 @@ def github_node(n, parent=None, repo="o/r"):
     return node
 
 
-def test_github_map_board_includes_the_spec_and_its_implementation_tickets(monkeypatch):
-    # #2 is a native sub-issue of the map and #4 one of the spec; #3 and #5 link by body only,
-    # so GitHub reports them as cross-references; #6 and #8 (another repo) mention without linking.
-    sub_issues = {1: [github_node(2, parent=1)], 3: [github_node(4, parent=3)]}
-    references = {1: [github_node(3), github_node(6), github_node(2, parent=1)],
-                  3: [github_node(5), github_node(4, parent=3), {**github_node(5, repo="x/y"), "number": 8}]}
+def github_children(monkeypatch, sub_issues, references, labels_of=lambda n: FAMILY[n][2]):
     asked = []
 
     def fake_run_json(args, stdin=None):
-        variables = json.loads(stdin)["variables"]
-        number = variables["number"]
+        number = json.loads(stdin)["variables"]["number"]
         asked.append(number)
-        issue = {"url": f"https://gh/{number}",
-                 "labels": {"nodes": [{"name": label} for label in FAMILY[number][2]]},
+        issue = {"url": f"https://gh/{number}", "labels": {"nodes": [{"name": label} for label in labels_of(number)]},
                  "subIssues": {"pageInfo": {"hasNextPage": False}, "nodes": sub_issues.get(number, [])},
                  "timelineItems": {"pageInfo": {"hasNextPage": False},
                                    "nodes": [{"source": s} for s in references.get(number, [])] + [{"source": {}}]}}
         return {"data": {"repository": {"issue": issue}}}
 
     monkeypatch.setattr(github, "run_json", fake_run_json)
+    return asked
+
+
+def test_github_plain_parent_board_is_only_its_sub_issues(monkeypatch):
+    # The same family under an epic: no map, so no spec, and no query beyond the parent's own.
+    asked = github_children(monkeypatch, {1: [github_node(3, parent=1)]}, {1: [github_node(3)]},
+                            labels_of=lambda n: ("epic",))
+    tickets = github.GitHubProvider("o/r").fetch(Query(parent=1))
+    assert [t.number for t in tickets] == [3] and asked == [1]
+
+
+def test_github_map_board_includes_the_spec_and_its_implementation_tickets(monkeypatch):
+    # #2 is a native sub-issue of the map and #4 one of the spec; #3 and #5 link by body only,
+    # so GitHub reports them as cross-references; #6 and #8 (another repo) mention without linking.
+    sub_issues = {1: [github_node(2, parent=1)], 3: [github_node(4, parent=3)]}
+    references = {1: [github_node(3), github_node(6), github_node(2, parent=1)],
+                  3: [github_node(5), github_node(4, parent=3), {**github_node(5, repo="x/y"), "number": 8}]}
+    asked = github_children(monkeypatch, sub_issues, references)
     tickets = github.GitHubProvider("o/r").fetch(Query(parent=1))
     assert_map_family(tickets, "https://gh/1", "https://gh/3")
     assert [t.number for t in tickets] == [2, 3, 4, 5]  # map order, then the spec, then its tickets

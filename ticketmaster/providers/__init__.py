@@ -88,24 +88,24 @@ def names_parent(body: str, parent: int) -> bool:
     return mentions_parent(text, parent) or re.search(rf"/issues/{parent}\b", text) is not None
 
 
-def is_spec(ticket: Ticket) -> bool:
-    """A child of a map without a `wayfinder:` label is the spec the map led to, not a decision ticket."""
-    return not any(label.startswith("wayfinder:") for label in ticket.labels)
+def is_spec(ticket: Ticket, parent: Ticket) -> bool:
+    """The spec a map led to: `Part of #<map>` and no `wayfinder:` label, so it is no decision ticket."""
+    return (parent.is_wayfinder_map and part_of(ticket.body, parent.number)
+            and not any(label.startswith("wayfinder:") for label in ticket.labels))
 
 
-def under(tickets: list[Ticket], parent: Ticket) -> list[Ticket]:
+def with_parent(tickets: list[Ticket], parent: Ticket) -> list[Ticket]:
     return [replace(t, parent_number=parent.number, parent_url=parent.url, parent_labels=parent.labels) for t in tickets]
 
 
-def map_family(tickets: list[Ticket], parent: int) -> tuple[list[Ticket], list[Ticket]]:
-    """For trackers without sub-issues: the parent's children (they mention `#<parent>`), and the
-    implementation tickets of the children that are specs (`Part of #<parent>`), parented to their spec."""
-    children = [t for t in tickets if t.number != parent and mentions_parent(t.body, parent)]
-    specs = [t for t in children if is_spec(t) and part_of(t.body, parent)]
-    taken = {parent} | {t.number for t in children}
-    family: list[Ticket] = []
-    for spec in specs:
+def map_family(tickets: list[Ticket], parent: Ticket) -> list[Ticket]:
+    """For trackers without sub-issues: the parent's children (they mention `#<parent>`) and, when the
+    parent is a map, the implementation tickets of its spec (`## Parent` names the spec), parented to it."""
+    children = [t for t in tickets if t.number != parent.number and mentions_parent(t.body, parent.number)]
+    taken = {parent.number} | {t.number for t in children}
+    family = with_parent(children, parent)
+    for spec in [t for t in children if is_spec(t, parent)]:
         found = [t for t in tickets if t.number not in taken and names_parent(t.body, spec.number)]
         taken |= {t.number for t in found}
-        family += under(found, spec)
-    return children, family
+        family += with_parent(found, spec)
+    return family

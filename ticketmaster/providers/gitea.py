@@ -51,14 +51,8 @@ class GiteaProvider:
         pr_bodies = [f"{p.get('title', '')}\n{p.get('body') or ''}" for p in pulls]
         tickets = [to_ticket(i, None, pr_bodies) for i in raw]
         if query.parent is not None:
-            children, family = map_family(tickets, query.parent)
-            parent = self._get(f"/repos/{self.repo}/issues/{query.parent}")
-            labels = tuple(label["name"] for label in parent.get("labels") or [])
-            children = [
-                replace(t, parent_number=query.parent, parent_url=parent["html_url"], parent_labels=labels)
-                for t in children
-            ]
-            tickets = children + family
+            parent = to_ticket(self._get(f"/repos/{self.repo}/issues/{query.parent}"), None, [])
+            tickets = map_family(tickets, parent)
         open_numbers = [t.number for t in tickets if t.is_open]
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))

@@ -8,11 +8,10 @@ them (`Part of #<parent>`), which name the spec in their `## Parent` section.
 from __future__ import annotations
 
 import json
-from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, map_family, run_json, tracker_error
+from . import ProviderError, Query, map_family, mentions_parent, run_json, tracker_error
 
 ISSUES = """
 query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
@@ -63,16 +62,13 @@ class GitLabProvider:
                 seen.setdefault(ticket.number, ticket)
         tickets = list(seen.values())
         if query.parent is not None:
-            children, family = map_family(tickets, query.parent)
-            tickets = self._with_parent(children, query.parent) + family
+            issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(query.parent)}).get("project") or {}).get("issue")
+            if not issue:
+                return [t for t in tickets if t.number != query.parent and mentions_parent(t.body, query.parent)]
+            labels = tuple(label["title"] for label in issue["labels"]["nodes"])
+            parent = Ticket(number=query.parent, title="", url=issue["webUrl"], is_open=True, labels=labels)
+            tickets = map_family(tickets, parent)
         return tickets
-
-    def _with_parent(self, tickets: list[Ticket], parent: int) -> list[Ticket]:
-        issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(parent)}).get("project") or {}).get("issue")
-        if not issue:
-            return tickets
-        labels = tuple(label["title"] for label in issue["labels"]["nodes"])
-        return [replace(t, parent_number=parent, parent_url=issue["webUrl"], parent_labels=labels) for t in tickets]
 
     def _issues(self, variables: dict, limit: int) -> list[dict]:
         nodes: list[dict] = []
