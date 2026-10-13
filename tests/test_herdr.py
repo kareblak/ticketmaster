@@ -87,6 +87,12 @@ def test_open_board_restarts_in_the_existing_pane():
     assert ("pane", "split") not in fake.verbs()
 
 
+def test_open_board_from_the_board_pane_itself_leaves_the_pane_alone():
+    fake = FakeHerdr({("pane", "list"): {"panes": [{"pane_id": "w1:p5", "label": "ticketmaster"}]}})
+    assert Herdr(fake).open_board(REPO, "tm board", caller="w1:p5") is None
+    assert fake.verbs() == [("pane", "list")]
+
+
 def test_start_creates_a_worktree_workspace_with_a_named_agent():
     fake = FakeHerdr({
         ("worktree", "list"): worktrees(),

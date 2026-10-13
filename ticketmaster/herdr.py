@@ -86,9 +86,12 @@ class Herdr:
         panes = self.call("pane", "list").get("panes", [])
         return next((p["pane_id"] for p in panes if p.get("label") == BOARD_LABEL), None)
 
-    def open_board(self, cwd: Path, command: str) -> str:
-        """Restarts the board in its existing pane, or splits one off the caller. Returns the pane id."""
+    def open_board(self, cwd: Path, command: str, caller: str | None = None) -> str | None:
+        """Restarts the board in its existing pane, or splits one off the caller. Returns the pane id,
+        or None when the caller is the board pane itself, which then runs the board in place."""
         existing = self.board_pane()
+        if existing and existing == caller:
+            return None  # restarting would send q to, and close, the caller's own pane
         if existing:
             self.call("pane", "send-keys", existing, "q")  # Textual quits on q and drops to the shell
             for _ in range(20):

@@ -7,6 +7,7 @@ Everything but `snapshot` and `install-skill` runs inside herdr (HERDR_ENV=1).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -81,12 +82,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "open":
         try:
-            pane = herdr.Herdr().open_board(cwd, herdr.board_command(passthrough(args)))
+            pane = herdr.Herdr().open_board(cwd, herdr.board_command(passthrough(args)), os.environ.get("HERDR_PANE_ID"))
         except herdr.HerdrError as exc:
             print(f"ticketmaster: herdr: {exc}", file=sys.stderr)
             return 1
-        print(f"Board opened in herdr pane {pane} ({herdr.BOARD_LABEL}) for {provider.name}:{provider.repo}.")
-        return 0
+        if pane is not None:
+            print(f"Board opened in herdr pane {pane} ({herdr.BOARD_LABEL}) for {provider.name}:{provider.repo}.")
+            return 0
+        args.command = "board"  # run from the board pane itself: run the board here
 
     if args.command == "adopt":
         from .start import session_label, worktree_name
