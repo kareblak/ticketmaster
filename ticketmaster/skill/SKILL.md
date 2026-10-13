@@ -4,8 +4,10 @@ description: Open a live kanban board (Blocked, Ready, In progress, Review, Done
 argument-hint: "[parent-issue] [--label <name>] [--repo owner/name] [--provider github|gitlab|gitea] [--host <host>]"
 ---
 
-Open the board for the repo in the current working directory, in a herdr pane to the right of
-this session (labelled `ticketmaster`; running it again restarts the board there):
+Open the board for the repo in the current working directory, in a herdr pane next to the
+calling pane, the one this session runs in (labelled `ticketmaster`; running it again restarts
+the board there). If the inherited `HERDR_PANE_ID` is gone or belongs to another session or
+project, the board opens next to the focused pane instead; the result line names the pane:
 
 ```bash
 ticketmaster open $ARGUMENTS
