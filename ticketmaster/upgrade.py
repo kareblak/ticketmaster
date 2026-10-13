@@ -62,6 +62,7 @@ def upgrade(
     install: Install,
     run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     which: Callable[[str], str | None] = shutil.which,
+    prefix: str = sys.prefix,
 ) -> int:
     if install.editable_dir is not None:
         print(f"ticketmaster is an editable install following the clone at {install.editable_dir}; "
@@ -75,18 +76,25 @@ def upgrade(
     def step(cmd: list[str]) -> subprocess.CompletedProcess:
         return run(cmd, capture_output=True, text=True)
 
+    found = step(["pipx", "environment", "--value", "PIPX_LOCAL_VENVS"])
+    if found.returncode != 0 or not found.stdout.strip():
+        print(f"ticketmaster: pipx did not say where its apps live; nothing changed.\n{found.stderr.strip()}",
+              file=sys.stderr)
+        return 1
+    venv = Path(found.stdout.strip()) / "ticketmaster"
+    # Reinstalling a copy that is not the pipx app would leave this one, still first on PATH, on the old code.
+    if Path(prefix).resolve() != venv.resolve():
+        print(f"ticketmaster: this ticketmaster runs from {prefix}, not the pipx app at {venv}; "
+              f"upgrade it the way it was installed.", file=sys.stderr)
+        return 1
+
     print(f"Reinstalling ticketmaster from {SOURCE} …")
     done = step(["pipx", "install", "--force", SOURCE])
     if done.returncode != 0:
         print(f"ticketmaster: reinstall failed; the skill is unchanged.\n{done.stderr.strip()}", file=sys.stderr)
         return 1
     # The skill must come from the new code, so run it in the venv pipx just rebuilt, not in this process.
-    venvs = step(["pipx", "environment", "--value", "PIPX_LOCAL_VENVS"]).stdout.strip()
-    if not venvs:
-        print("ticketmaster: reinstalled, but pipx did not say where; run `ticketmaster install-skill`.",
-              file=sys.stderr)
-        return 1
-    python = str(Path(venvs) / "ticketmaster" / "bin" / "python")
+    python = str(venv / "bin" / "python")
     done = step([python, "-m", "ticketmaster", "install-skill"])
     if done.returncode != 0:
         print(f"ticketmaster: reinstalled, but `ticketmaster install-skill` failed; run it again.\n"

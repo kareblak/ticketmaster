@@ -4,10 +4,12 @@ from pathlib import Path
 
 import pytest
 
+from ticketmaster import __version__
 from ticketmaster.cli import main
 from ticketmaster.upgrade import SOURCE, Install, describe, install_from, upgrade
 
 VENVS = "/home/me/.local/pipx/venvs"
+APP = f"{VENVS}/ticketmaster"
 NEW_PYTHON = f"{VENVS}/ticketmaster/bin/python"
 SHA = "0123456789abcdef0123456789abcdef01234567"
 
@@ -15,14 +17,15 @@ SHA = "0123456789abcdef0123456789abcdef01234567"
 class FakeRun:
     """Stands in for subprocess.run: records each command; `failing` makes a step exit non-zero."""
 
-    def __init__(self, **failing: int):
+    def __init__(self, venvs: str = VENVS, **failing: int):
         self.calls: list[list[str]] = []
+        self.venvs = venvs
         self.failing = failing
 
     def __call__(self, cmd, **kwargs):
         self.calls.append(cmd)
         if cmd[:3] == ["pipx", "environment", "--value"]:
-            return subprocess.CompletedProcess(cmd, 0, stdout=VENVS + "\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout=self.venvs + "\n", stderr="")
         if cmd[1] == "-c":
             direct_url = {"url": "https://github.com/kareblak/ticketmaster.git", "vcs_info": {"vcs": "git", "commit_id": SHA}}
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(direct_url) + "\n", stderr="")
@@ -44,8 +47,8 @@ GIT = Install(commit="feedface" * 5, editable_dir=None)
 
 def test_reinstalls_from_github_then_refreshes_skill_with_the_new_code(capsys):
     run = FakeRun()
-    assert upgrade(GIT, run=run, which=has_pipx) == 0
-    assert run.calls[0] == ["pipx", "install", "--force", SOURCE]
+    assert upgrade(GIT, run=run, which=has_pipx, prefix=APP) == 0
+    assert ["pipx", "install", "--force", SOURCE] in run.calls
     assert [NEW_PYTHON, "-m", "ticketmaster", "install-skill"] in run.calls
     assert run.calls.index([NEW_PYTHON, "-m", "ticketmaster", "install-skill"]) > 0
     out = capsys.readouterr().out
@@ -54,27 +57,41 @@ def test_reinstalls_from_github_then_refreshes_skill_with_the_new_code(capsys):
 
 def test_missing_pipx_fails_without_touching_anything(capsys):
     run = FakeRun()
-    assert upgrade(GIT, run=run, which=no_pipx) == 1
+    assert upgrade(GIT, run=run, which=no_pipx, prefix=APP) == 1
     assert run.calls == []
     assert "pipx" in capsys.readouterr().err
 
 
+def test_install_outside_pipx_is_refused(capsys):
+    run = FakeRun()
+    assert upgrade(GIT, run=run, which=has_pipx, prefix="/usr/local") == 1
+    assert not any(c[:2] == ["pipx", "install"] for c in run.calls)
+    assert "/usr/local" in capsys.readouterr().err
+
+
+def test_pipx_without_a_venv_dir_changes_nothing(capsys):
+    run = FakeRun(venvs="")
+    assert upgrade(GIT, run=run, which=has_pipx, prefix=APP) == 1
+    assert not any(c[:2] == ["pipx", "install"] for c in run.calls)
+    assert "pipx did not say" in capsys.readouterr().err
+
+
 def test_failed_reinstall_leaves_the_skill_alone(capsys):
     run = FakeRun(reinstall=1)
-    assert upgrade(GIT, run=run, which=has_pipx) == 1
+    assert upgrade(GIT, run=run, which=has_pipx, prefix=APP) == 1
     assert not any(c[-1] == "install-skill" for c in run.calls)
     assert "reinstall failed" in capsys.readouterr().err
 
 
 def test_failed_skill_refresh_is_reported(capsys):
     run = FakeRun(skill=1)
-    assert upgrade(GIT, run=run, which=has_pipx) == 1
+    assert upgrade(GIT, run=run, which=has_pipx, prefix=APP) == 1
     assert "install-skill" in capsys.readouterr().err
 
 
 def test_editable_install_says_git_pull_instead(capsys, tmp_path):
     run = FakeRun()
-    assert upgrade(Install(commit=None, editable_dir=tmp_path), run=run, which=has_pipx) == 0
+    assert upgrade(Install(commit=None, editable_dir=tmp_path), run=run, which=has_pipx, prefix=APP) == 0
     assert run.calls == []
     out = capsys.readouterr().out
     assert "git pull" in out and str(tmp_path) in out
@@ -111,12 +128,13 @@ def test_describe():
 def test_cli_version_reports_the_commit(capsys, monkeypatch):
     monkeypatch.setattr("ticketmaster.upgrade.installed", lambda: Install(commit=SHA, editable_dir=None))
     assert main(["--version"]) == 0
-    assert capsys.readouterr().out.strip() == f"ticketmaster 0.2.0 ({SHA[:12]})"
+    assert capsys.readouterr().out.strip() == f"ticketmaster {__version__} ({SHA[:12]})"
 
 
 def test_cli_upgrade_runs_outside_herdr(monkeypatch):
     monkeypatch.delenv("HERDR_ENV", raising=False)
     calls = []
+    monkeypatch.setattr("ticketmaster.upgrade.installed", lambda: GIT)
     monkeypatch.setattr("ticketmaster.upgrade.upgrade", lambda install, **kw: calls.append(install) or 0)
     assert main(["upgrade"]) == 0
-    assert len(calls) == 1
+    assert calls == [GIT]

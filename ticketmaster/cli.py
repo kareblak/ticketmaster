@@ -75,9 +75,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Installed /ticketmaster skill at {path}. Restart Claude Code sessions to pick it up.")
         return 0
     if args.command == "upgrade":
-        from . import upgrade
+        from .upgrade import installed, upgrade
 
-        return upgrade.upgrade(upgrade.installed())
+        return upgrade(installed())
     if args.command in NEEDS_HERDR and not herdr.available():
         print(f"ticketmaster: `{args.command}` runs inside herdr; start herdr and run it from a herdr pane", file=sys.stderr)
         return 2
