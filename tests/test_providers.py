@@ -38,8 +38,22 @@ def test_github_sends_variables_as_json(monkeypatch):
     monkeypatch.setattr(github, "run_json", fake_run_json)
     github.GitHubProvider("o/r").fetch(github.Query(label="bug"))
     queries = [body["variables"]["q"] for _, body in calls]
-    assert queries[0] == 'repo:o/r is:issue is:open label:"bug"'
-    assert queries[1].startswith("repo:o/r is:issue is:closed closed:>=")
+    assert queries[0] == 'repo:o/r is:issue label:"bug" is:open'
+    assert queries[1].startswith('repo:o/r is:issue label:"bug" is:closed closed:>=')
+
+
+def test_github_default_scope_is_every_issue(monkeypatch):
+    calls = []
+
+    def fake_run_json(args, stdin=None):
+        calls.append(json.loads(stdin)["variables"]["q"])
+        return {"data": {"search": {"pageInfo": {"hasNextPage": False}, "nodes": []}}}
+
+    monkeypatch.setattr(github, "run_json", fake_run_json)
+    github.GitHubProvider("o/r").fetch(github.Query())
+    assert calls[0] == "repo:o/r is:issue is:open"
+    assert calls[1].startswith("repo:o/r is:issue is:closed closed:>=") and len(calls) == 2
+    assert not any("assignee" in q for q in calls)
 
 
 def test_gitlab_node_to_ticket():
@@ -81,7 +95,7 @@ def test_gitea_issue_to_ticket_detects_closing_pr():
     assert gitea.to_ticket(issue, 0, ["Fixes #40"]).has_open_change_request is False
 
 
-def test_gitea_fetch_default_scope_and_blockers(monkeypatch):
+def test_gitea_fetch_default_scope_is_every_issue_with_blockers(monkeypatch):
     issues_open = [
         {"number": 1, "title": "mine", "html_url": "u", "state": "open", "assignees": [{"login": "me"}], "labels": []},
         {"number": 2, "title": "free", "html_url": "u", "state": "open", "assignees": [], "labels": []},
@@ -102,7 +116,7 @@ def test_gitea_fetch_default_scope_and_blockers(monkeypatch):
     monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
     provider = gitea.GiteaProvider("o/r", "codeberg.org", token="x")
     tickets = {t.number: t for t in provider.fetch(gitea.Query())}
-    assert sorted(tickets) == [1, 2]
+    assert sorted(tickets) == [1, 2, 3]  # all open issues, whoever is assigned
     assert tickets[2].open_blockers == 1 and tickets[1].open_blockers == 0
 
 

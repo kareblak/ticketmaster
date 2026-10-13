@@ -17,7 +17,7 @@ class ProviderError(RuntimeError):
 
 @dataclass(frozen=True)
 class Query:
-    """What a board shows. With neither parent nor label: your open work plus unassigned open issues."""
+    """What a board shows. With neither parent nor label: every open issue plus those closed within done_days."""
 
     parent: int | None = None
     label: str | None = None

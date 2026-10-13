@@ -11,7 +11,7 @@ this session (labelled `ticketmaster`; running it again restarts the board there
 ticketmaster open $ARGUMENTS
 ```
 
-- No arguments: the user's open issues, unassigned open issues, and their issues closed in the last 7 days.
+- No arguments: every open issue, and every issue closed in the last 7 days.
 - A number (`42`, `#42`, or an issue URL): the sub-issues of that parent, e.g. a wayfinder map.
 - `--label <name>`: issues with that label.
 
