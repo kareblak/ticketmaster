@@ -54,7 +54,7 @@ ticketmaster [open|snapshot|adopt|install-skill] [parent] [--label NAME] [--repo
 
 Scope:
 
-- no filter: your open issues, unassigned open issues, and your recently closed issues
+- no filter: every open issue, and every issue closed within `--done-days`
 - `parent` (`42`, `#42` or an issue URL): the parent's sub-issues, e.g. a wayfinder map
 - `--label NAME`: issues with that label
 
@@ -168,8 +168,8 @@ Where a provider lacks a feature, the board falls back: no dependency support me
 `blocked` label marks an issue Blocked, and no sub-issues means a parent board shows issues
 whose body mentions `#<parent>`.
 
-GitHub's GraphQL budget is 5,000 points an hour. The default board makes 3 searches per refresh
-(about 2,200 an hour at 5s), so lengthen `--interval` if you run several boards at once.
+GitHub's GraphQL budget is 5,000 points an hour. Every board makes 2 searches per refresh
+(about 1,500 an hour at 5s), so lengthen `--interval` if you run several boards at once.
 
 ## Development
 

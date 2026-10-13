@@ -229,7 +229,7 @@ class BoardApp(App):
         self.needle = ""
         self.last_error: str | None = None
         self.last_ok: datetime | None = None
-        scope = f"parent #{query.parent}" if query.parent else f"label {query.label}" if query.label else "my work + ready"
+        scope = f"parent #{query.parent}" if query.parent else f"label {query.label}" if query.label else "all issues"
         self.sub_title = f"{provider.name}:{provider.repo} · {scope}"
 
     def compose(self) -> ComposeResult:

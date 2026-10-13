@@ -47,9 +47,6 @@ class GiteaProvider:
 
         if query.parent is not None:
             raw = [i for i in raw if i["number"] != query.parent and mentions_parent(i.get("body", ""), query.parent)]
-        elif not query.label:
-            me = self._get("/user")["login"]
-            raw = [i for i in raw if is_mine_or_unassigned(i, me)]
 
         pulls = self._list(f"/repos/{self.repo}/pulls", {"state": "open"}, 200)
         pr_bodies = [f"{p.get('title', '')}\n{p.get('body') or ''}" for p in pulls]
@@ -97,12 +94,6 @@ class GiteaProvider:
         except urllib.error.URLError as exc:
             raise ProviderError(f"{self.host}: {exc.reason}") from exc
 
-
-def is_mine_or_unassigned(issue: dict, me: str) -> bool:
-    assignees = [a["login"] for a in issue.get("assignees") or []]
-    if issue["state"] == "open":
-        return not assignees or me in assignees
-    return me in assignees
 
 
 def to_ticket(issue: dict, open_blockers: int | None, pr_bodies: list[str]) -> Ticket:
