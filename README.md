@@ -81,7 +81,7 @@ switch columns, `1`–`5` jump to one, `v` shows all side by side (`--columns` s
 | `x`            | Done              | remove the ticket's worktrees (herdr refuses if one has uncommitted changes) |
 | `a`            | any               | toggle auto-remove of Done tickets' worktrees (see below; saved)    |
 | `o`            | any               | open the issue in the browser                                       |
-| `Backspace` `Delete` | Blocked, Ready, Done | delete the issue from the tracker (asks first; cannot be undone; its worktrees are left behind) |
+| `Backspace` `Delete` | Blocked, Ready | close the issue as not planned with the `wontfix` label (asks first; its worktrees are left behind) |
 | `/` `Esc` `r` `q` |                | filter, clear both filters, refresh now, quit                       |
 | `f`            | any               | filter picker: labels cycle include → exclude → off, authors on/off (see below; saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
@@ -155,16 +155,23 @@ restored when the board reopens; a saved label or author that is no longer on th
 until it comes back. This filters what the board shows, unlike
 `--label`, which scopes the query.
 
-The board writes to the tracker only to delete an issue: wayfinder claims its tickets by assigning
+The board writes to the tracker only to close an issue as not planned: wayfinder claims its tickets by assigning
 them, and the implement prompt tells the session to do the same, so the card moves to In progress
 on the next refresh.
 
-`Backspace` or `Delete` on a Blocked, Ready or Done card deletes the issue after a confirm dialog
-(`gh issue delete`, GitLab's and Gitea's issue `DELETE` endpoints). In progress and Review cards
-are refused. The ticket's worktrees are not removed; the dialog lists them so you can remove them
-in herdr yourself. All three trackers let only admins or owners delete issues; the tracker's refusal shows as an
-error notification and the board stays as it was. In the `/` filter input, `Backspace` edits the
-text as usual.
+`Backspace` or `Delete` on a Blocked or Ready card closes the issue as not planned after a confirm
+dialog, and labels it `wontfix`: `gh issue close --reason "not planned"` on GitHub, and on GitLab and
+Gitea, which have no close reason, the label is the marker. Plain write access is enough on all
+three trackers. GitLab creates a missing `wontfix` label; on GitHub and Gitea it must already exist
+(GitHub's default labels include it, as does Gitea's Default label set). The issue is labelled
+before it is closed, so a missing label leaves it open. On a Done card the keys do nothing; In progress and Review cards are refused. The
+ticket's worktrees are not removed; the dialog lists them so you can remove them in herdr yourself.
+A tracker refusal shows as an error notification and the board stays as it was. In the `/` filter
+input, `Backspace` edits the text as usual.
+
+Done hides issues closed this way: a `wontfix` label, or on GitHub the close reason "not planned".
+An issue closed as not planned with the `out-of-scope` label (wayfinder's out-of-scope rule) is the
+exception: it stays on Done, marked `out of scope`.
 
 ## Wayfinding rules
 
@@ -213,7 +220,7 @@ Each issue lands in the first column whose rule matches:
 
 | Column      | Rule                                                                       |
 | ----------- | -------------------------------------------------------------------------- |
-| Done        | closed within `--done-days` (default 7); older closed issues are hidden; an `out-of-scope` label marks the card `out of scope` |
+| Done        | closed within `--done-days` (default 7); older closed issues, and those closed as not planned (see below), are hidden; an `out-of-scope` label marks the card `out of scope` |
 | Review      | has a `review:<type>` (or GitLab scoped `review::<type>`) label, or an open PR/MR that closes it; never a `wayfinder:<type>` ticket |
 | Blocked     | has an open blocking issue (native, or listed in the body), or a `blocked` label |
 | In progress | has an assignee                                                            |

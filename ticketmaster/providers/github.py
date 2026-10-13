@@ -12,12 +12,12 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from ..model import Ticket, parse_time
+from ..model import WONTFIX_LABEL, Ticket, parse_time
 from . import (IssueStates, NotFound, ProviderError, Query, blocker_ref, is_map, is_spec, names_parent, resolve_maps,
                run_cli, run_json, tracker_error, under_spec, with_body_blockers, with_map)
 
 ISSUE_FIELDS = """
-  number title url body state closedAt
+  number title url body state stateReason closedAt
   author { login }
   assignees(first: 10) { nodes { login } }
   labels(first: 30) { nodes { name } }
@@ -129,8 +129,11 @@ class GitHubProvider:
                     seen[node["number"]] = to_ticket(node, order=0, repo=self.repo)
         return list(seen.values())
 
-    def delete(self, number: int) -> None:
-        run_cli(["gh", "issue", "delete", str(number), "--repo", f"{self.host}/{self.repo}", "--yes"])
+    def close(self, number: int) -> None:
+        """Labels first, so a missing `wontfix` label leaves the issue open rather than half done."""
+        repo = f"{self.host}/{self.repo}"
+        run_cli(["gh", "issue", "edit", str(number), "--repo", repo, "--add-label", WONTFIX_LABEL])
+        run_cli(["gh", "issue", "close", str(number), "--repo", repo, "--reason", "not planned"])
 
     def _sub_issues(self, query: Query) -> list[Ticket]:
         """The parent's sub-issues in order; for a map, then its spec and the spec's implementation tickets."""
@@ -222,6 +225,7 @@ def to_ticket(node: dict, order: int, repo: str = "") -> Ticket:
         body=node.get("body") or "",
         is_open=node["state"] == "OPEN",
         closed_at=parse_time(node.get("closedAt")),
+        not_planned=node.get("stateReason") == "NOT_PLANNED",
         author=(node.get("author") or {}).get("login", ""),
         assignees=tuple(a["login"] for a in node["assignees"]["nodes"]),
         labels=tuple(label["name"] for label in node["labels"]["nodes"]),

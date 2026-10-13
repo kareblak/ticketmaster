@@ -20,7 +20,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from ..model import Ticket, parse_time
+from ..model import WONTFIX_LABEL, Ticket, parse_time
 from . import (IssueStates, NotFound, ProviderError, Query, RateLimited, blocker_ref, map_family, resolve_maps,
                tracker_error, with_body_blockers)
 
@@ -69,8 +69,12 @@ class GiteaProvider:
             return None
         return issue["html_url"], tuple(label["name"] for label in issue.get("labels") or [])
 
-    def delete(self, number: int) -> None:
-        self._request("DELETE", f"/repos/{self.repo}/issues/{number}")
+    def close(self, number: int) -> None:
+        """Gitea has no close reason, so the `wontfix` label marks it not planned; labelled first, so a
+        refused label leaves the issue open."""
+        path = f"/repos/{self.repo}/issues/{number}"
+        self._request("POST", f"{path}/labels", body={"labels": [WONTFIX_LABEL]})
+        self._request("PATCH", path, body={"state": "closed"})
 
     def _open_blockers(self, number: int) -> tuple[str, ...] | None:
         try:
@@ -107,15 +111,18 @@ class GiteaProvider:
     def _get(self, path: str, params: dict | None = None):
         return self._request("GET", path, params)
 
-    def _request(self, method: str, path: str, params: dict | None = None):
+    def _request(self, method: str, path: str, params: dict | None = None, body: dict | None = None):
         url = self.base + path + ("?" + urllib.parse.urlencode(params) if params else "")
-        request = urllib.request.Request(url, headers={"Accept": "application/json"}, method=method)
+        data = None if body is None else json.dumps(body).encode()
+        request = urllib.request.Request(url, data=data, headers={"Accept": "application/json"}, method=method)
+        if data is not None:
+            request.add_header("Content-Type", "application/json")
         if self.token:
             request.add_header("Authorization", f"token {self.token}")
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
-                body = response.read()
-                return json.loads(body) if body else None  # DELETE answers 204 No Content
+                answer = response.read()
+                return json.loads(answer) if answer else None
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 raise RateLimited(f"{self.host}{path}: HTTP 429 rate limit exceeded") from exc

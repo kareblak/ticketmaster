@@ -1,4 +1,4 @@
-"""Issue-tracker providers. Each one turns a board query into provider-neutral Tickets, and can delete an issue."""
+"""Issue-tracker providers. Each one turns a board query into provider-neutral Tickets, and can close an issue as not planned."""
 
 from __future__ import annotations
 
@@ -47,7 +47,10 @@ class Provider(Protocol):
     repo: str
 
     def fetch(self, query: Query) -> list[Ticket]: ...
-    def delete(self, number: int) -> None: ...
+
+    def close(self, number: int) -> None:
+        """Closes the issue as not planned with the `wontfix` label; plain write access is enough."""
+        ...
 
     def viewer(self) -> str | None:
         """Login of the user the CLI or token acts as."""

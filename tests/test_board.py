@@ -1,5 +1,6 @@
 import json
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -16,12 +17,12 @@ class FakeProvider:
     name = "fake"
     repo = "o/r"
 
-    def __init__(self, tickets, login="me", delete_error=None):
+    def __init__(self, tickets, login="me", close_error=None):
         self.tickets = tickets
         self.calls = 0
         self.login = login
-        self.deleted = []
-        self.delete_error = delete_error
+        self.closed = []
+        self.close_error = close_error
 
     def viewer(self):
         if isinstance(self.login, Exception):
@@ -34,11 +35,13 @@ class FakeProvider:
             raise self.tickets
         return self.tickets
 
-    def delete(self, number):
-        if self.delete_error:
-            raise self.delete_error
-        self.deleted.append(number)
-        self.tickets = [t for t in self.tickets if t.number != number]
+    def close(self, number):
+        """Like the trackers: closed now, as not planned, with the `wontfix` label."""
+        if self.close_error:
+            raise self.close_error
+        self.closed.append(number)
+        self.tickets = [replace(t, is_open=False, closed_at=datetime.now(timezone.utc), not_planned=True,
+                                labels=t.labels + ("wontfix",)) if t.number == number else t for t in self.tickets]
 
 
 TICKETS = [
@@ -998,53 +1001,73 @@ def notifications(app):
 def test_backspace_on_a_ready_card_asks_and_cancel_keeps_the_issue():
     async def scenario():
         provider = FakeProvider(TICKETS)
-        app = BoardApp(provider, Query(), interval=60)  # deleting needs no herdr
+        app = BoardApp(provider, Query(), interval=60)  # closing needs no herdr
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             await pilot.press("down", "backspace")
             await pilot.pause()
             assert is_confirm(app)
-            assert app.screen.question == "Delete #1 Ready one?"
-            assert "cannot be undone" in app.screen.detail and "left behind" not in app.screen.detail
+            assert app.screen.question == "Close #1 Ready one as not planned?"
+            assert "undone" not in app.screen.detail and "left behind" not in app.screen.detail
             await pilot.press("n")
             await loaded(app, pilot)
-            assert provider.deleted == [] and not is_confirm(app)
+            assert provider.closed == [] and not is_confirm(app)
             await pilot.press("delete")
             await pilot.pause()
             assert is_confirm(app)
             await pilot.press("escape")
             await loaded(app, pilot)
-            assert provider.deleted == [] and len(app.query(Card)) == 3
+            assert provider.closed == [] and len(app.query(Card)) == 3
 
     run(scenario())
 
 
-def test_delete_on_a_done_card_with_worktrees_lists_them_then_deletes_and_refreshes():
+LABELLED_BLOCKED = Ticket(number=6, title="Waiting", url="u6", is_open=True, labels=("blocked",))
+
+
+def test_close_on_a_blocked_card_with_worktrees_lists_them_then_closes_and_keeps_it_off_done():
     async def scenario():
-        provider = FakeProvider(TICKETS + [DONE])
-        bench = FakeBench({4: [Session(4, "issue", "/w/issue-4"), Session(4, "review", "/w/review-4")]})
+        provider = FakeProvider(TICKETS + [LABELLED_BLOCKED, DONE])
+        bench = FakeBench({6: [Session(6, "issue", "/w/issue-6"), Session(6, "review", "/w/review-6")]})
         app = BoardApp(provider, Query(), interval=60, workbench=bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
-            await pilot.press("down", "right", "right", "right")
-            assert app.focused.ticket.number == 4
+            await pilot.press("down")
+            assert app.focused.ticket.number == 6
             await pilot.press("delete")
             await pilot.pause()
             assert is_confirm(app)
             detail = app.screen.detail
-            assert "cannot be undone" in detail and "/w/issue-4" in detail and "/w/review-4" in detail
-            assert "not removed" in detail
+            assert "/w/issue-6" in detail and "/w/review-6" in detail and "not removed" in detail
             await pilot.press("y")
             await loaded(app, pilot)
             await loaded(app, pilot)
-            assert provider.deleted == [4] and bench.calls == []
-            assert 4 not in [c.ticket.number for c in app.query(Card)]
-            assert ("Deleted #4 Shipped", "information") in notifications(app)
+            assert provider.closed == [6] and bench.calls == []
+            assert 6 not in [c.ticket.number for c in app.query(Card)]
+            assert [c.ticket.number for c in app.query_one("#col-DONE").query(Card)] == [4]
+            assert ("Closed #6 Waiting as not planned", "information") in notifications(app)
 
     run(scenario())
 
 
-def test_delete_is_refused_in_progress_and_review():
+def test_close_does_nothing_on_a_done_card():
+    async def scenario():
+        provider = FakeProvider(TICKETS + [DONE])
+        app = BoardApp(provider, Query(), interval=60)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "right", "right", "right")
+            assert app.focused.ticket.number == 4
+            before = len(app._notifications)
+            await pilot.press("delete", "backspace")
+            await pilot.pause()
+            assert not is_confirm(app) and provider.closed == []
+            assert len(app._notifications) == before
+
+    run(scenario())
+
+
+def test_close_is_refused_in_progress_and_review():
     async def scenario():
         provider = FakeProvider(TICKETS)
         app = BoardApp(provider, Query(), interval=60)
@@ -1055,7 +1078,7 @@ def test_delete_is_refused_in_progress_and_review():
             assert not is_confirm(app)
             await pilot.press("right", "backspace")  # Review
             await pilot.pause()
-            assert not is_confirm(app) and provider.deleted == []
+            assert not is_confirm(app) and provider.closed == []
             warnings = [m for m, severity in notifications(app) if severity == "warning"]
             assert len(warnings) == 2 and "#2" in warnings[0] and "#3" in warnings[1]
 
@@ -1078,22 +1101,22 @@ def test_typed_ticket_with_its_map_starts():
     run(scenario())
 
 
-def test_a_tracker_error_on_delete_is_an_error_notification_and_the_card_stays():
+def test_a_tracker_error_on_close_is_an_error_notification_and_the_card_stays():
     async def scenario():
-        provider = FakeProvider(TICKETS, delete_error=ProviderError("must have admin rights to Repository"))
+        provider = FakeProvider(TICKETS, close_error=ProviderError("HTTP 403 Forbidden"))
         app = BoardApp(provider, Query(), interval=60)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             await pilot.press("down", "delete", "y")
             await loaded(app, pilot)
-            assert ("must have admin rights to Repository", "error") in [
+            assert ("HTTP 403 Forbidden", "error") in [
                 (m.split(": ", 1)[-1], s) for m, s in notifications(app)]
             assert 1 in [c.ticket.number for c in app.query(Card)]
 
     run(scenario())
 
 
-def test_backspace_in_the_filter_input_edits_the_text_and_deletes_nothing():
+def test_backspace_in_the_filter_input_edits_the_text_and_closes_nothing():
     async def scenario():
         provider = FakeProvider(TICKETS)
         app = BoardApp(provider, Query(), interval=60)
@@ -1101,13 +1124,13 @@ def test_backspace_in_the_filter_input_edits_the_text_and_deletes_nothing():
             await loaded(app, pilot)
             await pilot.press("down", "slash", *"ready", "backspace", "delete")
             await pilot.pause()
-            assert not is_confirm(app) and provider.deleted == []
+            assert not is_confirm(app) and provider.closed == []
             assert app.query_one("#filter").value == "read"
 
     run(scenario())
 
 
-def test_help_lists_the_delete_binding():
+def test_help_lists_the_close_binding():
     async def scenario():
         app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
         async with app.run_test(size=(160, 50)) as pilot:
@@ -1115,7 +1138,8 @@ def test_help_lists_the_delete_binding():
             await pilot.press("question_mark")
             await pilot.pause()
             text = app.screen.text.plain
-            assert "Delete issue" in text and "Blocked, Ready" in text
+            assert "Close issue" in text and "Blocked and Ready only" in text
+            assert "delete" not in text.lower().replace("backspace delete", "")
 
     run(scenario())
 
