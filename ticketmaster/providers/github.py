@@ -92,6 +92,9 @@ class GitHubProvider:
                     seen[node["number"]] = to_ticket(node, order=0, repo=self.repo)
         return list(seen.values())
 
+    def delete(self, number: int) -> None:
+        run_cli(["gh", "issue", "delete", str(number), "--repo", f"{self.host}/{self.repo}", "--yes"])
+
     def _sub_issues(self, query: Query) -> list[Ticket]:
         owner, name = self.repo.split("/", 1)
         variables = {"owner": owner, "name": name, "number": query.parent}

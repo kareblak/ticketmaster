@@ -68,6 +68,9 @@ class GiteaProvider:
             ]
         return with_body_blockers(tickets, self.states)
 
+    def delete(self, number: int) -> None:
+        self._request("DELETE", f"/repos/{self.repo}/issues/{number}")
+
     def _open_blockers(self, number: int) -> tuple[str, ...] | None:
         try:
             deps = self._get(f"/repos/{self.repo}/issues/{number}/dependencies")
@@ -103,13 +106,17 @@ class GiteaProvider:
         return items[:limit]
 
     def _get(self, path: str, params: dict | None = None):
+        return self._request("GET", path, params)
+
+    def _request(self, method: str, path: str, params: dict | None = None):
         url = self.base + path + ("?" + urllib.parse.urlencode(params) if params else "")
-        request = urllib.request.Request(url, headers={"Accept": "application/json"})
+        request = urllib.request.Request(url, headers={"Accept": "application/json"}, method=method)
         if self.token:
             request.add_header("Authorization", f"token {self.token}")
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
-                return json.load(response)
+                body = response.read()
+                return json.loads(body) if body else None  # DELETE answers 204 No Content
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 raise RateLimited(f"{self.host}{path}: HTTP 429 rate limit exceeded") from exc

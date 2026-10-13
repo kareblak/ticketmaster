@@ -354,3 +354,57 @@ def test_gitea_blocker_lookup_failure_is_not_taken_for_closed(monkeypatch):
     monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
     with pytest.raises(ProviderError):
         gitea.GiteaProvider("o/r", "codeberg.org", token="x")._issue_states([5])
+
+
+def test_github_delete_runs_gh_issue_delete(monkeypatch):
+    calls = []
+    monkeypatch.setattr(github, "run_cli", lambda args, stdin=None: calls.append(args) or "")
+    github.GitHubProvider("o/r", host="ghe.example.com").delete(7)
+    assert calls == [["gh", "issue", "delete", "7", "--repo", "ghe.example.com/o/r", "--yes"]]
+
+
+def test_gitlab_delete_calls_the_issue_delete_api(monkeypatch):
+    calls = []
+    monkeypatch.setattr(gitlab, "run_cli", lambda args, stdin=None: calls.append(args) or "")
+    gitlab.GitLabProvider("g/sub/p", host="gl.example.com").delete(12)
+    assert calls == [["glab", "api", "--hostname", "gl.example.com", "-X", "DELETE", "projects/g%2Fsub%2Fp/issues/12"]]
+
+
+class FakeResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_gitea_delete_sends_delete_with_the_token(monkeypatch):
+    requests = []
+
+    def urlopen(request, timeout=None):
+        requests.append(request)
+        return FakeResponse(b"")  # 204 No Content
+
+    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    gitea.GiteaProvider("o/r", "codeberg.org", token="x").delete(4)
+    [request] = requests
+    assert (request.get_method(), request.full_url) == ("DELETE", "https://codeberg.org/api/v1/repos/o/r/issues/4")
+    assert request.get_header("Authorization") == "token x"
+
+
+@pytest.mark.parametrize("module", [github, gitlab])
+def test_cli_delete_errors_are_provider_errors(monkeypatch, module):
+    stderr = "GraphQL: kareblak does not have the correct permissions to execute `DeleteIssue`"
+    monkeypatch.setattr(providers.subprocess, "run", lambda *a, **k: FakeCompleted(stderr))
+    provider = github.GitHubProvider("o/r") if module is github else gitlab.GitLabProvider("g/p")
+    with pytest.raises(ProviderError, match="permissions"):
+        provider.delete(1)
+
+
+def test_gitea_delete_forbidden_is_a_provider_error(monkeypatch):
+    def urlopen(request, timeout=None):
+        raise http_error(403, "Forbidden")
+
+    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    with pytest.raises(ProviderError, match="403 Forbidden"):
+        gitea.GiteaProvider("o/r", "codeberg.org", token="x").delete(4)

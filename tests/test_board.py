@@ -13,10 +13,12 @@ class FakeProvider:
     name = "fake"
     repo = "o/r"
 
-    def __init__(self, tickets, login="me"):
+    def __init__(self, tickets, login="me", delete_error=None):
         self.tickets = tickets
         self.calls = 0
         self.login = login
+        self.deleted = []
+        self.delete_error = delete_error
 
     def viewer(self):
         if isinstance(self.login, Exception):
@@ -28,6 +30,12 @@ class FakeProvider:
         if isinstance(self.tickets, Exception):
             raise self.tickets
         return self.tickets
+
+    def delete(self, number):
+        if self.delete_error:
+            raise self.delete_error
+        self.deleted.append(number)
+        self.tickets = [t for t in self.tickets if t.number != number]
 
 
 TICKETS = [
@@ -955,3 +963,116 @@ def test_author_filter_is_saved_per_repo_and_restored(tmp_path):
         },
     }
     run(reopen())
+
+
+def notifications(app):
+    return [(n.message, n.severity) for n in app._notifications]
+
+
+def test_backspace_on_a_ready_card_asks_and_cancel_keeps_the_issue():
+    async def scenario():
+        provider = FakeProvider(TICKETS)
+        app = BoardApp(provider, Query(), interval=60)  # deleting needs no herdr
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "backspace")
+            await pilot.pause()
+            assert is_confirm(app)
+            assert app.screen.question == "Delete #1 Ready one?"
+            assert "cannot be undone" in app.screen.detail and "left behind" not in app.screen.detail
+            await pilot.press("n")
+            await loaded(app, pilot)
+            assert provider.deleted == [] and not is_confirm(app)
+            await pilot.press("delete")
+            await pilot.pause()
+            assert is_confirm(app)
+            await pilot.press("escape")
+            await loaded(app, pilot)
+            assert provider.deleted == [] and len(app.query(Card)) == 3
+
+    run(scenario())
+
+
+def test_delete_on_a_done_card_with_worktrees_lists_them_then_deletes_and_refreshes():
+    async def scenario():
+        provider = FakeProvider(TICKETS + [DONE])
+        bench = FakeBench({4: [Session(4, "issue", "/w/issue-4"), Session(4, "review", "/w/review-4")]})
+        app = BoardApp(provider, Query(), interval=60, workbench=bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "right", "right", "right")
+            assert app.focused.ticket.number == 4
+            await pilot.press("delete")
+            await pilot.pause()
+            assert is_confirm(app)
+            detail = app.screen.detail
+            assert "cannot be undone" in detail and "/w/issue-4" in detail and "/w/review-4" in detail
+            assert "not removed" in detail
+            await pilot.press("y")
+            await loaded(app, pilot)
+            await loaded(app, pilot)
+            assert provider.deleted == [4] and bench.calls == []
+            assert 4 not in [c.ticket.number for c in app.query(Card)]
+            assert ("Deleted #4 Shipped", "information") in notifications(app)
+
+    run(scenario())
+
+
+def test_delete_is_refused_in_progress_and_review():
+    async def scenario():
+        provider = FakeProvider(TICKETS)
+        app = BoardApp(provider, Query(), interval=60)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "right", "delete")  # In progress
+            await pilot.pause()
+            assert not is_confirm(app)
+            await pilot.press("right", "backspace")  # Review
+            await pilot.pause()
+            assert not is_confirm(app) and provider.deleted == []
+            warnings = [m for m, severity in notifications(app) if severity == "warning"]
+            assert len(warnings) == 2 and "#2" in warnings[0] and "#3" in warnings[1]
+
+    run(scenario())
+
+
+def test_a_tracker_error_on_delete_is_an_error_notification_and_the_card_stays():
+    async def scenario():
+        provider = FakeProvider(TICKETS, delete_error=ProviderError("must have admin rights to Repository"))
+        app = BoardApp(provider, Query(), interval=60)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "delete", "y")
+            await loaded(app, pilot)
+            assert ("must have admin rights to Repository", "error") in [
+                (m.split(": ", 1)[-1], s) for m, s in notifications(app)]
+            assert 1 in [c.ticket.number for c in app.query(Card)]
+
+    run(scenario())
+
+
+def test_backspace_in_the_filter_input_edits_the_text_and_deletes_nothing():
+    async def scenario():
+        provider = FakeProvider(TICKETS)
+        app = BoardApp(provider, Query(), interval=60)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "slash", *"ready", "backspace", "delete")
+            await pilot.pause()
+            assert not is_confirm(app) and provider.deleted == []
+            assert app.query_one("#filter").value == "read"
+
+    run(scenario())
+
+
+def test_help_lists_the_delete_binding():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            text = app.screen.text.plain
+            assert "Delete issue" in text and "Blocked, Ready" in text
+
+    run(scenario())
