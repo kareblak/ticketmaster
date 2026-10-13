@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import time
 import webbrowser
 import zlib
 from collections.abc import Callable
@@ -20,7 +22,7 @@ from textual.widgets import Button, Footer, Input, Label, Static
 from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
 from .model import COLUMN_ORDER, Board, Column, Ticket, build_board
-from .providers import Provider, ProviderError, Query
+from .providers import Provider, ProviderError, Query, RateLimited
 
 TAG_COLORS = {
     "security": "white on red",
@@ -51,6 +53,8 @@ STATUS_STYLES = {  # herdr agent states
     None: ("○ no agent", "grey50"),
 }
 ACTIVE_STATES = ("working", "blocked")  # auto-remove waits until the agent is no longer busy or asking
+LIMITED_TICKETS_EVERY = 60.0  # ticket fetches while the tracker rate-limits the board
+LIMITED_SESSIONS_EVERY = 10.0  # herdr session refreshes meanwhile
 
 
 def tag_style(kind: str) -> str:
@@ -113,6 +117,47 @@ def describe_modes(modes: dict[str, str], known: set[str]) -> str:
     """`+bug -wontfix` for the status line, leaving out labels that are not on the board."""
     return " ".join(("+" if mode == INCLUDE else "-") + label
                     for label, mode in sorted(modes.items()) if label in known)
+
+
+class Pacer:
+    """When the board fetches tickets and herdr sessions, given the clock's `now`.
+
+    Normally both every `interval`. A rate limit slows tickets to once a minute and sessions to every 10s;
+    the first good fetch after that restores the interval, once. A rate limit after that recovery keeps
+    the board slow until it restarts.
+    """
+
+    def __init__(self, interval: float, now: float):
+        self.interval = interval
+        self.limited = False  # backed off right now
+        self.recovered = False  # the one recovery is used up
+        self.stuck = False  # slow until restart
+        self.next_tickets = now
+        self.next_sessions = now
+
+    def due(self, now: float) -> tuple[bool, bool]:
+        """(tickets, sessions) to fetch now; a ticket fetch refreshes sessions too."""
+        tickets = now >= self.next_tickets
+        return tickets, tickets or now >= self.next_sessions
+
+    def started(self, now: float, tickets: bool) -> None:
+        if tickets:
+            self.next_tickets = now + (LIMITED_TICKETS_EVERY if self.limited else self.interval)
+        self.next_sessions = now + (max(LIMITED_SESSIONS_EVERY, self.interval) if self.limited else self.interval)
+
+    def fetched(self, now: float, ok: bool, rate_limited: bool) -> None:
+        if rate_limited:
+            self.stuck = self.stuck or self.recovered
+            self.limited = True
+            self.next_tickets = now + LIMITED_TICKETS_EVERY
+        elif ok and self.limited and not self.stuck:
+            self.limited, self.recovered = False, True
+            self.next_tickets = min(self.next_tickets, now + self.interval)
+            self.next_sessions = min(self.next_sessions, now + self.interval)
+
+    def wait(self, now: float) -> int:
+        """Whole seconds until the next ticket fetch."""
+        return max(0, math.ceil(self.next_tickets - now))
 
 
 class Card(Static, can_focus=True):
@@ -423,6 +468,7 @@ class BoardApp(App):
         describe_start: Callable[[Ticket], str] | None = None,
         columns: str = "auto",
         settings_path: Path | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ):
         super().__init__()
         self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
@@ -440,6 +486,10 @@ class BoardApp(App):
         self.herdr_error: str | None = None
         self.board_query = query
         self.interval = interval
+        self.clock = clock
+        self.pacer = Pacer(interval, clock())
+        self.fetching = False
+        self.queued: bool | None = None  # a refresh asked for mid-fetch: whether it includes tickets
         self.board = Board()
         self.needle = ""
         self.repo_key = f"{provider.name}:{provider.repo}"
@@ -463,28 +513,67 @@ class BoardApp(App):
 
     def on_mount(self) -> None:
         self._apply_view()
-        self.action_refresh()
-        self.set_interval(self.interval, self.action_refresh)
+        self.tick()
+        self.set_interval(min(self.interval, 1.0), self.tick)  # 1s at most, for the back-off countdown
+
+    def tick(self) -> None:
+        """Fetches whatever the pacer says is due."""
+        if self.pacer.limited:
+            self._render_status()
+        tickets, sessions = self.pacer.due(self.clock())
+        if sessions:
+            self._fetch_in_background(tickets)
 
     def action_refresh(self) -> None:
-        self.run_worker(self._fetch, thread=True, exclusive=True, group="fetch")
+        """Fetches now, except tickets while rate-limited: then only herdr sessions refresh."""
+        if self.pacer.limited:
+            self.notify(f"Rate-limited: next ticket fetch in {self.pacer.wait(self.clock())}s", severity="warning")
+        self._refresh_now()
 
-    def _fetch(self) -> None:
+    def _refresh_now(self) -> None:
+        tickets = not self.pacer.limited
+        if self.fetching:
+            self.queued = tickets or bool(self.queued)  # runs once the fetch in flight lands
+        else:
+            self._fetch_in_background(tickets)
+
+    def _fetch_in_background(self, tickets: bool) -> None:
+        if self.fetching:
+            return  # one fetch at a time; the pacer schedules the next when this one started
+        self.fetching = True
+        self.pacer.started(self.clock(), tickets)
+        self.run_worker(lambda: self._fetch(tickets), thread=True, group="fetch")
+
+    def _fetch(self, tickets: bool = True) -> None:
         sessions, herdr_error = self.sessions, None
         if self.workbench is not None:
             try:
                 sessions = self.workbench.sessions()
             except HerdrError as exc:
                 herdr_error = f"herdr: {exc}"
+        if not tickets:
+            self.call_from_thread(self._apply, None, None, sessions, herdr_error, fetched_tickets=False)
+            return
         try:
-            tickets = self.provider.fetch(self.board_query)
-            board = build_board(tickets, done_days=self.board_query.done_days)
+            board = build_board(self.provider.fetch(self.board_query), done_days=self.board_query.done_days)
             self.call_from_thread(self._apply, board, None, sessions, herdr_error)
+        except RateLimited:
+            self.call_from_thread(self._apply, None, None, sessions, herdr_error, rate_limited=True)
         except ProviderError as exc:
             self.call_from_thread(self._apply, None, str(exc), sessions, herdr_error)
+        except BaseException:
+            self.call_from_thread(setattr, self, "fetching", False)
+            raise
 
     def _apply(self, board: Board | None, error: str | None, sessions: dict[int, list[Session]] | None = None,
-               herdr_error: str | None = None) -> None:
+               herdr_error: str | None = None, fetched_tickets: bool = True, rate_limited: bool = False) -> None:
+        self.fetching = False
+        if fetched_tickets:
+            self.pacer.fetched(self.clock(), ok=board is not None, rate_limited=rate_limited)
+            self.last_error = error
+        if self.queued is not None:
+            tickets, self.queued = self.queued and not self.pacer.limited, None
+            self._fetch_in_background(tickets)
         changed = False
         if board is not None:
             changed = board.columns != self.board.columns or self.last_ok is None
@@ -494,7 +583,6 @@ class BoardApp(App):
             self.starting -= set(sessions) - set(self.sessions)
             self.sessions = sessions
             changed = True
-        self.last_error = error
         self.herdr_error = herdr_error
         if changed:
             self._render_board()  # rebuilding resets scroll, so only when tickets changed
@@ -544,7 +632,12 @@ class BoardApp(App):
         status = Text(self.sub_title, style="bold")
         if self.last_ok:
             status.append(" · ")
-            status.append(f"updated {self.last_ok:%H:%M:%S} · {self.board.total()} tickets · every {self.interval:g}s")
+            status.append(f"updated {self.last_ok:%H:%M:%S} · {self.board.total()} tickets")
+            if not self.pacer.limited:
+                status.append(f" · every {self.interval:g}s")
+        if self.pacer.limited:
+            slow = "rate-limited again · once a minute until restart" if self.pacer.stuck else "rate-limited"
+            status.append(f" · {slow} · next fetch in {self.pacer.wait(self.clock())}s", style="bold yellow")
         if self.needle:
             status.append(f" · filter: {self.needle}", style="yellow")
         if labels := describe_modes(self.filters["Labels"], self._board_labels()):
@@ -659,7 +752,7 @@ class BoardApp(App):
             except HerdrError as exc:
                 message, severity = f"herdr: {exc}", "error"
             self.call_from_thread(self.notify, message, severity=severity)
-            self.call_from_thread(self.action_refresh)
+            self.call_from_thread(self._refresh_now)
 
         self.run_worker(work, thread=True, group="herdr")
 

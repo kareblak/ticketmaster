@@ -11,7 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, mentions_parent, run_json
+from . import ProviderError, Query, mentions_parent, run_json, tracker_error
 
 ISSUES = """
 query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
@@ -93,7 +93,7 @@ class GitLabProvider:
                 "-H", "Content-Type: application/json", "--input", "-"]
         data = run_json(args, stdin=json.dumps(body))
         if data.get("errors"):
-            raise ProviderError("; ".join(e.get("message", "") for e in data["errors"]))
+            raise tracker_error("; ".join(e.get("message", "") for e in data["errors"]))
         return data["data"]
 
 

@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, run_json
+from . import ProviderError, Query, run_json, tracker_error
 
 ISSUE_FIELDS = """
   number title url body state closedAt
@@ -78,7 +78,7 @@ class GitHubProvider:
             args = ["gh", "api", "graphql", "--hostname", self.host, "-H", "Content-Type: application/json", "--input", "-"]
             data = run_json(args, stdin=json.dumps(body))
             if data.get("errors"):
-                raise ProviderError("; ".join(e.get("message", "") for e in data["errors"]))
+                raise tracker_error("; ".join(e.get("message", "") for e in data["errors"]))
             page = data["data"]
             for key in path:
                 page = (page or {}).get(key)

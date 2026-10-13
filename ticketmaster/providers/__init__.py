@@ -15,6 +15,18 @@ class ProviderError(RuntimeError):
     pass
 
 
+class RateLimited(ProviderError):
+    """The tracker refused the call for exceeding its rate limit; the board backs off."""
+
+
+RATE_LIMIT = re.compile(r"rate.?limit|too many requests|\bHTTP 429\b|\b429 Too Many\b", re.IGNORECASE)
+
+
+def tracker_error(message: str) -> ProviderError:
+    """A ProviderError, or RateLimited when the message is GitHub's, GitLab's or Gitea's rate-limit answer."""
+    return RateLimited(message) if RATE_LIMIT.search(message) else ProviderError(message)
+
+
 @dataclass(frozen=True)
 class Query:
     """What a board shows. With neither parent nor label: every open issue plus those closed within done_days."""
@@ -40,7 +52,7 @@ def run_cli(args: list[str], stdin: str | None = None) -> str:
     except subprocess.TimeoutExpired as exc:
         raise ProviderError(f"`{' '.join(args[:3])}` timed out") from exc
     if result.returncode != 0:
-        raise ProviderError((result.stderr or result.stdout).strip() or f"`{args[0]}` exited {result.returncode}")
+        raise tracker_error((result.stderr or result.stdout).strip() or f"`{args[0]}` exited {result.returncode}")
     return result.stdout
 
 

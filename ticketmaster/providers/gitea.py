@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, mentions_parent
+from . import ProviderError, Query, RateLimited, mentions_parent, tracker_error
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -66,6 +66,8 @@ class GiteaProvider:
     def _open_blockers(self, number: int) -> int | None:
         try:
             deps = self._get(f"/repos/{self.repo}/issues/{number}/dependencies")
+        except RateLimited:
+            raise
         except ProviderError:
             return None  # dependencies disabled for this repo
         return sum(1 for d in deps if d.get("state") == "open")
@@ -90,7 +92,9 @@ class GiteaProvider:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
-            raise ProviderError(f"{self.host}{path}: HTTP {exc.code}") from exc
+            if exc.code == 429:
+                raise RateLimited(f"{self.host}{path}: HTTP 429 rate limit exceeded") from exc
+            raise tracker_error(f"{self.host}{path}: HTTP {exc.code} {exc.reason}") from exc
         except urllib.error.URLError as exc:
             raise ProviderError(f"{self.host}: {exc.reason}") from exc
 
