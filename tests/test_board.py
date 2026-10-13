@@ -1116,6 +1116,31 @@ def test_help_lists_the_delete_binding():
     run(scenario())
 
 
+MAP_URL = "https://gh/o/r/issues/9"
+ON_MAP = dict(parent_url=MAP_URL, parent_labels=("wayfinder:map",))
+GRILL = Ticket(number=11, title="Which store?", url="u11", is_open=True, labels=("wayfinder:grilling",), **ON_MAP)
+DIG = Ticket(number=12, title="Read the API", url="u12", is_open=True, labels=("wayfinder:research",), **ON_MAP)
+CHORE = Ticket(number=13, title="Sign up", url="u13", is_open=True, labels=("wayfinder:task",),
+               body="## Question\nAFK: the agent can sign up alone.", **ON_MAP)
+
+
+def card_text(app, number):
+    return str(next(c for c in app.query(Card) if c.ticket.number == number).render())
+
+
+def test_wayfinder_cards_show_hitl_or_afk():
+    async def scenario():
+        app = bench_app(FakeBench(), [GRILL, DIG, CHORE, *TICKETS])
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "HITL" in card_text(app, 11)
+            assert "AFK" in card_text(app, 12) and "HITL" not in card_text(app, 12)
+            assert "AFK" in card_text(app, 13)
+            assert "HITL" not in card_text(app, 1) and "AFK" not in card_text(app, 1)
+
+    run(scenario())
+
+
 MAP_CARD = Ticket(number=1, title="Pick a stack", url="u1", is_open=True, labels=("wayfinder:map",),
                   body="## Decisions so far\n- Store: Postgres\n")
 
@@ -1145,6 +1170,88 @@ def test_map_card_shows_progress_in_progress_not_ready():
             card = app.query_one("#col-IN_PROGRESS").query(Card).first()
             assert card.ticket.number == 1
             assert "1 decided · 3 open · 1 blocked" in str(card.render())
+
+    run(scenario())
+
+
+def test_done_marks_out_of_scope_tickets_apart_from_resolved_decisions():
+    closed = dict(is_open=False, closed_at=datetime.now(timezone.utc))
+    ruled_out = Ticket(number=21, title="Mobile app", url="u21", labels=("wayfinder:grilling", "out-of-scope"), **closed)
+    resolved = Ticket(number=22, title="Which DB?", url="u22", labels=("wayfinder:grilling",), **closed)
+
+    async def scenario():
+        app = bench_app(FakeBench(), [ruled_out, resolved])
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert [c.ticket.number for c in app.query_one("#col-DONE").query(Card)] == [21, 22]
+            assert "out of scope" in card_text(app, 21) and "[out-of-scope]" not in card_text(app, 21)
+            assert "out of scope" not in card_text(app, 22)
+
+    run(scenario())
+
+
+def test_decision_tickets_never_show_in_review_and_c_does_not_review_them():
+    with_pr = Ticket(number=11, title="Which store?", url="u11", is_open=True, has_open_change_request=True,
+                     labels=("wayfinder:grilling", "review:ux"), **ON_MAP)
+
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, [with_pr])
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert not list(app.query_one("#col-REVIEW").query(Card))
+            await pilot.press("down", "c")
+            await loaded(app, pilot)
+            assert not is_confirm(app) and bench.calls == []
+            assert any("#11" in m and "no PR to review" in m for m, _ in notifications(app))
+
+    run(scenario())
+
+
+NEEDS_INFO = Ticket(number=31, title="Vague", url="u31", is_open=True, labels=("needs-info",))
+HUMAN = Ticket(number=32, title="Delicate", url="u32", is_open=True, labels=("bug", "human only"))
+
+
+def test_s_and_enter_refuse_a_needs_info_ticket_and_its_card_shows_the_label():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, [NEEDS_INFO])
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert [c.ticket.number for c in app.query_one("#col-READY").query(Card)] == [31]
+            assert "needs-info" in card_text(app, 31)
+            await pilot.press("down")
+            for key in ("s", "enter"):
+                await pilot.press(key)
+                await pilot.pause()
+                assert not is_confirm(app)
+            await loaded(app, pilot)
+            assert bench.calls == []
+            messages = [m for m, _ in notifications(app)]
+            assert messages.count("#31 is labelled needs-info: waits on more information; not started") == 2
+
+    run(scenario())
+
+
+def test_triage_holds_use_the_repos_label_names(tmp_path):
+    doc = tmp_path / "docs" / "agents" / "triage-labels.md"
+    doc.parent.mkdir(parents=True)
+    doc.write_text("| `needs-info` | `waiting` | x |\n| `ready-for-human` | `human only` | y |\n")
+
+    async def scenario():
+        bench = FakeBench()
+        app = BoardApp(FakeProvider([HUMAN, NEEDS_INFO]), Query(), interval=60, workbench=bench, repo_root=tmp_path)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "s")  # #31: needs-info is not this repo's name for the role
+            await pilot.pause()
+            assert is_confirm(app)
+            await pilot.press("n", "down", "s")
+            await pilot.pause()
+            assert not is_confirm(app)
+            assert ("#32 is labelled human only: needs a human to implement it; not started", "warning") \
+                in notifications(app)
+            assert "⏸ human only" in card_text(app, 32) and "⏸" not in card_text(app, 31)
 
     run(scenario())
 
