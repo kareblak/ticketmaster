@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
-from ticketmaster.model import Column, Ticket, build_board, classify, parse_blockers, part_of, summarize
+from ticketmaster.model import (Column, Ticket, build_board, classify, decisions_so_far, frontier, map_progress,
+                                parse_blockers, part_of, summarize)
 
 NOW = datetime(2026, 10, 13, 12, tzinfo=timezone.utc)
 
@@ -139,3 +140,63 @@ def test_part_of_reads_the_first_line_of_the_body():
 
 def test_wayfinder_label_prefix_is_case_insensitive():
     assert ticket(labels=("Wayfinder:Task",)).wayfinder_type == "task"
+
+
+def child(number, **kw):
+    """A typed ticket of map #1."""
+    base = dict(number=number, labels=("wayfinder:grilling",), parent_number=1, parent_url="u1", parent_labels=MAP)
+    return ticket(**{**base, **kw})
+
+
+MAP_TICKET = ticket(number=1, labels=MAP)
+
+
+def test_an_open_map_shows_as_in_progress_not_as_a_ready_ticket():
+    assert classify(MAP_TICKET, NOW, 7) is Column.IN_PROGRESS
+    assert classify(ticket(labels=("wayfinder::map",)), NOW, 7) is Column.IN_PROGRESS
+    assert classify(ticket(labels=MAP + ("review:ux",)), NOW, 7) is Column.REVIEW
+
+
+def test_frontier_is_the_maps_open_unblocked_unclaimed_tickets_in_map_order():
+    tickets = [
+        MAP_TICKET,
+        child(6, order=2),
+        child(2, is_open=False),
+        child(3, open_blockers=1, blocked_by=("#2",)),
+        child(4, assignees=("bob",)),
+        child(5, order=1),
+        child(7, labels=("blocked",)),
+        ticket(number=8, parent_number=1, parent_url="u1", parent_labels=MAP),  # the spec: no wayfinder type
+        child(9, parent_number=10, parent_url="u10"),  # another map's
+        child(11, order=1),
+    ]
+    assert [t.number for t in frontier(MAP_TICKET, tickets)] == [5, 11, 6]
+
+
+def test_frontier_skips_tickets_already_being_started():
+    tickets = [MAP_TICKET, child(5, order=1), child(6, order=2)]
+    assert [t.number for t in frontier(MAP_TICKET, tickets, taken={5})] == [6]
+    assert frontier(MAP_TICKET, tickets, taken={5, 6}) == []
+
+
+def test_frontier_is_empty_without_open_children():
+    assert frontier(MAP_TICKET, [MAP_TICKET, child(2, is_open=False)]) == []
+
+
+def test_decisions_so_far_counts_the_maps_decision_bullets():
+    body = ("## Notes\n- a note\n\n## Decisions so far\n\n- Store: Postgres ([#3](u3))\n* Auth: magic links #4\n"
+            "1. Cache: none\n  - nested detail\n\n## Fog\n- unknown\n")
+    assert decisions_so_far(body) == 3
+    assert decisions_so_far("## Decisions-so-far\n_none yet_\n") == 0
+    assert decisions_so_far("") == 0
+
+
+def test_map_progress_counts_decisions_open_and_blocked_tickets():
+    map_ticket = ticket(number=1, labels=MAP, body="## Decisions so far\n- one\n- two\n")
+    tickets = [map_ticket, child(2), child(3, open_blockers=1), child(4, assignees=("bob",)), child(5, is_open=False)]
+    assert map_progress(map_ticket, tickets) == (2, 3, 1)
+
+
+def test_frontier_follows_the_trackers_map_order_when_given():
+    tickets = [MAP_TICKET, child(5, order=1), child(6, order=2), child(7, order=3)]
+    assert [t.number for t in frontier(MAP_TICKET, tickets, order=[7, 5])] == [7, 5, 6]

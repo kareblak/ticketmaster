@@ -43,6 +43,8 @@ exited), or starts one when there is none; both refuse a blocked ticket, or one 
 else, and say why. `s` always starts the ticket in a new worktree
 (`issue-<n>`, `issue-<n>-2`…) as herdr agent `issue-<n>`, with `/mattpocock-skills:wayfinder
 <map> <ticket>` for wayfinder tickets (never implement; one whose map can't be found only warns)
+and, on a map's card (In progress, showing decided / open / blocked), for the map's first frontier ticket
+(open, unblocked, unclaimed, not already started), in that ticket's own worktree and card,
 or `/mattpocock-skills:implement <ticket>` plus a short brief otherwise. `c` starts a review session for a Review ticket in a `review-<n>` worktree; `x` removes a Done ticket's
 worktrees; `a` toggles auto-remove (saved per user), where the board does that itself once the
 agent is idle, keeping worktrees with uncommitted or unpushed work. Cards
