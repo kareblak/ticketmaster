@@ -1114,3 +1114,104 @@ def test_help_lists_the_delete_binding():
             assert "Delete issue" in text and "Blocked, Ready" in text
 
     run(scenario())
+
+
+MAP_CARD = Ticket(number=1, title="Pick a stack", url="u1", is_open=True, labels=("wayfinder:map",),
+                  body="## Decisions so far\n- Store: Postgres\n")
+
+
+def map_child(number, **kw):
+    base = dict(number=number, title=f"Question {number}", url=f"u{number}", is_open=True,
+                labels=("wayfinder:grilling",), parent_number=1, parent_url="u1", parent_labels=("wayfinder:map",))
+    return Ticket(**{**base, **kw})
+
+
+MAP_BOARD = [MAP_CARD, map_child(5, order=1), map_child(6, order=2), map_child(7, order=0, open_blockers=1)]
+
+
+async def focus_map(app, pilot):
+    await loaded(app, pilot)
+    await pilot.press("down")
+    while app.focused.ticket.number != 1:
+        await pilot.press("right")
+
+
+def test_map_card_shows_progress_in_progress_not_ready():
+    async def scenario():
+        app = bench_app(FakeBench(), MAP_BOARD)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert 1 not in [c.ticket.number for c in app.query_one("#col-READY").query(Card)]
+            card = app.query_one("#col-IN_PROGRESS").query(Card).first()
+            assert card.ticket.number == 1
+            assert "1 decided · 3 open · 1 blocked" in str(card.render())
+
+    run(scenario())
+
+
+def test_s_on_the_map_starts_its_first_frontier_ticket_on_that_tickets_card():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, MAP_BOARD)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await focus_map(app, pilot)
+            await pilot.press("s")
+            await pilot.pause()
+            assert is_confirm(app) and app.screen.question.startswith("Start #5 Question 5")
+            assert "map #1" in app.screen.question
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 5)]
+            card = next(c for c in app.query(Card) if c.ticket.number == 5)
+            assert "starting" in str(card.render())
+            assert "starting" not in str(next(c for c in app.query(Card) if c.ticket.number == 1).render())
+
+    run(scenario())
+
+
+def test_two_quick_presses_on_the_map_start_two_different_frontier_tickets():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, MAP_BOARD)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await focus_map(app, pilot)
+            await pilot.press("s", "y")
+            await pilot.pause()
+            await focus_map(app, pilot)
+            await pilot.press("s", "y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 5), ("start", 6)]
+
+    run(scenario())
+
+
+def test_frontier_skips_tickets_that_already_have_a_session():
+    async def scenario():
+        bench = FakeBench({5: [Session(5, "issue", "/w/issue-5")]})
+        app = bench_app(bench, MAP_BOARD)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await focus_map(app, pilot)
+            await pilot.press("s", "y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 6)]
+
+    run(scenario())
+
+
+def test_empty_frontier_says_so_and_starts_nothing():
+    async def scenario():
+        bench = FakeBench()
+        tickets = [MAP_CARD, map_child(5, assignees=("bob",)), map_child(7, open_blockers=1)]
+        app = bench_app(bench, tickets)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await focus_map(app, pilot)
+            await pilot.press("s")
+            await pilot.pause()
+            assert not is_confirm(app)
+            await pilot.press("enter")
+            await loaded(app, pilot)
+            assert bench.calls == []
+            warnings = [m for m, severity in notifications(app) if severity == "warning"]
+            assert len(warnings) == 2 and all("#1" in m and "frontier" in m for m in warnings)
+
+    run(scenario())

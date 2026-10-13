@@ -119,6 +119,35 @@ def part_of(body: str) -> int | None:
     return int(match.group("map")) if match else None
 
 
+def map_tickets(map_ticket: Ticket, tickets: list[Ticket]) -> list[Ticket]:
+    """The map's typed wayfinder tickets, in map order."""
+    children = [t for t in tickets if t.parent_number == map_ticket.number and t.is_wayfinder_ticket]
+    return sorted(children, key=lambda t: (t.order, t.number))
+
+
+def frontier(map_ticket: Ticket, tickets: list[Ticket], taken: set[int] = frozenset()) -> list[Ticket]:
+    """The map's open, unblocked, unclaimed tickets in map order; `taken` are being started but not claimed yet."""
+    return [t for t in map_tickets(map_ticket, tickets)
+            if t.is_open and not t.is_blocked and not t.assignees and t.number not in taken]
+
+
+def map_progress(map_ticket: Ticket, tickets: list[Ticket]) -> tuple[int, int, int]:
+    """Decisions so far (from the map's body), and the map's open and blocked tickets on the board."""
+    open_ = [t for t in map_tickets(map_ticket, tickets) if t.is_open]
+    return decisions_so_far(map_ticket.body), len(open_), sum(t.is_blocked for t in open_)
+
+
+_DECISIONS = re.compile(r"^#+[ \t]*Decisions[- ]so[- ]far[ \t]*:?[ \t]*$(?P<text>.*?)(?=^#+[ \t]|\Z)",
+                        re.MULTILINE | re.DOTALL | re.IGNORECASE)
+_TOP_BULLET = re.compile(r"^(?:[-*+]|\d+[.)])[ \t]+\S", re.MULTILINE)
+
+
+def decisions_so_far(body: str) -> int:
+    """Top-level bullets in the map's Decisions-so-far section: wayfinder appends one per resolved ticket."""
+    match = _DECISIONS.search(body or "")
+    return len(_TOP_BULLET.findall(match.group("text"))) if match else 0
+
+
 @dataclass
 class Board:
     columns: dict[Column, list[Ticket]] = field(default_factory=lambda: {c: [] for c in COLUMN_ORDER})
@@ -135,6 +164,8 @@ def classify(ticket: Ticket, now: datetime, done_days: int) -> Column | None:
         return Column.DONE
     if ticket.review_tags or ticket.has_open_change_request:
         return Column.REVIEW
+    if ticket.is_wayfinder_map:
+        return Column.IN_PROGRESS  # a map is worked through its tickets, never started itself
     if ticket.is_blocked:
         return Column.BLOCKED
     if ticket.assignees:

@@ -21,7 +21,7 @@ from textual.widgets import Button, Footer, Input, Label, Static
 
 from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
-from .model import COLUMN_ORDER, Board, Column, Ticket, build_board
+from .model import COLUMN_ORDER, Board, Column, Ticket, build_board, frontier, map_progress
 from .providers import Provider, ProviderError, Query, RateLimited
 from .wayfinding import SETUP_COMMAND as WAYFINDING_SETUP, drift
 
@@ -65,7 +65,9 @@ def tag_style(kind: str) -> str:
     return TAG_COLORS.get(kind.lower()) or FALLBACK_COLORS[zlib.crc32(kind.lower().encode()) % len(FALLBACK_COLORS)]
 
 
-def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False) -> Text:
+def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
+                progress: tuple[int, int, int] | None = None) -> Text:
+    """`progress` is a map's decisions so far, open and blocked tickets (see `map_progress`)."""
     text = Text()
     for session in sessions:
         label, style = STATUS_STYLES.get(session.status, STATUS_STYLES["unknown"])
@@ -77,6 +79,9 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
     text.append(ticket.title, style="bold")
     if ticket.summary:
         text.append("\n" + ticket.summary, style="dim")
+    if progress is not None:
+        decided, open_, blocked = progress
+        text.append(f"\n◆ map: {decided} decided · {open_} open · {blocked} blocked", style="bold cyan")
     chips = Text()
     if ticket.map_missing:
         chips.append(f"⚠ {ticket.map_warning}", style="bold yellow")
@@ -188,8 +193,9 @@ class Card(Static, can_focus=True):
         Binding("right,l", "app.move(1,0)", show=False),
     ]
 
-    def __init__(self, ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False):
-        super().__init__(render_card(ticket, column, sessions, starting), classes="card")
+    def __init__(self, ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
+                 progress: tuple[int, int, int] | None = None):
+        super().__init__(render_card(ticket, column, sessions, starting, progress), classes="card")
         self.ticket = ticket
         self.column = column
 
@@ -418,7 +424,9 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  herdr agent issue-<n>. The card then lists the session: ● working, ⚠ needs you,\n"
                 "  ◌ idle, ✓ done or ○ no agent. The prompt depends on the ticket:\n")
     for kind, prompt in [
-        ("wayfinder map", "the wayfinder skill with the map's URL"),
+        ("wayfinder map", "never started itself: its card (In progress) shows decided / open /\n"
+                          + " " * 20 + "blocked; s starts the map's first frontier ticket (open, unblocked,\n"
+                          + " " * 20 + "unclaimed, not started yet) on that ticket's own card and worktree"),
         ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs: a\n"
                              + " " * 20 + "wayfinder:research/prototype/grilling/task ticket (or wayfinder::…),\n"
                              + " " * 20 + "on any board; its map is the native parent, else `Part of #<map>`\n"
@@ -661,6 +669,9 @@ class BoardApp(App):
                 self.auto_tried.update(s.path for s in sessions)
                 self._run(lambda ticket=ticket, sessions=sessions: self.workbench.auto_remove(ticket, sessions))
 
+    def _tickets(self) -> list[Ticket]:
+        return [ticket for tickets in self.board.columns.values() for ticket in tickets]
+
     def _board_labels(self) -> set[str]:
         return {label for tickets in self.board.columns.values() for ticket in tickets for label in ticket.labels}
 
@@ -683,7 +694,8 @@ class BoardApp(App):
             title.update(Text(f"{column.value} ({len(tickets)})", style=f"bold {COLUMN_COLORS[column]}"))
             container = self.query_one(f"#col-{column.name}", VerticalScroll)
             container.remove_children()
-            cards = [Card(t, column, self.sessions.get(t.number, []), t.number in self.starting) for t in tickets]
+            cards = [Card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
+                          map_progress(t, self._tickets()) if t.is_wayfinder_map else None) for t in tickets]
             container.mount_all(cards)
             refocus = refocus or next((c for c in cards if c.ticket.number == focused), None)
         if refocus is not None:
@@ -852,6 +864,14 @@ class BoardApp(App):
         if card.column is Column.DONE:
             self.notify(f"#{ticket.number} is done", severity="warning")
             return
+        via = ""
+        if ticket.is_wayfinder_map:  # the map is worked through its next frontier ticket, on that ticket's card
+            taken = self.starting | {n for n, sessions in self.sessions.items() if sessions}
+            if not (ready := frontier(ticket, self._tickets(), taken)):
+                self.notify(f"Map #{ticket.number} has no frontier ticket: none open, unblocked, unclaimed "
+                            "and not already started", severity="warning")
+                return
+            ticket, via = ready[0], f" (next on map #{ticket.number})"
         if refusal := ticket.start_refusal(self.viewer):
             self.notify(refusal, severity="warning")
             return
@@ -868,7 +888,7 @@ class BoardApp(App):
                 self._render_board()
                 self._run(lambda: self.workbench.start(ticket))
 
-        self.push_screen(Confirm(f"Start #{ticket.number} {ticket.title} in a new worktree?",
+        self.push_screen(Confirm(f"Start #{ticket.number} {ticket.title}{via} in a new worktree?",
                                  self.describe_start(ticket) + warn, "Start"), confirmed)
 
     def action_review(self) -> None:
