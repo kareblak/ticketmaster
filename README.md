@@ -28,17 +28,19 @@ skill to `~/.claude/skills/ticketmaster/SKILL.md`, so `/ticketmaster` works in e
 session started afterwards, in any repo (`CLAUDE_SKILLS_DIR` overrides the location). Nothing is
 installed per project: the board reads the repo it is started in.
 
-Upgrade with `pipx install --force git+https://github.com/kareblak/ticketmaster.git && ticketmaster install-skill`
-(append `@<branch>` or `@<tag>` to the URL to pin a version). Uninstall with
-`pipx uninstall ticketmaster && rm -r ~/.claude/skills/ticketmaster`.
+Upgrade with `ticketmaster upgrade`: it reinstalls from the GitHub source with pipx, refreshes the
+skill, and prints the commit it now runs (`ticketmaster --version` prints it any time). To pin a
+version instead, run `pipx install --force git+https://github.com/kareblak/ticketmaster.git@<tag> && ticketmaster install-skill`.
+Uninstall with `pipx uninstall ticketmaster && rm -r ~/.claude/skills/ticketmaster`.
 
 For development, clone the repo and run `./install.sh`. It installs the clone as an editable
 pipx app (code changes apply without reinstalling) and installs the skill.
+`ticketmaster upgrade` leaves such an install alone and tells you to `git pull` in the clone.
 
 ## Usage
 
 ```
-ticketmaster [open|snapshot|adopt|setup|install-skill] [parent] [--label NAME] [--repo OWNER/NAME]
+ticketmaster [open|snapshot|adopt|setup|install-skill|upgrade] [parent] [--label NAME] [--repo OWNER/NAME]
              [--provider github|gitlab|gitea|forgejo] [--host HOST] [--columns auto|one|all]
              [--interval SECONDS] [--done-days DAYS] [--limit N]
 ```
@@ -50,6 +52,7 @@ ticketmaster [open|snapshot|adopt|setup|install-skill] [parent] [--label NAME] [
 | `snapshot`      | prints every column once as plain text (works outside herdr)                   |
 | `setup`         | writes the wayfinding linking rules for the repo's tracker into `docs/agents/issue-tracker.md` (see [Wayfinding rules](#wayfinding-rules)) |
 | `install-skill` | writes the `/ticketmaster` skill into `~/.claude/skills`                       |
+| `upgrade`       | reinstalls from the GitHub source with pipx, then refreshes the skill; on an editable install it says to `git pull` in the clone instead |
 
 `open` and `adopt` only run inside herdr (`HERDR_ENV=1`).
 
