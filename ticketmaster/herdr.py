@@ -83,14 +83,17 @@ class Herdr:
 
     # --- the board pane -------------------------------------------------------------------------
 
-    def board_pane(self) -> str | None:
+    def board_pane(self, caller: str | None = None) -> str | None:
+        """The board pane in the caller's tab; a board in another tab or workspace belongs to other work."""
         panes = self.call("pane", "list").get("panes", [])
-        return next((p["pane_id"] for p in panes if p.get("label") == BOARD_LABEL), None)
+        tab = next((p.get("tab_id") for p in panes if p["pane_id"] == caller), None)
+        return next((p["pane_id"] for p in panes
+                     if p.get("label") == BOARD_LABEL and (tab is None or p.get("tab_id") == tab)), None)
 
     def open_board(self, cwd: Path, command: str, caller: str | None = None) -> str | None:
         """Restarts the board in its existing pane, or splits one off the caller. Returns the pane id,
         or None when the caller is the board pane itself, which then runs the board in place."""
-        existing = self.board_pane()
+        existing = self.board_pane(caller)
         if existing and existing == caller:
             return None  # restarting would send q to, and close, the caller's own pane
         if existing:
@@ -103,7 +106,7 @@ class Herdr:
                 time.sleep(0.1)
             self.call("pane", "close", existing)
         pane = self.call(
-            "pane", "split", "--current", "--direction", "right", "--ratio", str(BOARD_RATIO),
+            "pane", "split", *(["--pane", caller] if caller else ["--current"]), "--direction", "right", "--ratio", str(BOARD_RATIO),
             "--cwd", str(cwd), "--no-focus",
         )["pane"]["pane_id"]
         self.call("pane", "rename", pane, BOARD_LABEL)

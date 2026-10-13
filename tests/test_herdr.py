@@ -98,6 +98,19 @@ def test_open_board_quits_a_running_board_before_restarting_it():
     assert fake.calls[-1] == ["pane", "run", "w1:p5", "cd /code/shiplog && tm open"]
 
 
+def test_open_board_ignores_a_board_in_another_tab_and_splits_beside_the_caller():
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [
+            {"pane_id": "w1:p2", "tab_id": "w1:t1", "label": "ticketmaster"},
+            {"pane_id": "wN:p1", "tab_id": "wN:t1"},
+        ]},
+        ("pane", "split"): {"pane": {"pane_id": "wN:p2"}},
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="wN:p1") == "wN:p2"
+    assert not [c for c in fake.calls if "w1:p2" in c]
+    assert fake.first("pane", "split")[2:4] == ["--pane", "wN:p1"]
+
+
 def test_open_board_from_the_board_pane_itself_leaves_the_pane_alone():
     fake = FakeHerdr({("pane", "list"): {"panes": [{"pane_id": "w1:p5", "label": "ticketmaster"}]}})
     assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p5") is None
