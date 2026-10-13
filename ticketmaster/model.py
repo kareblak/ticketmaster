@@ -21,6 +21,7 @@ COLUMN_ORDER = [Column.BLOCKED, Column.READY, Column.IN_PROGRESS, Column.REVIEW,
 # `review:security` (GitHub/Gitea) and `review::security` (GitLab scoped labels).
 REVIEW_LABEL = re.compile(r"^review::?(?P<kind>.+)$", re.IGNORECASE)
 BLOCKED_LABEL = "blocked"
+MAP_LABEL = "wayfinder:map"
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,9 @@ class Ticket:
     has_open_change_request: bool = False
     # Position inside the parent (sub-issue order) or provider order; lower sorts first.
     order: int = 0
+    parent_number: int | None = None
+    parent_url: str | None = None
+    parent_labels: tuple[str, ...] = ()
 
     @property
     def review_tags(self) -> list[str]:
@@ -52,6 +56,15 @@ class Ticket:
         if self.open_blockers:
             return True
         return any(label.lower() == BLOCKED_LABEL for label in self.labels)
+
+    @property
+    def is_wayfinder_map(self) -> bool:
+        return MAP_LABEL in self.labels
+
+    @property
+    def is_wayfinder_ticket(self) -> bool:
+        has_type = any(label.startswith("wayfinder:") and label != MAP_LABEL for label in self.labels)
+        return has_type and MAP_LABEL in self.parent_labels and self.parent_url is not None
 
     @property
     def summary(self) -> str:

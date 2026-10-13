@@ -15,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -55,7 +56,15 @@ class GiteaProvider:
         open_numbers = [i["number"] for i in raw if i["state"] == "open"]
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
-        return [to_ticket(i, blockers.get(i["number"]), pr_bodies) for i in raw]
+        tickets = [to_ticket(i, blockers.get(i["number"]), pr_bodies) for i in raw]
+        if query.parent is not None:
+            parent = self._get(f"/repos/{self.repo}/issues/{query.parent}")
+            labels = tuple(label["name"] for label in parent.get("labels") or [])
+            tickets = [
+                replace(t, parent_number=query.parent, parent_url=parent["html_url"], parent_labels=labels)
+                for t in tickets
+            ]
+        return tickets
 
     def _open_blockers(self, number: int) -> int | None:
         try:

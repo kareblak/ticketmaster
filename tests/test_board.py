@@ -82,3 +82,81 @@ def test_provider_error_is_shown_in_status():
             assert "not logged in" in str(app.query_one("#status").render())
 
     run(scenario())
+
+
+def start_app(starter_calls):
+    def starter(ticket):
+        starter_calls.append(ticket.number)
+        return f"Started #{ticket.number}"
+
+    return BoardApp(FakeProvider(TICKETS), Query(), interval=60, starter=starter)
+
+
+async def loaded(app, pilot):
+    await app.workers.wait_for_complete()
+    await pilot.pause()
+
+
+def test_start_ready_ticket_after_confirm():
+    async def scenario():
+        calls = []
+        app = start_app(calls)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "s")
+            await pilot.pause()
+            assert type(app.screen).__name__ == "ConfirmStart"
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert calls == [1]
+            card = app.query_one("#col-READY").query(Card).first()
+            assert "session started" in str(card.render())
+            await pilot.press("down", "s")
+            await pilot.pause()
+            assert type(app.screen).__name__ != "ConfirmStart" and calls == [1]
+
+    run(scenario())
+
+
+def test_cancel_does_not_start():
+    async def scenario():
+        calls = []
+        app = start_app(calls)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "s", "n")
+            await loaded(app, pilot)
+            assert calls == []
+
+    run(scenario())
+
+
+def test_only_ready_tickets_can_start():
+    async def scenario():
+        calls = []
+        app = start_app(calls)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "right", "s")
+            await pilot.pause()
+            assert app.focused.ticket.number == 2
+            assert type(app.screen).__name__ != "ConfirmStart" and calls == []
+
+    run(scenario())
+
+
+def test_double_click_opens_confirm():
+    async def scenario():
+        calls = []
+        app = start_app(calls)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            card = app.query_one("#col-READY").query(Card).first()
+            await pilot.click(card, times=2)
+            await pilot.pause()
+            assert type(app.screen).__name__ == "ConfirmStart"
+            await pilot.click("#yes")
+            await loaded(app, pilot)
+            assert calls == [1]
+
+    run(scenario())

@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import webbrowser
 import zlib
+from collections.abc import Callable
 from datetime import datetime
 
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual import events
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.widgets import Footer, Input, Static
+from textual.screen import ModalScreen
+from textual.widgets import Button, Footer, Input, Label, Static
 
 from .model import COLUMN_ORDER, Board, Column, Ticket, build_board
 from .providers import Provider, ProviderError, Query
@@ -39,8 +42,10 @@ def tag_style(kind: str) -> str:
     return TAG_COLORS.get(kind.lower()) or FALLBACK_COLORS[zlib.crc32(kind.lower().encode()) % len(FALLBACK_COLORS)]
 
 
-def render_card(ticket: Ticket, column: Column) -> Text:
+def render_card(ticket: Ticket, column: Column, started: bool = False) -> Text:
     text = Text()
+    if started:
+        text.append("▶ session started\n", style="bold green")
     text.append(f"#{ticket.number} ", style=f"bold {COLUMN_COLORS[column]}")
     text.append(ticket.title, style="bold")
     if ticket.summary:
@@ -72,9 +77,47 @@ def matches(ticket: Ticket, needle: str) -> bool:
 
 
 class Card(Static, can_focus=True):
-    def __init__(self, ticket: Ticket, column: Column):
-        super().__init__(render_card(ticket, column), classes="card")
+    def __init__(self, ticket: Ticket, column: Column, started: bool = False):
+        super().__init__(render_card(ticket, column, started), classes="card")
         self.ticket = ticket
+        self.column = column
+
+    def on_click(self, event: events.Click) -> None:
+        self.focus()
+        if event.chain >= 2:
+            self.app.action_start()
+
+
+class ConfirmStart(ModalScreen[bool]):
+    """Asks before spawning a session, so a stray double-click does nothing."""
+
+    DEFAULT_CSS = """
+    ConfirmStart { align: center middle; }
+    #dialog { width: 72; height: auto; padding: 1 2; border: thick $accent; background: $surface; }
+    #prompt { margin-bottom: 1; }
+    #buttons { height: auto; align-horizontal: right; }
+    #buttons Button { margin-left: 2; }
+    """
+    BINDINGS = [Binding("y", "answer(True)", "Start"), Binding("n,escape", "answer(False)", "Cancel")]
+
+    def __init__(self, ticket: Ticket, detail: str):
+        super().__init__()
+        self.ticket = ticket
+        self.detail = detail
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label(Text(f"Start #{self.ticket.number} {self.ticket.title} in a new session?", style="bold"), id="prompt")
+            yield Label(Text(self.detail, style="dim"))
+            with Horizontal(id="buttons"):
+                yield Button("Cancel (n)", id="no")
+                yield Button("Start (y)", id="yes", variant="primary")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "yes")
+
+    def action_answer(self, answer: bool) -> None:
+        self.dismiss(answer)
 
 
 class BoardApp(App):
@@ -96,6 +139,7 @@ class BoardApp(App):
         Binding("r", "refresh", "Refresh"),
         Binding("slash", "filter", "Filter"),
         Binding("enter", "open", "Open"),
+        Binding("s", "start", "Start session"),
         Binding("up,k", "move(0,-1)", show=False),
         Binding("down,j", "move(0,1)", show=False),
         Binding("left,h", "move(-1,0)", show=False),
@@ -103,9 +147,19 @@ class BoardApp(App):
         Binding("escape", "clear_filter", show=False),
     ]
 
-    def __init__(self, provider: Provider, query: Query, interval: float = 5.0):
+    def __init__(
+        self,
+        provider: Provider,
+        query: Query,
+        interval: float = 5.0,
+        starter: Callable[[Ticket], str] | None = None,
+        describe_start: Callable[[Ticket], str] | None = None,
+    ):
         super().__init__()
         self.provider = provider
+        self.starter = starter
+        self.describe_start = describe_start or (lambda ticket: "")
+        self.started: set[int] = set()
         self.board_query = query
         self.interval = interval
         self.board = Board()
@@ -161,7 +215,7 @@ class BoardApp(App):
             title.update(Text(f"{column.value} ({len(tickets)})", style=f"bold {COLUMN_COLORS[column]}"))
             container = self.query_one(f"#col-{column.name}", VerticalScroll)
             container.remove_children()
-            cards = [Card(t, column) for t in tickets]
+            cards = [Card(t, column, t.number in self.started) for t in tickets]
             container.mount_all(cards)
             refocus = refocus or next((c for c in cards if c.ticket.number == focused), None)
         if refocus is not None:
@@ -203,6 +257,34 @@ class BoardApp(App):
     def action_open(self) -> None:
         if isinstance(self.focused, Card):
             webbrowser.open(self.focused.ticket.url)
+
+    def action_start(self) -> None:
+        card = self.focused
+        if not isinstance(card, Card):
+            self.notify("Select a Ready ticket first", severity="warning")
+            return
+        ticket = card.ticket
+        if card.column is not Column.READY:
+            self.notify(f"Only Ready tickets can be started; #{ticket.number} is {card.column.value}", severity="warning")
+            return
+        if self.starter is None:
+            self.notify("Starting sessions is not available here", severity="warning")
+            return
+        if ticket.number in self.started:
+            self.notify(f"A session for #{ticket.number} was already started from this board", severity="warning")
+            return
+
+        def confirmed(answer: bool | None) -> None:
+            if answer:
+                self.started.add(ticket.number)
+                self._render_board()
+                self.run_worker(lambda: self._start(ticket), thread=True, group="start")
+
+        self.push_screen(ConfirmStart(ticket, self.describe_start(ticket)), confirmed)
+
+    def _start(self, ticket: Ticket) -> None:
+        message = self.starter(ticket)
+        self.call_from_thread(self.notify, message)
 
     def action_filter(self) -> None:
         box = self.query_one("#filter", Input)

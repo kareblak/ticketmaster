@@ -7,6 +7,7 @@ issues whose description mentions `#<parent>`.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
@@ -32,6 +33,12 @@ query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
 """
 
 ME = "query { currentUser { username } }"
+
+PARENT = """
+query($path: ID!, $iid: String!) {
+  project(fullPath: $path) { issue(iid: $iid) { webUrl labels { nodes { title } } } }
+}
+"""
 
 
 class GitLabProvider:
@@ -64,7 +71,15 @@ class GitLabProvider:
         tickets = list(seen.values())
         if query.parent is not None:
             tickets = [t for t in tickets if t.number != query.parent and mentions_parent(t.body, query.parent)]
+            tickets = self._with_parent(tickets, query.parent)
         return tickets
+
+    def _with_parent(self, tickets: list[Ticket], parent: int) -> list[Ticket]:
+        issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(parent)}).get("project") or {}).get("issue")
+        if not issue:
+            return tickets
+        labels = tuple(label["title"] for label in issue["labels"]["nodes"])
+        return [replace(t, parent_number=parent, parent_url=issue["webUrl"], parent_labels=labels) for t in tickets]
 
     def _issues(self, variables: dict, limit: int) -> list[dict]:
         nodes: list[dict] = []

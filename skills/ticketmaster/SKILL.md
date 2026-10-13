@@ -25,7 +25,10 @@ as printed and the fix: `gh auth login`, `glab auth login`, `tea login add`, or 
 To answer a question about the board's contents without opening a window, run the same script
 with `snapshot` instead of `open`; it prints every column once as plain text.
 
-The board is read-only: it never changes issues. Column rules (first match wins):
+The board never changes issues. Selecting a Ready card and pressing `s` (or double-clicking it)
+opens a new `claude -w issue-<n>` session in its own window, started with
+`/mattpocock-skills:wayfinder <map> <ticket>` for wayfinder tickets or a plain "work on issue"
+prompt otherwise. Column rules (first match wins):
 
 | Column      | Rule                                                                     |
 | ----------- | ------------------------------------------------------------------------ |

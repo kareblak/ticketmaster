@@ -22,6 +22,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--interval", type=float, default=5.0, help="refresh seconds (default 5)")
     parser.add_argument("--done-days", type=int, default=7, help="days closed issues stay in Done (default 7)")
     parser.add_argument("--limit", type=int, default=300, help="max issues per query (default 300)")
+    parser.add_argument("--no-worktree", action="store_true", help="start sessions without `claude -w`")
     return parser.parse_args(argv)
 
 
@@ -36,6 +37,8 @@ def passthrough(args: argparse.Namespace) -> list[str]:
     for flag in ("label", "repo", "provider", "host"):
         if getattr(args, flag):
             out += [f"--{flag}", getattr(args, flag)]
+    if args.no_worktree:
+        out.append("--no-worktree")
     out += ["--interval", f"{args.interval:g}", "--done-days", str(args.done_days), "--limit", str(args.limit)]
     return out
 
@@ -81,6 +84,21 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     from .board import BoardApp
+    from .config import load_config
+    from .start import DEFAULT_WAYFINDER_COMMAND, StartOptions, build_prompt, start_session
 
-    BoardApp(provider, query, interval=args.interval).run()
+    config = load_config(cwd)
+    options = StartOptions(
+        cwd=cwd,
+        worktree=not args.no_worktree and config.get("worktree", True),
+        wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND),
+    )
+    BoardApp(
+        provider,
+        query,
+        interval=args.interval,
+        starter=lambda ticket: start_session(ticket, options),
+        describe_start=lambda ticket: build_prompt(ticket, options.wayfinder_command).splitlines()[0]
+        + (f"\nworktree: issue-{ticket.number}" if options.worktree else ""),
+    ).run()
     return 0

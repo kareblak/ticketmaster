@@ -14,6 +14,7 @@ ISSUE_FIELDS = """
   labels(first: 30) { nodes { name } }
   issueDependenciesSummary { blockedBy }
   closedByPullRequestsReferences(first: 10, includeClosedPrs: false) { nodes { state } }
+  parent { number url labels(first: 20) { nodes { name } } }
 """
 
 SEARCH = """
@@ -98,6 +99,7 @@ class GitHubProvider:
 def to_ticket(node: dict, order: int) -> Ticket:
     prs = node.get("closedByPullRequestsReferences", {}).get("nodes", [])
     deps = node.get("issueDependenciesSummary") or {}
+    parent = node.get("parent") or {}
     return Ticket(
         number=node["number"],
         title=node["title"],
@@ -110,4 +112,7 @@ def to_ticket(node: dict, order: int) -> Ticket:
         open_blockers=deps.get("blockedBy"),
         has_open_change_request=any(pr.get("state") == "OPEN" for pr in prs),
         order=order,
+        parent_number=parent.get("number"),
+        parent_url=parent.get("url"),
+        parent_labels=tuple(label["name"] for label in (parent.get("labels") or {}).get("nodes", [])),
     )

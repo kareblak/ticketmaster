@@ -11,8 +11,10 @@ def test_github_node_to_ticket():
         "labels": {"nodes": [{"name": "review:security"}]},
         "issueDependenciesSummary": {"blockedBy": 1},
         "closedByPullRequestsReferences": {"nodes": [{"state": "MERGED"}, {"state": "OPEN"}]},
+        "parent": {"number": 2, "url": "https://x/2", "labels": {"nodes": [{"name": "wayfinder:map"}]}},
     }
     t = github.to_ticket(node, order=3)
+    assert (t.parent_number, t.parent_url, t.parent_labels) == (2, "https://x/2", ("wayfinder:map",))
     assert (t.number, t.is_open, t.open_blockers, t.has_open_change_request, t.order) == (7, True, 1, True, 3)
     assert t.assignees == ("kareblak",) and t.review_tags == ["security"]
 
@@ -58,13 +60,17 @@ def test_gitlab_parent_falls_back_to_mentions(monkeypatch):
                 "blockedByCount": 0, "mergeRequestsCount": 0}
 
     def fake_run_json(args, stdin=None):
-        body = json.loads(stdin)
-        nodes = [node(1, "map"), node(2, "Part of #1"), node(3, "see #10")] if body["variables"]["state"] == "opened" else []
+        variables = json.loads(stdin)["variables"]
+        if "iid" in variables:
+            issue = {"webUrl": "https://gl/1", "labels": {"nodes": [{"title": "wayfinder:map"}]}}
+            return {"data": {"project": {"issue": issue}}}
+        nodes = [node(1, "map"), node(2, "Part of #1"), node(3, "see #10")] if variables["state"] == "opened" else []
         return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
 
     monkeypatch.setattr(gitlab, "run_json", fake_run_json)
     tickets = gitlab.GitLabProvider("g/p").fetch(gitlab.Query(parent=1))
     assert [t.number for t in tickets] == [2]
+    assert (tickets[0].parent_url, tickets[0].parent_labels) == ("https://gl/1", ("wayfinder:map",))
 
 
 def test_gitea_issue_to_ticket_detects_closing_pr():

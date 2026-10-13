@@ -41,9 +41,41 @@ Scope:
 - `parent` (`42`, `#42` or an issue URL): the parent's sub-issues, e.g. a wayfinder map
 - `--label NAME`: issues with that label
 
-Keys: arrows or `hjkl` move between cards, `Enter` opens the issue in the browser, `/` filters
-(every word must match title, body, labels or assignees), `Esc` clears the filter, `r`
-refreshes now, `q` quits.
+Keys: arrows or `hjkl` move between cards (or click one), `Enter` opens the issue in the
+browser, `s` or a double-click starts a session on it (see below), `/` filters (every word must
+match title, body, labels or assignees), `Esc` clears the filter, `r` refreshes now, `q` quits.
+
+## Starting work from the board
+
+Select a card in **Ready** and press `s` or double-click it. After you confirm with `y`, a new
+terminal window opens running:
+
+```
+claude -w issue-<n> -n "#<n> <title>" "<prompt>"
+```
+
+so the session gets its own git worktree (`.claude/worktrees/issue-<n>`) and a recognizable
+name. The prompt depends on the ticket:
+
+| Ticket                                                        | Prompt                                         |
+| ------------------------------------------------------------- | ---------------------------------------------- |
+| a wayfinder map (`wayfinder:map`)                             | `/mattpocock-skills:wayfinder <map-url>`        |
+| has a `wayfinder:<type>` label and its parent is a map        | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
+| anything else                                                 | "Work on issue #n … assign it to yourself before doing any work" |
+
+The board never writes to the tracker: wayfinder claims its tickets by assigning them, and the
+plain prompt tells the session to do the same, so the card moves to In progress on the next
+refresh. Until then it shows "▶ session started", and the board refuses to start the same
+ticket twice. Only Ready tickets can be started.
+
+Settings in `.ticketmaster.toml`:
+
+```toml
+worktree = false                          # start sessions in the repo root, no `-w`
+wayfinder_command = "/wayfinder"          # if wayfinder is installed under another name
+```
+
+`--no-worktree` does the same as `worktree = false` for one run.
 
 ## Columns
 
@@ -77,6 +109,9 @@ host = "git.example.com"
 repo = "group/project"      # optional; defaults to the remote's path
 remote = "upstream"         # optional; defaults to origin
 ```
+
+The parent's labels and URL (needed for the wayfinder prompt) come from GitHub's `parent` field;
+GitLab and Gitea boards only know a ticket's parent when the board is scoped to one.
 
 Flags override the file, and the file overrides the remote.
 
