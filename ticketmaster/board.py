@@ -24,6 +24,7 @@ from .providers import Provider, ProviderError, Query
 
 TAG_COLORS = {
     "security": "white on red",
+    "sec": "white on red",
     "ux": "black on magenta",
     "ui": "black on cyan",
     "perf": "black on yellow",

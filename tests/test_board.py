@@ -2,7 +2,7 @@ import json
 import asyncio
 from datetime import datetime, timezone
 
-from ticketmaster.board import BoardApp, Card
+from ticketmaster.board import BoardApp, Card, tag_style
 from ticketmaster.herdr import Session
 from ticketmaster.model import Ticket
 from ticketmaster.providers import ProviderError, Query
@@ -395,3 +395,7 @@ def test_a_toggles_auto_remove_saves_it_and_cleans_up_right_away(tmp_path):
             assert json.loads(settings.read_text()) == {"auto_remove": False}
 
     run(scenario())
+
+
+def test_sec_is_an_alias_for_the_security_colour():
+    assert tag_style("sec") == tag_style("security") == "white on red"
