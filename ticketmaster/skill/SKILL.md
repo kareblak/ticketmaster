@@ -20,7 +20,7 @@ Then reply with the script's one-line result.
 If it says it runs inside herdr, this session is not in a herdr pane: tell the user to start
 herdr and run `/ticketmaster` from a Claude session inside it.
 If `ticketmaster` is not found, tell the user to install it:
-`pipx install git+ssh://git@github.com/kareblak/ticketmaster.git && ticketmaster install-skill`.
+`pipx install git+https://github.com/kareblak/ticketmaster.git && ticketmaster install-skill`.
 If it fails with a provider error (CLI missing or not logged in, unknown host), report the error
 as printed and the fix: `gh auth login`, `glab auth login`, `tea login add`, or a
 `.ticketmaster.toml` with `provider`/`host`/`repo` for self-hosted trackers.

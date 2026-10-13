@@ -19,7 +19,7 @@ Needs [herdr](https://herdr.dev), Python 3.11+, [pipx](https://pipx.pypa.io)
 for Gitea/Forgejo). On each machine:
 
 ```bash
-pipx install git+ssh://git@github.com/kareblak/ticketmaster.git
+pipx install git+https://github.com/kareblak/ticketmaster.git
 ticketmaster install-skill
 ```
 
@@ -28,7 +28,7 @@ skill to `~/.claude/skills/ticketmaster/SKILL.md`, so `/ticketmaster` works in e
 session started afterwards, in any repo (`CLAUDE_SKILLS_DIR` overrides the location). Nothing is
 installed per project: the board reads the repo it is started in.
 
-Upgrade with `pipx install --force git+ssh://git@github.com/kareblak/ticketmaster.git && ticketmaster install-skill`
+Upgrade with `pipx install --force git+https://github.com/kareblak/ticketmaster.git && ticketmaster install-skill`
 (append `@<branch>` or `@<tag>` to the URL to pin a version). Uninstall with
 `pipx uninstall ticketmaster && rm -r ~/.claude/skills/ticketmaster`.
 
