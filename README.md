@@ -91,7 +91,7 @@ claude -n "#<n> <title>" "<prompt>"
 | ------------------------------------------------------------- | ---------------------------------------------- |
 | a wayfinder map (`wayfinder:map`)                             | `/mattpocock-skills:wayfinder <map-url>`        |
 | has a `wayfinder:<type>` label and its parent is a map        | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
-| anything else                                                 | "Work on issue #n … assign it to yourself before doing any work" |
+| anything else                                                 | `/mattpocock-skills:implement <ticket-url>` plus a brief: assign it to yourself first, implement via the skill, then push and open a ready PR that closes it (body via the `pr` skill) |
 
 A review session (`c`) gets a `review-<n>` worktree and a prompt to check out the PR that closes
 the issue and review it, without pushing or commenting.
@@ -122,13 +122,14 @@ is no longer on the board is ignored until it comes back. This filters what the 
 `--label`, which scopes the query.
 
 The board never writes to the tracker: wayfinder claims its tickets by assigning them, and the
-plain prompt tells the session to do the same, so the card moves to In progress on the next
+implement prompt tells the session to do the same, so the card moves to In progress on the next
 refresh.
 
 Settings in `.ticketmaster.toml`:
 
 ```toml
 wayfinder_command = "/wayfinder"          # if wayfinder is installed under another name
+implement_command = "/implement"          # the same for implement (plain tickets)
 ```
 
 ## Columns

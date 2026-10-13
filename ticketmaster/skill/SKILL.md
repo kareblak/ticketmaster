@@ -33,8 +33,8 @@ with `snapshot` instead of `open`; it prints every column once as plain text.
 On the board, `Enter` goes to a ticket's herdr workspace (resuming Claude with `--continue` if it
 exited), or starts one when there is none. `s` always starts the ticket in a new worktree
 (`issue-<n>`, `issue-<n>-2`…) as herdr agent `issue-<n>`, with `/mattpocock-skills:wayfinder
-<map> <ticket>` for wayfinder tickets or a plain "work on issue" prompt otherwise. `c` starts a
-review session for a Review ticket in a `review-<n>` worktree; `x` removes a Done ticket's
+<map> <ticket>` for wayfinder tickets or `/mattpocock-skills:implement <ticket>` plus a short
+brief otherwise. `c` starts a review session for a Review ticket in a `review-<n>` worktree; `x` removes a Done ticket's
 worktrees; `a` toggles auto-remove (saved per user), where the board does that itself once the
 agent is idle, keeping worktrees with uncommitted or unpushed work. Cards
 show each session's agent state (working, needs you, idle, done, no agent).

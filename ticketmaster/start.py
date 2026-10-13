@@ -11,17 +11,24 @@ from .herdr import Herdr, Session, unsaved_work
 from .model import Ticket
 
 DEFAULT_WAYFINDER_COMMAND = "/mattpocock-skills:wayfinder"
+DEFAULT_IMPLEMENT_COMMAND = "/mattpocock-skills:implement"
 
 
-def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND) -> str:
-    """Wayfinder claims and resolves map tickets itself; anything else gets a plain brief."""
+def build_prompt(
+    ticket: Ticket,
+    wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND,
+    implement_command: str = DEFAULT_IMPLEMENT_COMMAND,
+) -> str:
+    """Wayfinder claims and resolves map tickets itself; anything else runs the implement skill with a brief."""
     if ticket.is_wayfinder_map:
         return f"{wayfinder_command} {ticket.url}"
     if ticket.is_wayfinder_ticket:
         return f"{wayfinder_command} {ticket.parent_url} {ticket.url}"
     return (
-        f"Work on issue #{ticket.number}: {ticket.title}\n{ticket.url}\n\n"
-        "Read the issue and its comments first, then assign it to yourself before doing any work."
+        f"{implement_command} {ticket.url}\n\n"
+        "1. Read the issue and its comments, then assign it to yourself before doing any work.\n"
+        "2. Implement it via the skill (it drives /tdd and /code-review and commits).\n"
+        "3. Push the branch and open a ready PR that closes the issue, with the body written via the pr skill."
     )
 
 
@@ -57,6 +64,7 @@ class Workbench:
 
     cwd: Path
     wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND
+    implement_command: str = DEFAULT_IMPLEMENT_COMMAND
     claude: str = "claude"
     herdr: Herdr = field(default_factory=Herdr)
     check_unsaved: Callable[[str], str | None] = unsaved_work  # why removing a checkout would lose work
@@ -67,7 +75,7 @@ class Workbench:
     def start(self, ticket: Ticket) -> str:
         where = self.herdr.start_in_new_worktree(
             self.cwd, worktree_name(ticket), session_label(ticket),
-            claude_args(ticket, build_prompt(ticket, self.wayfinder_command)), self.claude,
+            claude_args(ticket, build_prompt(ticket, self.wayfinder_command, self.implement_command)), self.claude,
         )
         return f"Started #{ticket.number} in {where}"
 

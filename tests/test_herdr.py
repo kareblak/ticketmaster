@@ -234,6 +234,16 @@ def test_start_creates_a_worktree_workspace_with_a_named_agent():
     assert message == "Started #686 in new worktree issue-686 as agent issue-686"
 
 
+def test_start_passes_the_configured_implement_command_to_claude():
+    fake = FakeHerdr({
+        ("worktree", "list"): worktrees(),
+        ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
+        ("agent", "list"): {"agents": []},
+    })
+    bench(fake, implement_command="/implement").start(ticket())
+    assert fake.first("agent", "start")[-1].startswith("/implement https://")
+
+
 def test_start_always_makes_a_new_worktree_even_when_one_exists(monkeypatch):
     monkeypatch.setattr(herdr, "local_branches", lambda cwd: ["main", "issue-686-2"])
     old = {"path": "/code/shiplog/.claude/worktrees/issue-686", "branch": "worktree-issue-686", "is_linked_worktree": True}
