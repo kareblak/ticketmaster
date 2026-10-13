@@ -2,8 +2,8 @@
 
 Token lookup order: GITEA_TOKEN / FORGEJO_TOKEN env vars, then the `tea` config login whose
 URL matches the repo host. Dependencies come from `/issues/{n}/dependencies`; there are no
-sub-issues, so a parent board falls back to issues whose body mentions `#<parent>`, plus the
-implementation tickets of a spec among them (`Part of #<parent>`), which name the spec in their
+sub-issues, so a parent board falls back to issues whose body mentions `#<parent>`, plus, for a
+map, the implementation tickets of its spec (`Part of #<map>`), which name the spec in their
 `## Parent` section. Open
 pull requests count as review when their body says `closes/fixes/resolves #<n>`.
 """
@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, RateLimited, map_family, tracker_error
+from . import NotFound, ProviderError, Query, RateLimited, map_family, resolve_maps, tracker_error
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -51,12 +51,19 @@ class GiteaProvider:
         pr_bodies = [f"{p.get('title', '')}\n{p.get('body') or ''}" for p in pulls]
         tickets = [to_ticket(i, None, pr_bodies) for i in raw]
         if query.parent is not None:
-            parent = to_ticket(self._get(f"/repos/{self.repo}/issues/{query.parent}"), None, [])
-            tickets = map_family(tickets, parent)
+            tickets = map_family(tickets, query.parent, self._map(query.parent))
         open_numbers = [t.number for t in tickets if t.is_open]
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
-        return [replace(t, open_blockers=blockers.get(t.number)) for t in tickets]
+        tickets = [replace(t, open_blockers=blockers.get(t.number)) for t in tickets]
+        return resolve_maps(tickets, self._map)
+
+    def _map(self, number: int) -> tuple[str, tuple[str, ...]] | None:
+        try:
+            issue = self._get(f"/repos/{self.repo}/issues/{number}")
+        except NotFound:
+            return None
+        return issue["html_url"], tuple(label["name"] for label in issue.get("labels") or [])
 
     def delete(self, number: int) -> None:
         self._request("DELETE", f"/repos/{self.repo}/issues/{number}")
@@ -96,6 +103,8 @@ class GiteaProvider:
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
                 raise RateLimited(f"{self.host}{path}: HTTP 429 rate limit exceeded") from exc
+            if exc.code == 404:
+                raise NotFound(f"{self.host}{path}: HTTP 404 {exc.reason}") from exc
             raise tracker_error(f"{self.host}{path}: HTTP {exc.code} {exc.reason}") from exc
         except urllib.error.URLError as exc:
             raise ProviderError(f"{self.host}: {exc.reason}") from exc

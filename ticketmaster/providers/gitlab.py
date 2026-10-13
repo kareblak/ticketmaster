@@ -1,8 +1,8 @@
 """GitLab via `glab api graphql`: `blocks` links and closing merge requests.
 
 GitLab issues have no sub-issue list in the Issue API, so a parent board falls back to
-issues whose description mentions `#<parent>`, plus the implementation tickets of a spec among
-them (`Part of #<parent>`), which name the spec in their `## Parent` section.
+issues whose description mentions `#<parent>`, plus, for a map, the implementation tickets of its
+spec (`Part of #<map>`), which name the spec in their `## Parent` section.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, map_family, mentions_parent, run_cli, run_json, tracker_error
+from . import ProviderError, Query, map_family, resolve_maps, run_cli, run_json, tracker_error
 
 ISSUES = """
 query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
@@ -63,17 +63,16 @@ class GitLabProvider:
                 seen.setdefault(ticket.number, ticket)
         tickets = list(seen.values())
         if query.parent is not None:
-            issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(query.parent)}).get("project") or {}).get("issue")
-            if not issue:
-                return [t for t in tickets if t.number != query.parent and mentions_parent(t.body, query.parent)]
-            labels = tuple(label["title"] for label in issue["labels"]["nodes"])
-            parent = Ticket(number=query.parent, title="", url=issue["webUrl"], is_open=True, labels=labels)
-            tickets = map_family(tickets, parent)
-        return tickets
+            tickets = map_family(tickets, query.parent, self._map(query.parent))
+        return resolve_maps(tickets, self._map)
 
     def delete(self, number: int) -> None:
         project = urllib.parse.quote(self.repo, safe="")
         run_cli(["glab", "api", "--hostname", self.host, "-X", "DELETE", f"projects/{project}/issues/{number}"])
+
+    def _map(self, iid: int) -> tuple[str, tuple[str, ...]] | None:
+        issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(iid)}).get("project") or {}).get("issue")
+        return (issue["webUrl"], tuple(label["title"] for label in issue["labels"]["nodes"])) if issue else None
 
     def _issues(self, variables: dict, limit: int) -> list[dict]:
         nodes: list[dict] = []

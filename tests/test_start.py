@@ -1,7 +1,9 @@
 from pathlib import Path
 
+import pytest
+
 from ticketmaster.model import Ticket
-from ticketmaster.start import build_prompt, claude_args, review_prompt, workbench_for
+from ticketmaster.start import MapNotFound, build_prompt, claude_args, review_prompt, workbench_for
 
 MAP = ("wayfinder:map",)
 
@@ -20,9 +22,21 @@ def test_map_itself_runs_wayfinder_on_the_map():
     assert build_prompt(ticket(labels=MAP)) == "/mattpocock-skills:wayfinder https://gh/686"
 
 
-def test_wayfinder_label_without_map_parent_gets_plain_prompt():
-    t = ticket(labels=("wayfinder:task",), parent_url="https://gh/680", parent_labels=("epic",))
+def test_typed_ticket_without_a_map_is_never_started_with_implement():
+    for t in (ticket(labels=("wayfinder:task",), parent_url="https://gh/680", parent_labels=("epic",)),
+              ticket(labels=("wayfinder::research",))):
+        with pytest.raises(MapNotFound, match="#686"):
+            build_prompt(t)
+
+
+def test_unknown_wayfinder_label_gets_plain_prompt():
+    t = ticket(labels=("wayfinder:epic",))
     assert build_prompt(t).startswith("/mattpocock-skills:implement https://gh/686\n")
+
+
+def test_scoped_gitlab_ticket_runs_wayfinder_on_its_map():
+    t = ticket(labels=("wayfinder::grilling",), parent_url="https://gl/680", parent_labels=("wayfinder::map",))
+    assert build_prompt(t) == "/mattpocock-skills:wayfinder https://gl/680 https://gh/686"
 
 
 def test_plain_ticket_runs_implement_with_claim_implement_and_pr_brief():

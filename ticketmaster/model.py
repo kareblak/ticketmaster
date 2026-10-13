@@ -21,7 +21,11 @@ COLUMN_ORDER = [Column.BLOCKED, Column.READY, Column.IN_PROGRESS, Column.REVIEW,
 # `review:security` (GitHub/Gitea) and `review::security` (GitLab scoped labels).
 REVIEW_LABEL = re.compile(r"^review::?(?P<kind>.+)$", re.IGNORECASE)
 BLOCKED_LABEL = "blocked"
-MAP_LABEL = "wayfinder:map"
+WAYFINDER_TYPES = ("research", "prototype", "grilling", "task")
+# `wayfinder:<kind>` (GitHub/Gitea) and `wayfinder::<kind>` (GitLab scoped labels).
+WAYFINDER_LABEL = re.compile(r"^wayfinder::?(?P<kind>[^:].*)$", re.IGNORECASE)
+# The child→map rule for trackers without a native link: the body's first line is `Part of #<map>`.
+PART_OF = re.compile(r"^Part of #(?P<map>\d+)\.?$")
 
 
 @dataclass(frozen=True)
@@ -61,16 +65,44 @@ class Ticket:
 
     @property
     def is_wayfinder_map(self) -> bool:
-        return MAP_LABEL in self.labels
+        return "map" in wayfinder_kinds(self.labels)
+
+    @property
+    def wayfinder_type(self) -> str | None:
+        """`research`, `prototype`, `grilling` or `task`; any other `wayfinder:` label does not count."""
+        return next((kind for kind in wayfinder_kinds(self.labels) if kind in WAYFINDER_TYPES), None)
 
     @property
     def is_wayfinder_ticket(self) -> bool:
-        has_type = any(label.startswith("wayfinder:") and label != MAP_LABEL for label in self.labels)
-        return has_type and MAP_LABEL in self.parent_labels and self.parent_url is not None
+        return self.wayfinder_type is not None and self.parent_url is not None and self.parent_is_map
+
+    @property
+    def parent_is_map(self) -> bool:
+        return "map" in wayfinder_kinds(self.parent_labels)
+
+    @property
+    def map_missing(self) -> bool:
+        """A typed ticket whose map the board could not find: it starts neither wayfinder nor implement."""
+        return self.wayfinder_type is not None and not self.is_wayfinder_ticket
+
+    @property
+    def map_warning(self) -> str:
+        return f"wayfinder:{self.wayfinder_type}, map not found"
 
     @property
     def summary(self) -> str:
         return summarize(self.body)
+
+
+def wayfinder_kinds(labels: tuple[str, ...]) -> list[str]:
+    return [m.group("kind").lower() for label in labels if (m := WAYFINDER_LABEL.match(label))]
+
+
+def part_of(body: str) -> int | None:
+    """The map number from a body whose first non-blank line is `Part of #<map>`."""
+    first = next((line.strip() for line in (body or "").splitlines() if line.strip()), "")
+    match = PART_OF.match(first)
+    return int(match.group("map")) if match else None
 
 
 @dataclass

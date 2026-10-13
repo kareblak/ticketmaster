@@ -2,7 +2,8 @@
 
 A parent board is the parent's sub-issues and, for a map, the spec that links to it with a
 `Part of #<map>` line (a sub-issue or not) and the spec's implementation tickets: its sub-issues and
-the issues whose `## Parent` section names it. Body links show up as cross-references in the linked issue's timeline.
+the issues whose `## Parent` section names it. Body links show up as cross-references in the linked
+issue's timeline.
 """
 
 from __future__ import annotations
@@ -12,7 +13,10 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, is_spec, names_parent, run_cli, run_json, tracker_error, with_parent
+from . import (
+    NotFound, ProviderError, Query, is_map, is_spec, names_parent, resolve_maps, run_cli, run_json, tracker_error,
+    under_spec, with_map,
+)
 
 ISSUE_FIELDS = """
   number title url body state closedAt
@@ -38,7 +42,7 @@ query($owner: String!, $name: String!, $number: Int!, $subs: String, $refs: Stri
       $withSubs: Boolean!, $withRefs: Boolean!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
-      url labels(first: 20) { nodes { name } }
+      url labels(first: 30) { nodes { name } }
       subIssues(first: 100, after: $subs) @include(if: $withSubs) {
         pageInfo { hasNextPage endCursor }
         nodes { %s }
@@ -52,6 +56,12 @@ query($owner: String!, $name: String!, $number: Int!, $subs: String, $refs: Stri
 }
 """ % (ISSUE_FIELDS, ISSUE_FIELDS)
 
+ISSUE = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { issue(number: $number) { url labels(first: 30) { nodes { name } } } }
+}
+"""
+
 
 class GitHubProvider:
     name = "github"
@@ -61,6 +71,10 @@ class GitHubProvider:
         self.host = host
 
     def fetch(self, query: Query) -> list[Ticket]:
+        """The sub-issue parent is the native child→map link; `Part of #<map>` is the fallback."""
+        return resolve_maps(self._fetch(query), self._map)
+
+    def _fetch(self, query: Query) -> list[Ticket]:
         if query.parent is not None:
             return self._sub_issues(query)
         since = (datetime.now(timezone.utc) - timedelta(days=query.done_days)).date().isoformat()
@@ -79,24 +93,25 @@ class GitHubProvider:
         run_cli(["gh", "issue", "delete", str(number), "--repo", f"{self.host}/{self.repo}", "--yes"])
 
     def _sub_issues(self, query: Query) -> list[Ticket]:
-        """The parent's sub-issues in order, then each spec's implementation tickets after the spec."""
+        """The parent's sub-issues in order; for a map, then its spec and the spec's implementation tickets."""
         tickets: list[Ticket] = []
 
         def new(nodes: list[dict], links=lambda body: True) -> list[Ticket]:
             taken = {query.parent} | {t.number for t in tickets}
             return [to_ticket(node, order=0) for node in nodes if node["number"] not in taken and links(node.get("body"))]
 
-        parent, subs, refs = self._children(query.parent, query.limit)
+        found, subs, refs = self._children(query.parent, query.limit)
         tickets += new(subs)
-        tickets += with_parent([t for t in new(refs) if is_spec(t, parent)], parent)
-        for spec in [t for t in tickets if is_spec(t, parent)]:
-            _, subs, refs = self._children(spec.number, query.limit)
-            tickets += new(subs)
-            tickets += with_parent(new(refs, lambda body: names_parent(body, spec.number)), spec)
+        if is_map(found):
+            tickets += [with_map(t, query.parent, found) for t in new(refs) if is_spec(t, query.parent)]
+            for spec in [t for t in tickets if is_spec(t, query.parent)]:
+                _, subs, refs = self._children(spec.number, query.limit)
+                tickets += new(subs)
+                tickets += under_spec(new(refs, lambda body: names_parent(body, spec.number)), spec)
         return [replace(t, order=index) for index, t in enumerate(tickets[: query.limit])]
 
-    def _children(self, number: int, limit: int) -> tuple[Ticket, list[dict], list[dict]]:
-        """An issue (as the parent of what links to it), its sub-issues, and the issues of this repo referring to it."""
+    def _children(self, number: int, limit: int) -> tuple[tuple[str, tuple[str, ...]], list[dict], list[dict]]:
+        """An issue's URL and labels, its sub-issues, and the issues of this repo referring to it."""
         owner, name = self.repo.split("/", 1)
         found: dict[str, list[dict]] = {"subIssues": [], "timelineItems": []}
         after: dict[str, str | None] = {"subIssues": None, "timelineItems": None}
@@ -118,8 +133,27 @@ class GitHubProvider:
         refs = {s["number"]: s for s in sources if s.get("number")
                 and (s.get("repository") or {}).get("nameWithOwner", "").lower() == self.repo.lower()}
         labels = tuple(label["name"] for label in issue.get("labels", {}).get("nodes", []))
-        parent = Ticket(number=number, title="", url=issue.get("url", ""), is_open=True, labels=labels)
-        return parent, found["subIssues"][:limit], list(refs.values())[:limit]
+        return (issue.get("url", ""), labels), found["subIssues"][:limit], list(refs.values())[:limit]
+
+    def _map(self, number: int) -> tuple[str, tuple[str, ...]] | None:
+        owner, name = self.repo.split("/", 1)
+        try:
+            data = self._graphql(ISSUE, {"owner": owner, "name": name, "number": number})
+        except NotFound:
+            return None
+        issue = (data.get("repository") or {}).get("issue")
+        return (issue["url"], tuple(label["name"] for label in issue["labels"]["nodes"])) if issue else None
+
+    def _graphql(self, gql: str, variables: dict) -> dict:
+        body = {"query": gql, "variables": variables}
+        args = ["gh", "api", "graphql", "--hostname", self.host, "-H", "Content-Type: application/json", "--input", "-"]
+        data = run_json(args, stdin=json.dumps(body))
+        if errors := data.get("errors"):
+            message = "; ".join(e.get("message", "") for e in errors)
+            if all(e.get("type") == "NOT_FOUND" for e in errors):
+                raise NotFound(message)
+            raise tracker_error(message)
+        return data["data"]
 
     def _paginate(self, gql: str, variables: dict, path: list[str], limit: int) -> list[dict]:
         nodes: list[dict] = []
@@ -135,14 +169,6 @@ class GitHubProvider:
                 break
             after = page["pageInfo"]["endCursor"]
         return nodes[:limit]
-
-    def _graphql(self, gql: str, variables: dict) -> dict:
-        body = {"query": gql, "variables": variables}
-        args = ["gh", "api", "graphql", "--hostname", self.host, "-H", "Content-Type: application/json", "--input", "-"]
-        data = run_json(args, stdin=json.dumps(body))
-        if data.get("errors"):
-            raise tracker_error("; ".join(e.get("message", "") for e in data["errors"]))
-        return data["data"]
 
 
 def to_ticket(node: dict, order: int) -> Ticket:

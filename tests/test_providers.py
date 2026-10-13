@@ -216,11 +216,249 @@ def test_gitea_other_http_errors_are_not_rate_limited(monkeypatch):
     assert not isinstance(raised.value, RateLimited)
 
 
-def test_spec_links_to_the_map_with_a_part_of_line():
-    assert providers.part_of("Part of #5\n\n## Problem Statement", 5)
-    assert providers.part_of("part of #5", 5)
-    assert not providers.part_of("Part of #50", 5)
-    assert not providers.part_of("This is not part of #5", 5)  # the keyword starts a line
+MAP_LABELS = ("wayfinder:map",)
+
+
+def test_resolve_maps_follows_part_of_to_a_map_in_the_board_or_fetched_once():
+    from ticketmaster.model import Ticket
+
+    fetched = []
+
+    def fetch_map(number):
+        fetched.append(number)
+        return {9: ("https://x/9", MAP_LABELS), 8: ("https://x/8", ("epic",))}.get(number)
+
+    tickets = [
+        Ticket(number=1, title="map", url="https://x/1", is_open=True, labels=MAP_LABELS),
+        Ticket(number=2, title="in board", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #1"),
+        Ticket(number=3, title="closed map", url="u", is_open=True, labels=("wayfinder::research",), body="Part of #9"),
+        Ticket(number=4, title="same map", url="u", is_open=True, labels=("wayfinder:grilling",), body="Part of #9"),
+        Ticket(number=5, title="not a map", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #8"),
+        Ticket(number=6, title="untyped", url="u", is_open=True, labels=("bug",), body="Part of #9"),
+        Ticket(number=7, title="native", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #9",
+               parent_number=1, parent_url="https://x/1", parent_labels=MAP_LABELS),
+        Ticket(number=10, title="gone", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #404"),
+        Ticket(number=11, title="loose", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #9, kind of"),
+    ]
+    resolved = {t.number: t for t in providers.resolve_maps(tickets, fetch_map)}
+    assert (resolved[2].parent_number, resolved[2].parent_url) == (1, "https://x/1")
+    assert resolved[3].is_wayfinder_ticket and resolved[4].parent_url == "https://x/9"
+    assert resolved[5].map_missing and resolved[10].map_missing and resolved[11].map_missing
+    assert resolved[6].parent_url is None
+    assert resolved[7].parent_number == 1
+    assert sorted(fetched) == [8, 9, 404]  # each missing map fetched once, never one already on the board
+
+
+def test_resolve_maps_lets_tracker_errors_surface_instead_of_calling_the_map_missing():
+    from ticketmaster.model import Ticket
+
+    typed = [Ticket(number=2, title="t", url="u", is_open=True, labels=("wayfinder:task",), body="Part of #1")]
+
+    def down(number):
+        raise ProviderError("HTTP 401 Unauthorized")
+
+    with pytest.raises(ProviderError):
+        providers.resolve_maps(typed, down)
+
+
+def test_github_missing_map_issue_is_no_map_but_other_errors_surface(monkeypatch):
+    answer = {}
+    monkeypatch.setattr(github, "run_json", lambda args, stdin=None: answer)
+    answer.update(errors=[{"type": "NOT_FOUND", "message": "Could not resolve to an Issue with the number of 9."}])
+    assert github.GitHubProvider("o/r")._map(9) is None
+    answer.update(errors=[{"type": "FORBIDDEN", "message": "Resource not accessible"}])
+    with pytest.raises(ProviderError):
+        github.GitHubProvider("o/r")._map(9)
+
+
+def test_gitea_missing_map_issue_is_no_map_but_other_errors_surface(monkeypatch):
+    def urlopen(request, timeout=None):
+        raise http_error(404 if request.full_url.endswith("/9") else 500, "x")
+
+    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    provider = gitea.GiteaProvider("o/r", "codeberg.org", token="x")
+    assert provider._map(9) is None
+    with pytest.raises(ProviderError):
+        provider._map(8)
+
+
+def github_node(number, labels, body="", parent=None):
+    return {"number": number, "title": "t", "url": f"https://gh/{number}", "body": body, "state": "OPEN",
+            "assignees": {"nodes": []}, "labels": {"nodes": [{"name": n} for n in labels]}, "parent": parent}
+
+
+@pytest.mark.parametrize("query", [Query(), Query(label="wayfinder:task")])
+def test_github_whole_repo_and_label_boards_resolve_part_of_maps(monkeypatch, query):
+    def fake_run_json(args, stdin=None):
+        variables = json.loads(stdin)["variables"]
+        if "number" in variables:
+            assert variables["number"] == 5
+            issue = {"url": "https://gh/5", "labels": {"nodes": [{"name": "wayfinder:map"}]}}
+            return {"data": {"repository": {"issue": issue}}}
+        nodes = [github_node(2, ["wayfinder:task"], "Part of #5"),
+                 github_node(3, ["wayfinder:task"], parent={"number": 1, "url": "https://gh/1",
+                                                            "labels": {"nodes": [{"name": "wayfinder:map"}]}})]
+        nodes = nodes if "is:open" in variables["q"] else []
+        return {"data": {"search": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}
+
+    monkeypatch.setattr(github, "run_json", fake_run_json)
+    tickets = {t.number: t for t in github.GitHubProvider("o/r").fetch(query)}
+    assert (tickets[2].parent_url, tickets[2].is_wayfinder_ticket) == ("https://gh/5", True)
+    assert tickets[3].parent_url == "https://gh/1"
+
+
+def gitlab_node(iid, labels, body=""):
+    return {"iid": str(iid), "title": "t", "webUrl": f"https://gl/{iid}", "description": body, "state": "opened",
+            "closedAt": None, "assignees": {"nodes": []}, "labels": {"nodes": [{"title": n} for n in labels]},
+            "blockedByCount": 0, "mergeRequestsCount": 0}
+
+
+@pytest.mark.parametrize("query", [Query(), Query(label="wayfinder::grilling")])
+def test_gitlab_whole_repo_and_label_boards_resolve_part_of_maps(monkeypatch, query):
+    def fake_run_json(args, stdin=None):
+        variables = json.loads(stdin)["variables"]
+        if "iid" in variables:
+            if variables["iid"] != "5":
+                return {"data": {"project": {"issue": None}}}
+            issue = {"webUrl": "https://gl/5", "labels": {"nodes": [{"title": "wayfinder::map"}]}}
+            return {"data": {"project": {"issue": issue}}}
+        nodes = [gitlab_node(2, ["wayfinder::grilling"], "Part of #5\n\nWhy"),
+                 gitlab_node(3, ["wayfinder::grilling"], "Part of #6")]
+        nodes = nodes if variables["state"] == "opened" else []
+        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
+
+    monkeypatch.setattr(gitlab, "run_json", fake_run_json)
+    tickets = {t.number: t for t in gitlab.GitLabProvider("g/p").fetch(query)}
+    assert (tickets[2].parent_number, tickets[2].parent_url, tickets[2].is_wayfinder_ticket) == (5, "https://gl/5", True)
+    assert tickets[3].map_missing
+
+
+def gitea_issue(number, labels, body=""):
+    return {"number": number, "title": "t", "html_url": f"https://gt/{number}", "body": body, "state": "open",
+            "assignees": [], "labels": [{"name": n} for n in labels]}
+
+
+@pytest.mark.parametrize("query", [Query(), Query(label="wayfinder:research")])
+def test_gitea_whole_repo_and_label_boards_resolve_part_of_maps(monkeypatch, query):
+    def fake_get(self, path, params=None):
+        if path.endswith("/issues"):
+            return [gitea_issue(2, ["wayfinder:research"], "Part of #5")] if params["state"] == "open" else []
+        if path.endswith("/issues/5"):
+            return gitea_issue(5, ["wayfinder:map"])
+        return []
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    tickets = {t.number: t for t in gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(query)}
+    assert (tickets[2].parent_number, tickets[2].parent_url, tickets[2].is_wayfinder_ticket) == (5, "https://gt/5", True)
+
+
+def test_gitea_map_board_keeps_the_map_as_parent(monkeypatch):
+    def fake_get(self, path, params=None):
+        if path.endswith("/issues"):
+            return [gitea_issue(1, ["wayfinder:map"]), gitea_issue(2, ["wayfinder:task"], "Part of #1")] \
+                if params["state"] == "open" else []
+        if path.endswith("/issues/1"):
+            return gitea_issue(1, ["wayfinder:map"])
+        return []
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query(parent=1))
+    assert [(t.number, t.parent_url, t.is_wayfinder_ticket) for t in tickets] == [(2, "https://gt/1", True)]
+
+
+def test_gitea_map_board_follows_a_part_of_line_naming_another_map(monkeypatch):
+    def fake_get(self, path, params=None):
+        if path.endswith("/issues"):
+            return [gitea_issue(2, ["wayfinder:task"], "Part of #7\n\nSee #1")] if params["state"] == "open" else []
+        if path.endswith("/issues/1"):
+            return gitea_issue(1, ["wayfinder:map"])
+        if path.endswith("/issues/7"):
+            return gitea_issue(7, ["wayfinder:map"])
+        return []
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    [ticket] = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query(parent=1))
+    assert (ticket.parent_number, ticket.parent_url) == (7, "https://gt/7")
+
+
+def test_gitlab_map_board_follows_a_part_of_line_naming_another_map(monkeypatch):
+    def fake_run_json(args, stdin=None):
+        variables = json.loads(stdin)["variables"]
+        if "iid" in variables:
+            issue = {"webUrl": f"https://gl/{variables['iid']}", "labels": {"nodes": [{"title": "wayfinder:map"}]}}
+            return {"data": {"project": {"issue": issue}}}
+        nodes = [gitlab_node(2, ["wayfinder:task"], "Part of #7\n\nSee #1")] if variables["state"] == "opened" else []
+        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
+
+    monkeypatch.setattr(gitlab, "run_json", fake_run_json)
+    [ticket] = gitlab.GitLabProvider("g/p").fetch(Query(parent=1))
+    assert (ticket.parent_number, ticket.parent_url) == (7, "https://gl/7")
+
+
+def test_github_delete_runs_gh_issue_delete(monkeypatch):
+    calls = []
+    monkeypatch.setattr(github, "run_cli", lambda args, stdin=None: calls.append(args) or "")
+    github.GitHubProvider("o/r", host="ghe.example.com").delete(7)
+    assert calls == [["gh", "issue", "delete", "7", "--repo", "ghe.example.com/o/r", "--yes"]]
+
+
+def test_gitlab_delete_calls_the_issue_delete_api(monkeypatch):
+    calls = []
+    monkeypatch.setattr(gitlab, "run_cli", lambda args, stdin=None: calls.append(args) or "")
+    gitlab.GitLabProvider("g/sub/p", host="gl.example.com").delete(12)
+    assert calls == [["glab", "api", "--hostname", "gl.example.com", "-X", "DELETE", "projects/g%2Fsub%2Fp/issues/12"]]
+
+
+class FakeResponse(io.BytesIO):
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_gitea_delete_sends_delete_with_the_token(monkeypatch):
+    requests = []
+
+    def urlopen(request, timeout=None):
+        requests.append(request)
+        return FakeResponse(b"")  # 204 No Content
+
+    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    gitea.GiteaProvider("o/r", "codeberg.org", token="x").delete(4)
+    [request] = requests
+    assert (request.get_method(), request.full_url) == ("DELETE", "https://codeberg.org/api/v1/repos/o/r/issues/4")
+    assert request.get_header("Authorization") == "token x"
+
+
+@pytest.mark.parametrize("module", [github, gitlab])
+def test_cli_delete_errors_are_provider_errors(monkeypatch, module):
+    stderr = "GraphQL: kareblak does not have the correct permissions to execute `DeleteIssue`"
+    monkeypatch.setattr(providers.subprocess, "run", lambda *a, **k: FakeCompleted(stderr))
+    provider = github.GitHubProvider("o/r") if module is github else gitlab.GitLabProvider("g/p")
+    with pytest.raises(ProviderError, match="permissions"):
+        provider.delete(1)
+
+
+def test_gitea_delete_forbidden_is_a_provider_error(monkeypatch):
+    def urlopen(request, timeout=None):
+        raise http_error(403, "Forbidden")
+
+    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    with pytest.raises(ProviderError, match="403 Forbidden"):
+        gitea.GiteaProvider("o/r", "codeberg.org", token="x").delete(4)
+
+
+def test_spec_is_part_of_the_map_without_a_wayfinder_label():
+    from ticketmaster.model import Ticket
+
+    def spec(body, labels=()):
+        return Ticket(number=3, title="Spec", url="u", is_open=True, body=body, labels=labels)
+
+    assert providers.is_spec(spec("Part of #5\n\n## Problem Statement", ("ready-for-agent",)), 5)
+    assert not providers.is_spec(spec("Part of #50"), 5)
+    assert not providers.is_spec(spec("Part of #5", ("wayfinder:task",)), 5)  # a decision ticket
+    assert not providers.is_spec(spec("Part of #5", ("wayfinder::grilling",)), 5)
 
 
 def test_implementation_ticket_names_its_spec_in_the_parent_section():
@@ -300,7 +538,7 @@ def test_gitea_map_board_includes_the_spec_and_its_implementation_tickets(monkey
     assert 7 not in dependencies and 1 not in dependencies  # blockers only for the board's tickets
 
 
-def github_node(n, parent=None, repo="o/r"):
+def family_node(n, parent=None, repo="o/r"):
     title, body, labels = FAMILY[n]
     node = {"number": n, "title": title, "url": f"https://gh/{n}", "body": body, "state": "OPEN",
             "assignees": {"nodes": []}, "labels": {"nodes": [{"name": label} for label in labels]},
@@ -329,7 +567,7 @@ def github_children(monkeypatch, sub_issues, references, labels_of=lambda n: FAM
 
 def test_github_plain_parent_board_is_only_its_sub_issues(monkeypatch):
     # The same family under an epic: no map, so no spec, and no query beyond the parent's own.
-    asked = github_children(monkeypatch, {1: [github_node(3, parent=1)]}, {1: [github_node(3)]},
+    asked = github_children(monkeypatch, {1: [family_node(3, parent=1)]}, {1: [family_node(3)]},
                             labels_of=lambda n: ("epic",))
     tickets = github.GitHubProvider("o/r").fetch(Query(parent=1))
     assert [t.number for t in tickets] == [3] and asked == [1]
@@ -338,65 +576,11 @@ def test_github_plain_parent_board_is_only_its_sub_issues(monkeypatch):
 def test_github_map_board_includes_the_spec_and_its_implementation_tickets(monkeypatch):
     # #2 is a native sub-issue of the map and #4 one of the spec; #3 and #5 link by body only,
     # so GitHub reports them as cross-references; #6 and #8 (another repo) mention without linking.
-    sub_issues = {1: [github_node(2, parent=1)], 3: [github_node(4, parent=3)]}
-    references = {1: [github_node(3), github_node(6), github_node(2, parent=1)],
-                  3: [github_node(5), github_node(4, parent=3), {**github_node(5, repo="x/y"), "number": 8}]}
+    sub_issues = {1: [family_node(2, parent=1)], 3: [family_node(4, parent=3)]}
+    references = {1: [family_node(3), family_node(6), family_node(2, parent=1)],
+                  3: [family_node(5), family_node(4, parent=3), {**family_node(5, repo="x/y"), "number": 8}]}
     asked = github_children(monkeypatch, sub_issues, references)
     tickets = github.GitHubProvider("o/r").fetch(Query(parent=1))
     assert_map_family(tickets, "https://gh/1", "https://gh/3")
     assert [t.number for t in tickets] == [2, 3, 4, 5]  # map order, then the spec, then its tickets
     assert sorted(asked) == [1, 3]  # the decision ticket is not a spec, so its children are not asked for
-
-
-def test_github_delete_runs_gh_issue_delete(monkeypatch):
-    calls = []
-    monkeypatch.setattr(github, "run_cli", lambda args, stdin=None: calls.append(args) or "")
-    github.GitHubProvider("o/r", host="ghe.example.com").delete(7)
-    assert calls == [["gh", "issue", "delete", "7", "--repo", "ghe.example.com/o/r", "--yes"]]
-
-
-def test_gitlab_delete_calls_the_issue_delete_api(monkeypatch):
-    calls = []
-    monkeypatch.setattr(gitlab, "run_cli", lambda args, stdin=None: calls.append(args) or "")
-    gitlab.GitLabProvider("g/sub/p", host="gl.example.com").delete(12)
-    assert calls == [["glab", "api", "--hostname", "gl.example.com", "-X", "DELETE", "projects/g%2Fsub%2Fp/issues/12"]]
-
-
-class FakeResponse(io.BytesIO):
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def test_gitea_delete_sends_delete_with_the_token(monkeypatch):
-    requests = []
-
-    def urlopen(request, timeout=None):
-        requests.append(request)
-        return FakeResponse(b"")  # 204 No Content
-
-    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
-    gitea.GiteaProvider("o/r", "codeberg.org", token="x").delete(4)
-    [request] = requests
-    assert (request.get_method(), request.full_url) == ("DELETE", "https://codeberg.org/api/v1/repos/o/r/issues/4")
-    assert request.get_header("Authorization") == "token x"
-
-
-@pytest.mark.parametrize("module", [github, gitlab])
-def test_cli_delete_errors_are_provider_errors(monkeypatch, module):
-    stderr = "GraphQL: kareblak does not have the correct permissions to execute `DeleteIssue`"
-    monkeypatch.setattr(providers.subprocess, "run", lambda *a, **k: FakeCompleted(stderr))
-    provider = github.GitHubProvider("o/r") if module is github else gitlab.GitLabProvider("g/p")
-    with pytest.raises(ProviderError, match="permissions"):
-        provider.delete(1)
-
-
-def test_gitea_delete_forbidden_is_a_provider_error(monkeypatch):
-    def urlopen(request, timeout=None):
-        raise http_error(403, "Forbidden")
-
-    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
-    with pytest.raises(ProviderError, match="403 Forbidden"):
-        gitea.GiteaProvider("o/r", "codeberg.org", token="x").delete(4)
