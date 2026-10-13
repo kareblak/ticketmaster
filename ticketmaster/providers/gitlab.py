@@ -1,7 +1,8 @@
 """GitLab via `glab api graphql`: `blocks` links plus `Blocked by:` body lines, and closing merge requests.
 
 GitLab issues have no sub-issue list in the Issue API, so a parent board falls back to
-issues whose description mentions `#<parent>`.
+issues whose description mentions `#<parent>`, plus, for a map, the implementation tickets of its
+spec (`Part of #<map>`), which name the spec in their `## Parent` section.
 """
 
 from __future__ import annotations
@@ -11,8 +12,8 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import (IssueStates, ProviderError, Query, blocker_ref, mentions_parent, on_map_board, resolve_maps, run_cli,
-               run_json, tracker_error, with_body_blockers)
+from . import (IssueStates, ProviderError, Query, blocker_ref, map_family, resolve_maps, run_cli, run_json,
+               tracker_error, with_body_blockers)
 
 ISSUES = """
 query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
@@ -85,8 +86,7 @@ class GitLabProvider:
                 seen.setdefault(ticket.number, ticket)
         tickets = list(seen.values())
         if query.parent is not None:
-            tickets = [t for t in tickets if t.number != query.parent and mentions_parent(t.body, query.parent)]
-            tickets = on_map_board(tickets, query.parent, self._map(query.parent))
+            tickets = map_family(tickets, query.parent, self._map(query.parent))
         return with_body_blockers(resolve_maps(tickets, self._map), self.states)
 
     def delete(self, number: int) -> None:

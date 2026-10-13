@@ -55,7 +55,21 @@ def test_each_tracker_pins_its_encodings_with_english_keywords(tmp_path, kind, c
     assert child in text and blocking in text
     assert "--add-label out-of-scope" in text or "--label out-of-scope" in text or "--add-labels out-of-scope" in text
     assert "always English" in text and "never a `Blocked by:` body line" in text
-    assert ("`Part of`" in text) == (kind != "github")  # GitHub links children natively, nothing in the body
+
+
+@pytest.mark.parametrize("kind,ticket_link", [
+    ("github", "/issues/<spec>/sub_issues"),
+    ("gitlab", "`## Parent` section"),
+    ("gitea", "`## Parent` section"),
+])
+def test_each_tracker_pins_how_the_spec_and_its_tickets_link_back(tmp_path, kind, ticket_link):
+    text = setup(tmp_path, kind).read_text()
+    assert "**Spec → map**" in text and "`Part of #<map>`" in text and "/to-spec" in text
+    assert "**Implementation ticket → spec**" in text and "/to-tickets" in text and ticket_link in text
+    assert "`## Parent` section names `#<spec>`" in text  # what to-tickets writes, on every tracker
+    assert "no `wayfinder:` label" in text
+    if kind != "github":  # the spec starts with `Part of #<map>` too, but is no decision ticket to take
+        assert "open issues labelled `wayfinder:<type>` whose" in text
 
 
 def test_drift_names_a_missing_or_outdated_section(tmp_path):

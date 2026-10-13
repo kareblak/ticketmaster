@@ -1,13 +1,20 @@
-"""GitHub via `gh api graphql`: native blockedBy plus `Blocked by:` body lines, sub-issues and closing PRs."""
+"""GitHub via `gh api graphql`: native blockedBy plus `Blocked by:` body lines, sub-issues and closing PRs.
+
+A parent board is the parent's sub-issues and, for a map, the spec that links to it with a
+`Part of #<map>` line (a sub-issue or not) and the spec's implementation tickets: its sub-issues and
+the issues whose `## Parent` section names it. Body links show up as cross-references in the linked
+issue's timeline.
+"""
 
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import Ticket, parse_time
-from . import (IssueStates, NotFound, ProviderError, Query, blocker_ref, resolve_maps, run_cli, run_json,
-               tracker_error, with_body_blockers)
+from . import (IssueStates, NotFound, ProviderError, Query, blocker_ref, is_map, is_spec, names_parent, resolve_maps,
+               run_cli, run_json, tracker_error, under_spec, with_body_blockers, with_map)
 
 ISSUE_FIELDS = """
   number title url body state closedAt
@@ -28,18 +35,24 @@ query($q: String!, $after: String) {
 }
 """ % ISSUE_FIELDS
 
-SUB_ISSUES = """
-query($owner: String!, $name: String!, $number: Int!, $after: String) {
+CHILDREN = """
+query($owner: String!, $name: String!, $number: Int!, $subs: String, $refs: String,
+      $withSubs: Boolean!, $withRefs: Boolean!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
-      subIssues(first: 100, after: $after) {
+      url labels(first: 30) { nodes { name } }
+      subIssues(first: 100, after: $subs) @include(if: $withSubs) {
         pageInfo { hasNextPage endCursor }
         nodes { %s }
+      }
+      timelineItems(first: 100, after: $refs, itemTypes: [CROSS_REFERENCED_EVENT]) @include(if: $withRefs) {
+        pageInfo { hasNextPage endCursor }
+        nodes { ... on CrossReferencedEvent { source { ... on Issue { repository { nameWithOwner } %s } } } }
       }
     }
   }
 }
-""" % ISSUE_FIELDS
+""" % (ISSUE_FIELDS, ISSUE_FIELDS)
 
 ISSUE = """
 query($owner: String!, $name: String!, $number: Int!) {
@@ -105,11 +118,47 @@ class GitHubProvider:
         run_cli(["gh", "issue", "delete", str(number), "--repo", f"{self.host}/{self.repo}", "--yes"])
 
     def _sub_issues(self, query: Query) -> list[Ticket]:
+        """The parent's sub-issues in order; for a map, then its spec and the spec's implementation tickets."""
+        tickets: list[Ticket] = []
+
+        def new(nodes: list[dict], links=lambda body: True) -> list[Ticket]:
+            taken = {query.parent} | {t.number for t in tickets}
+            return [to_ticket(node, order=0, repo=self.repo) for node in nodes if node["number"] not in taken and links(node.get("body"))]
+
+        found, subs, refs = self._children(query.parent, query.limit)
+        tickets += new(subs)
+        if is_map(found):
+            tickets += [with_map(t, query.parent, found) for t in new(refs) if is_spec(t, query.parent)]
+            for spec in [t for t in tickets if is_spec(t, query.parent)]:
+                _, subs, refs = self._children(spec.number, query.limit)
+                tickets += new(subs)
+                tickets += under_spec(new(refs, lambda body: names_parent(body, spec.number)), spec)
+        return [replace(t, order=index) for index, t in enumerate(tickets[: query.limit])]
+
+    def _children(self, number: int, limit: int) -> tuple[tuple[str, tuple[str, ...]], list[dict], list[dict]]:
+        """An issue's URL and labels, its sub-issues, and the issues of this repo referring to it."""
         owner, name = self.repo.split("/", 1)
-        variables = {"owner": owner, "name": name, "number": query.parent}
-        path = ["repository", "issue", "subIssues"]
-        nodes = self._paginate(SUB_ISSUES, variables, path, query.limit)
-        return [to_ticket(node, order=index, repo=self.repo) for index, node in enumerate(nodes)]
+        found: dict[str, list[dict]] = {"subIssues": [], "timelineItems": []}
+        after: dict[str, str | None] = {"subIssues": None, "timelineItems": None}
+        todo = set(found)
+        while todo:
+            variables = {"owner": owner, "name": name, "number": number,
+                         "subs": after["subIssues"], "refs": after["timelineItems"],
+                         "withSubs": "subIssues" in todo, "withRefs": "timelineItems" in todo}
+            issue = (self._graphql(CHILDREN, variables).get("repository") or {}).get("issue")
+            if issue is None:
+                raise ProviderError(f"issue #{number} not found in {self.repo}")
+            for connection in list(todo):
+                page = issue[connection]
+                found[connection] += [n for n in page["nodes"] if n]
+                after[connection] = page["pageInfo"].get("endCursor")
+                if not page["pageInfo"]["hasNextPage"] or len(found[connection]) >= limit:
+                    todo.discard(connection)
+        sources = [event.get("source") or {} for event in found["timelineItems"]]
+        refs = {s["number"]: s for s in sources if s.get("number")
+                and (s.get("repository") or {}).get("nameWithOwner", "").lower() == self.repo.lower()}
+        labels = tuple(label["name"] for label in issue.get("labels", {}).get("nodes", []))
+        return (issue.get("url", ""), labels), found["subIssues"][:limit], list(refs.values())[:limit]
 
     def _map(self, number: int) -> tuple[str, tuple[str, ...]] | None:
         owner, name = self.repo.split("/", 1)

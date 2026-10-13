@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Protocol
 
-from ..model import Ticket, parse_blockers, part_of
+from ..model import Ticket, parse_blockers, part_of, wayfinder_kinds
 
 
 class ProviderError(RuntimeError):
@@ -163,3 +163,45 @@ def with_body_blockers(tickets: list[Ticket], states: IssueStates) -> list[Ticke
 def blocker_ref(number: int, repo: str, own_repo: str) -> str:
     """`#<n>` in this repo, `<owner>/<repo>#<n>` in another."""
     return f"#{number}" if not repo or repo.lower() == own_repo.lower() else f"{repo}#{number}"
+
+
+# How a map's spec and the spec's implementation tickets link back (`ticketmaster setup` pins them): the
+# spec's first line is `Part of #<map>`, an implementation ticket's `## Parent` section names the spec.
+_PARENT_SECTION = re.compile(r"^##\s*Parent\s*$(?P<text>.*?)(?=^#{1,2}\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
+
+
+def names_parent(body: str, parent: int) -> bool:
+    """The body's `## Parent` section refers to `#<parent>` or to the parent's issue URL."""
+    match = _PARENT_SECTION.search(body or "")
+    if match is None:
+        return False
+    text = match.group("text")
+    return mentions_parent(text, parent) or re.search(rf"/issues/{parent}\b", text) is not None
+
+
+def is_map(found: tuple[str, tuple[str, ...]] | None) -> bool:
+    return bool(found) and "map" in wayfinder_kinds(found[1])
+
+
+def is_spec(ticket: Ticket, map_number: int) -> bool:
+    """The spec a map led to: `Part of #<map>` and no `wayfinder:` label, so it is no decision ticket."""
+    return part_of(ticket.body) == map_number and not wayfinder_kinds(ticket.labels)
+
+
+def under_spec(tickets: list[Ticket], spec: Ticket) -> list[Ticket]:
+    return [with_map(t, spec.number, (spec.url, spec.labels)) for t in tickets]
+
+
+def map_family(tickets: list[Ticket], number: int, found: tuple[str, tuple[str, ...]] | None) -> list[Ticket]:
+    """For trackers without sub-issues: the parent's children (they mention `#<parent>`) and, when the
+    parent is a map, the implementation tickets of its spec (`## Parent` names the spec), parented to it."""
+    children = [t for t in tickets if t.number != number and mentions_parent(t.body, number)]
+    family = on_map_board(children, number, found)
+    if not is_map(found):
+        return family
+    taken = {number} | {t.number for t in children}
+    for spec in [t for t in children if is_spec(t, number)]:
+        linked = [t for t in tickets if t.number not in taken and names_parent(t.body, spec.number)]
+        taken |= {t.number for t in linked}
+        family += under_spec(linked, spec)
+    return family

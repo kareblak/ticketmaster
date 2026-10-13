@@ -406,7 +406,8 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     current = "parent" if query.parent else "--label" if query.label else "no filter"
     for name, rule in [
         ("no filter", "every open issue, and every issue closed in the last --done-days"),
-        ("parent", "the sub-issues of one issue, e.g. a wayfinder map (ticketmaster 42)"),
+        ("parent", "the sub-issues of one issue, e.g. a wayfinder map (ticketmaster 42),\n"
+                   + " " * 13 + "plus the spec linked to a map and the spec's implementation tickets"),
         ("--label", "issues with that label (ticketmaster --label NAME)"),
     ]:
         row(name, 9, rule + ("  ← this board" if name == current else ""))

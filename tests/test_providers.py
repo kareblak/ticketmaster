@@ -587,3 +587,140 @@ def test_gitea_delete_forbidden_is_a_provider_error(monkeypatch):
     monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
     with pytest.raises(ProviderError, match="403 Forbidden"):
         gitea.GiteaProvider("o/r", "codeberg.org", token="x").delete(4)
+
+
+def test_spec_is_part_of_the_map_without_a_wayfinder_label():
+    from ticketmaster.model import Ticket
+
+    def spec(body, labels=()):
+        return Ticket(number=3, title="Spec", url="u", is_open=True, body=body, labels=labels)
+
+    assert providers.is_spec(spec("Part of #5\n\n## Problem Statement", ("ready-for-agent",)), 5)
+    assert not providers.is_spec(spec("Part of #50"), 5)
+    assert not providers.is_spec(spec("Part of #5", ("wayfinder:task",)), 5)  # a decision ticket
+    assert not providers.is_spec(spec("Part of #5", ("wayfinder::grilling",)), 5)
+
+
+def test_implementation_ticket_names_its_spec_in_the_parent_section():
+    body = "## Parent\n\n#8\n\n## What to build\n\nSee #9."
+    assert providers.names_parent(body, 8)
+    assert not providers.names_parent(body, 9)  # mentioned, but outside ## Parent
+    assert providers.names_parent("## Parent\n\nhttps://gl/g/p/-/issues/8\n", 8)
+    assert not providers.names_parent("## Parent\n\n#80\n", 8)
+    assert not providers.names_parent("Part of #8", 8)
+
+
+# A map (#1) with a decision ticket (#2), the spec (#3) and its implementation tickets (#4, #5);
+# #6 mentions the map and #7 names another spec, so neither belongs to the spec.
+FAMILY = {
+    1: ("Map", "Notes", ["wayfinder:map"]),
+    2: ("Decide", "Part of #1", ["wayfinder:grilling"]),
+    3: ("Spec", "Part of #1\n\n## Problem Statement", ["ready-for-agent"]),
+    4: ("Slice A", "## Parent\n\n#3\n\n## What to build", ["ready-for-agent"]),
+    5: ("Slice B", "## Parent\n\n#3\n", []),
+    6: ("Aside", "see #1", []),
+    7: ("Elsewhere", "## Parent\n\n#30\n", []),
+}
+
+
+def assert_map_family(tickets, map_url, spec_url):
+    by_number = {t.number: t for t in tickets}
+    assert {2, 3, 4, 5} <= set(by_number) and 7 not in by_number and 1 not in by_number
+    assert (by_number[3].parent_number, by_number[3].parent_url, by_number[3].parent_labels) == (1, map_url, ("wayfinder:map",))
+    for n in (4, 5):
+        assert (by_number[n].parent_number, by_number[n].parent_url) == (3, spec_url)
+        assert by_number[n].parent_labels == ("ready-for-agent",)
+    assert by_number[2].is_wayfinder_ticket and not by_number[3].is_wayfinder_ticket
+    assert not by_number[4].is_wayfinder_ticket
+
+
+def test_gitlab_map_board_includes_the_spec_and_its_implementation_tickets(monkeypatch):
+    def node(iid):
+        title, body, labels = FAMILY[iid]
+        return {"iid": str(iid), "title": title, "webUrl": f"https://gl/{iid}", "description": body,
+                "state": "opened", "closedAt": None, "assignees": {"nodes": []},
+                "labels": {"nodes": [{"title": label} for label in labels]},
+                "blockedByCount": 0, "mergeRequestsCount": 0}
+
+    def fake_run_json(args, stdin=None):
+        variables = json.loads(stdin)["variables"]
+        if "iid" in variables:
+            issue = node(int(variables["iid"]))
+            return {"data": {"project": {"issue": {"webUrl": issue["webUrl"], "labels": issue["labels"]}}}}
+        nodes = [node(n) for n in FAMILY] if variables["state"] == "opened" else []
+        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
+
+    monkeypatch.setattr(gitlab, "run_json", fake_run_json)
+    assert_map_family(gitlab.GitLabProvider("g/p").fetch(Query(parent=1)), "https://gl/1", "https://gl/3")
+
+
+def test_gitea_map_board_includes_the_spec_and_its_implementation_tickets(monkeypatch):
+    def issue(n):
+        title, body, labels = FAMILY[n]
+        return {"number": n, "title": title, "html_url": f"https://gt/{n}", "body": body, "state": "open",
+                "assignees": [], "labels": [{"name": label} for label in labels]}
+
+    dependencies = []
+
+    def fake_get(self, path, params=None):
+        if path.endswith("/issues"):
+            return [issue(n) for n in FAMILY] if params["state"] == "open" else []
+        if path.endswith("/dependencies"):
+            dependencies.append(int(path.split("/")[-2]))
+            return []
+        if "/issues/" in path:
+            return issue(int(path.rsplit("/", 1)[-1]))
+        return []
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query(parent=1))
+    assert_map_family(tickets, "https://gt/1", "https://gt/3")
+    assert 7 not in dependencies and 1 not in dependencies  # blockers only for the board's tickets
+
+
+def family_node(n, parent=None, repo="o/r"):
+    title, body, labels = FAMILY[n]
+    node = {"number": n, "title": title, "url": f"https://gh/{n}", "body": body, "state": "OPEN",
+            "assignees": {"nodes": []}, "labels": {"nodes": [{"name": label} for label in labels]},
+            "repository": {"nameWithOwner": repo}}
+    if parent is not None:
+        node["parent"] = {"number": parent, "url": f"https://gh/{parent}",
+                          "labels": {"nodes": [{"name": label} for label in FAMILY[parent][2]]}}
+    return node
+
+
+def github_children(monkeypatch, sub_issues, references, labels_of=lambda n: FAMILY[n][2]):
+    asked = []
+
+    def fake_run_json(args, stdin=None):
+        number = json.loads(stdin)["variables"]["number"]
+        asked.append(number)
+        issue = {"url": f"https://gh/{number}", "labels": {"nodes": [{"name": label} for label in labels_of(number)]},
+                 "subIssues": {"pageInfo": {"hasNextPage": False}, "nodes": sub_issues.get(number, [])},
+                 "timelineItems": {"pageInfo": {"hasNextPage": False},
+                                   "nodes": [{"source": s} for s in references.get(number, [])] + [{"source": {}}]}}
+        return {"data": {"repository": {"issue": issue}}}
+
+    monkeypatch.setattr(github, "run_json", fake_run_json)
+    return asked
+
+
+def test_github_plain_parent_board_is_only_its_sub_issues(monkeypatch):
+    # The same family under an epic: no map, so no spec, and no query beyond the parent's own.
+    asked = github_children(monkeypatch, {1: [family_node(3, parent=1)]}, {1: [family_node(3)]},
+                            labels_of=lambda n: ("epic",))
+    tickets = github.GitHubProvider("o/r").fetch(Query(parent=1))
+    assert [t.number for t in tickets] == [3] and asked == [1]
+
+
+def test_github_map_board_includes_the_spec_and_its_implementation_tickets(monkeypatch):
+    # #2 is a native sub-issue of the map and #4 one of the spec; #3 and #5 link by body only,
+    # so GitHub reports them as cross-references; #6 and #8 (another repo) mention without linking.
+    sub_issues = {1: [family_node(2, parent=1)], 3: [family_node(4, parent=3)]}
+    references = {1: [family_node(3), family_node(6), family_node(2, parent=1)],
+                  3: [family_node(5), family_node(4, parent=3), {**family_node(5, repo="x/y"), "number": 8}]}
+    asked = github_children(monkeypatch, sub_issues, references)
+    tickets = github.GitHubProvider("o/r").fetch(Query(parent=1))
+    assert_map_family(tickets, "https://gh/1", "https://gh/3")
+    assert [t.number for t in tickets] == [2, 3, 4, 5]  # map order, then the spec, then its tickets
+    assert sorted(asked) == [1, 3]  # the decision ticket is not a spec, so its children are not asked for
