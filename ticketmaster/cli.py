@@ -135,7 +135,9 @@ def main(argv: list[str] | None = None) -> int:
         query,
         interval=args.interval,
         workbench=workbench,
-        describe_start=lambda ticket: build_prompt(ticket, workbench.wayfinder_command).splitlines()[0]
+        describe_start=lambda ticket: build_prompt(
+            ticket, workbench.wayfinder_command, workbench.implement_command
+        ).splitlines()[0]
         + f"\nworktree: issue-{ticket.number}, in its own herdr workspace",
         columns=args.columns,
         settings_path=settings_path(),

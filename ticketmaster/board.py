@@ -361,7 +361,8 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     for kind, prompt in [
         ("wayfinder map", "the wayfinder skill with the map's URL"),
         ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs"),
-        ("plain issue", "work on the issue, assigning it to yourself first"),
+        ("plain issue", "the implement skill with the ticket's URL, plus a brief: assign it to\n"
+                        + " " * 20 + "yourself first, implement, then push and open a PR that closes it"),
     ]:
         row(kind, 16, prompt)
     text.append("  c on a Review card does the same in a review-<n> worktree with the code-review skill\n"
