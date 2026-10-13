@@ -9,7 +9,7 @@ this session (tmux, Ghostty, iTerm2, WezTerm, kitty), or in a new tab or window 
 can't split:
 
 ```bash
-~/.claude/skills/ticketmaster/scripts/ticketmaster open $ARGUMENTS
+ticketmaster open $ARGUMENTS
 ```
 
 - No arguments: the user's open issues, unassigned open issues, and their issues closed in the last 7 days.
@@ -19,7 +19,8 @@ can't split:
 Then reply with the script's one-line result. If it printed a command because no terminal
 launcher worked, give the user that command to run in a pane of their own.
 
-If the script exits with "not installed", run the `install.sh` it names, then retry once.
+If `ticketmaster` is not found, tell the user to install it:
+`pipx install git+ssh://git@github.com/kareblak/ticketmaster.git` (pipx puts it in `~/.local/bin`).
 If it fails with a provider error (CLI missing or not logged in, unknown host), report the error
 as printed and the fix: `gh auth login`, `glab auth login`, `tea login add`, or a
 `.ticketmaster.toml` with `provider`/`host`/`repo` for self-hosted trackers.

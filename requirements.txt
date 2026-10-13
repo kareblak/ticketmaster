@@ -1,2 +1,0 @@
-textual>=0.80,<9
-pyyaml>=6

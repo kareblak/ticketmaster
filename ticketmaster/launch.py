@@ -46,8 +46,9 @@ class Launch:
     argv: list[str]
 
 
-def board_command(entrypoint: Path, args: list[str]) -> str:
-    return shlex.join([str(entrypoint), "board", *args])
+def board_command(args: list[str]) -> str:
+    """Re-runs this interpreter, so it works for pipx, editable and `python -m` installs alike."""
+    return shlex.join([sys.executable, "-m", "ticketmaster", "board", *args])
 
 
 def applescript_string(value: str) -> str:

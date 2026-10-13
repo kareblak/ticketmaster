@@ -12,19 +12,28 @@ Blocked (2)        Ready (3)          In progress (1)    Review (1)             
 
 ## Install
 
+Needs Python 3.11+ and [pipx](https://pipx.pypa.io) (`brew install pipx`), plus the CLI for your
+tracker (`gh`, `glab`, or a `tea` login for Gitea/Forgejo).
+
 ```bash
-git clone git@github.com:kareblak/ticketmaster.git ~/code/ticketmaster
-~/code/ticketmaster/install.sh
+pipx install git+ssh://git@github.com/kareblak/ticketmaster.git
+ticketmaster install-skill
 ```
 
-`install.sh` needs Python 3.11+. It creates `.venv/` with `textual` and `pyyaml`, symlinks
-`skills/ticketmaster` into `~/.claude/skills/` (so `/ticketmaster` works in every repo), and
-links `~/.local/bin/ticketmaster` when that directory exists.
+The first command puts `ticketmaster` on your PATH (`~/.local/bin`). The second writes the
+skill to `~/.claude/skills/ticketmaster/SKILL.md`, so `/ticketmaster` works in every Claude Code
+session started afterwards (`CLAUDE_SKILLS_DIR` overrides the location).
+
+Upgrade with `pipx reinstall ticketmaster && ticketmaster install-skill`. Uninstall with
+`pipx uninstall ticketmaster && rm -r ~/.claude/skills/ticketmaster`.
+
+For development, clone the repo and run `./install.sh`. It installs the clone as an editable
+pipx app (code changes apply without reinstalling) and installs the skill.
 
 ## Usage
 
 ```
-ticketmaster [open|board|snapshot] [parent] [--label NAME] [--repo OWNER/NAME]
+ticketmaster [open|board|snapshot|install-skill] [parent] [--label NAME] [--repo OWNER/NAME]
              [--provider github|gitlab|gitea|forgejo] [--host HOST]
              [--interval SECONDS] [--done-days DAYS] [--limit N]
 ```
@@ -37,6 +46,7 @@ ticketmaster [open|board|snapshot] [parent] [--label NAME] [--repo OWNER/NAME]
 With no command, `ticketmaster` runs `board` when started from a terminal and `open` otherwise
 (Claude Code's shell has no TTY, so `/ticketmaster` gets a split).
 | `snapshot` | prints every column once as plain text                    |
+| `install-skill` | writes the `/ticketmaster` skill into `~/.claude/skills` |
 
 Scope:
 
@@ -169,7 +179,7 @@ GitHub's GraphQL budget is 5,000 points an hour. The default board makes 3 searc
 ## Development
 
 ```bash
-.venv/bin/pip install pytest
+python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest
 ```
 

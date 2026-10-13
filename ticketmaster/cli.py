@@ -7,7 +7,6 @@ which has no TTY) opens it beside the caller.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -15,13 +14,13 @@ from .model import COLUMN_ORDER, build_board
 from .providers import ProviderError, Query
 
 
-COMMANDS = ("open", "board", "snapshot")
+COMMANDS = ("open", "board", "snapshot", "install-skill")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ticketmaster",
-        usage="ticketmaster [open|board|snapshot] [parent] [options]",
+        usage="ticketmaster [open|board|snapshot|install-skill] [parent] [options]",
         description="Live kanban board of issue-tracker work.",
     )
     parser.add_argument("parent", nargs="?", type=parse_number, help="parent issue: show its sub-issues")
@@ -63,6 +62,12 @@ def default_command() -> str:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     args.command = args.command or default_command()
+    if args.command == "install-skill":
+        from .install_skill import install_skill
+
+        path = install_skill()
+        print(f"Installed /ticketmaster skill at {path}. Restart Claude Code sessions to pick it up.")
+        return 0
     cwd = Path.cwd()
     from .config import resolve_provider
 
@@ -76,8 +81,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "open":
         from .launch import Placement, board_command, describe, open_beside
 
-        entrypoint = Path(os.environ.get("TICKETMASTER_BIN", sys.argv[0])).resolve()
-        command = board_command(entrypoint, passthrough(args))
+        command = board_command(passthrough(args))
         launch = open_beside(cwd, command, Placement.SPLIT_RIGHT)
         if launch:
             print(f"Board opened in {describe(launch)} for {provider.name}:{provider.repo}.")
