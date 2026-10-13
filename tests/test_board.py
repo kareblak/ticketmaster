@@ -13,9 +13,15 @@ class FakeProvider:
     name = "fake"
     repo = "o/r"
 
-    def __init__(self, tickets):
+    def __init__(self, tickets, login="me"):
         self.tickets = tickets
         self.calls = 0
+        self.login = login
+
+    def viewer(self):
+        if isinstance(self.login, Exception):
+            raise self.login
+        return self.login
 
     def fetch(self, query):
         self.calls += 1
@@ -137,8 +143,8 @@ class FakeBench:
 DONE = Ticket(number=4, title="Shipped", url="u4", is_open=False, closed_at=datetime.now(timezone.utc))
 
 
-def bench_app(bench, tickets=TICKETS):
-    return BoardApp(FakeProvider(tickets), Query(), interval=60, workbench=bench)
+def bench_app(bench, tickets=TICKETS, login="me"):
+    return BoardApp(FakeProvider(tickets, login), Query(), interval=60, workbench=bench)
 
 
 async def loaded(app, pilot):
@@ -164,6 +170,78 @@ def test_start_ready_ticket_after_confirm():
             assert bench.calls == [("start", 1)]
             card = app.query_one("#col-READY").query(Card).first()
             assert "starting" in str(card.render())
+
+    run(scenario())
+
+
+BLOCKED = Ticket(number=5, title="Waits", url="u5", is_open=True, blocked_by=("#1", "#9"), open_blockers=2)
+THEIRS = Ticket(number=6, title="Bob's", url="u6", is_open=True, assignees=("bob",))
+
+
+def test_s_and_enter_refuse_a_blocked_ticket_naming_its_blockers():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, [BLOCKED])
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down")
+            assert app.focused.ticket.number == 5
+            for key in ("s", "enter"):
+                await pilot.press(key)
+                await pilot.pause()
+                assert not is_confirm(app)
+            await loaded(app, pilot)
+            assert bench.calls == []
+            messages = [n.message for n in app._notifications]
+            assert messages.count("#5 is blocked by #1, #9") == 2
+
+    run(scenario())
+
+
+def test_s_and_enter_refuse_a_ticket_claimed_by_someone_else():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, [THEIRS])
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down")
+            assert app.focused.ticket.number == 6
+            await pilot.press("s")
+            await pilot.pause()
+            assert not is_confirm(app)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert not is_confirm(app) and bench.calls == []
+            assert [n.message for n in app._notifications].count("#6 is claimed by @bob") == 2
+
+    run(scenario())
+
+
+def test_own_claimed_ticket_still_starts():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, [THEIRS], login="Bob")
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "s")
+            await pilot.pause()
+            assert is_confirm(app)
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 6)]
+
+    run(scenario())
+
+
+def test_unknown_viewer_does_not_refuse_a_claimed_ticket():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, [THEIRS], login=ProviderError("gh: not logged in"))
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "s")
+            await pilot.pause()
+            assert is_confirm(app)
 
     run(scenario())
 

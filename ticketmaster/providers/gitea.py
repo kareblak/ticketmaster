@@ -1,7 +1,7 @@
 """Gitea and Forgejo via REST, reusing the login stored by the `tea` CLI.
 
 Token lookup order: GITEA_TOKEN / FORGEJO_TOKEN env vars, then the `tea` config login whose
-URL matches the repo host. Dependencies come from `/issues/{n}/dependencies`; there are no
+URL matches the repo host. Dependencies come from `/issues/{n}/dependencies` plus `Blocked by:` body lines; there are no
 sub-issues, so a parent board falls back to issues whose body mentions `#<parent>`. Open
 pull requests count as review when their body says `closes/fixes/resolves #<n>`.
 """
@@ -20,7 +20,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..model import Ticket, parse_time
-from . import ProviderError, Query, RateLimited, mentions_parent, tracker_error
+from . import (IssueStates, ProviderError, Query, RateLimited, blocker_ref, mentions_parent, tracker_error,
+               with_body_blockers)
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -34,6 +35,10 @@ class GiteaProvider:
         self.host = host
         self.base = f"{scheme}://{host}/api/v1"
         self.token = token or find_token(host)
+        self.states = IssueStates(self._issue_states)
+
+    def viewer(self) -> str | None:
+        return self._get("/user").get("login")
 
     def fetch(self, query: Query) -> list[Ticket]:
         since = datetime.now(timezone.utc) - timedelta(days=query.done_days)
@@ -61,16 +66,30 @@ class GiteaProvider:
                 replace(t, parent_number=query.parent, parent_url=parent["html_url"], parent_labels=labels)
                 for t in tickets
             ]
-        return tickets
+        return with_body_blockers(tickets, self.states)
 
-    def _open_blockers(self, number: int) -> int | None:
+    def _open_blockers(self, number: int) -> tuple[str, ...] | None:
         try:
             deps = self._get(f"/repos/{self.repo}/issues/{number}/dependencies")
         except RateLimited:
             raise
         except ProviderError:
             return None  # dependencies disabled for this repo
-        return sum(1 for d in deps if d.get("state") == "open")
+        return tuple(blocker_ref(d["number"], (d.get("repository") or {}).get("full_name", ""), self.repo)
+                     for d in deps if d.get("state") == "open")
+
+    def _issue_states(self, numbers: list[int]) -> dict[int, bool]:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            issues = pool.map(self._issue_or_none, numbers)
+        return {n: issue["state"] == "open" for n, issue in zip(numbers, issues) if issue}
+
+    def _issue_or_none(self, number: int) -> dict | None:
+        try:
+            return self._get(f"/repos/{self.repo}/issues/{number}")
+        except RateLimited:
+            raise
+        except ProviderError:
+            return None  # deleted, or no access
 
     def _list(self, path: str, params: dict, limit: int) -> list[dict]:
         items: list[dict] = []
@@ -100,7 +119,7 @@ class GiteaProvider:
 
 
 
-def to_ticket(issue: dict, open_blockers: int | None, pr_bodies: list[str]) -> Ticket:
+def to_ticket(issue: dict, blocked_by: tuple[str, ...] | None, pr_bodies: list[str]) -> Ticket:
     closing = re.compile(CLOSING.format(n=issue["number"]), re.IGNORECASE)
     is_open = issue["state"] == "open"
     return Ticket(
@@ -113,7 +132,8 @@ def to_ticket(issue: dict, open_blockers: int | None, pr_bodies: list[str]) -> T
         author=(issue.get("user") or {}).get("login", ""),
         assignees=tuple(a["login"] for a in issue.get("assignees") or []),
         labels=tuple(label["name"] for label in issue.get("labels") or []),
-        open_blockers=open_blockers,
+        open_blockers=None if blocked_by is None else len(blocked_by),
+        blocked_by=blocked_by or (),
         has_open_change_request=is_open and any(closing.search(body) for body in pr_bodies),
         order=0,
     )
