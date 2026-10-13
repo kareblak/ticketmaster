@@ -2,10 +2,11 @@ import json
 import asyncio
 from datetime import datetime, timezone
 
-from ticketmaster.board import BoardApp, Card, FilterPicker, HelpScreen, PickerOption, passes_authors, passes_labels, tag_style
+from ticketmaster.board import (BoardApp, Card, FilterPicker, HelpScreen, Pacer, PickerOption, passes_authors,
+                               passes_labels, tag_style)
 from ticketmaster.herdr import Session
 from ticketmaster.model import Ticket
-from ticketmaster.providers import ProviderError, Query
+from ticketmaster.providers import ProviderError, Query, RateLimited
 
 
 class FakeProvider:
@@ -560,6 +561,108 @@ def test_clicking_a_picker_option_cycles_that_option(tmp_path):
     run(scenario())
 
 
+def test_pacer_backs_off_to_a_minute_and_sessions_to_ten_seconds():
+    pacer = Pacer(5, now=0)
+    assert pacer.due(0) == (True, True)
+    pacer.started(0, tickets=True)
+    pacer.fetched(1, ok=False, rate_limited=True)
+    assert pacer.limited and not pacer.stuck and pacer.wait(1) == 60
+    assert pacer.due(5) == (False, True)  # sessions were last fetched with the tickets at 0
+    pacer.started(5, tickets=False)
+    assert pacer.due(14) == (False, False) and pacer.due(15) == (False, True)
+    assert pacer.due(61) == (True, True)
+
+
+def test_pacer_recovers_once_then_stays_slow_until_restart():
+    pacer = Pacer(5, now=0)
+    pacer.started(0, tickets=True)
+    pacer.fetched(1, ok=False, rate_limited=True)
+    pacer.started(61, tickets=True)
+    pacer.fetched(62, ok=False, rate_limited=True)  # still limited on the minute-poll: not yet recovered
+    assert pacer.limited and not pacer.stuck
+    pacer.started(122, tickets=True)
+    pacer.fetched(123, ok=True, rate_limited=False)
+    assert not pacer.limited and pacer.due(128) == (True, True)  # normal interval again
+    pacer.started(128, tickets=True)
+    pacer.fetched(128, ok=False, rate_limited=True)
+    assert pacer.limited and pacer.stuck
+    pacer.started(188, tickets=True)
+    pacer.fetched(189, ok=True, rate_limited=False)
+    assert pacer.limited and pacer.due(197) == (False, False) and pacer.due(198) == (False, True)
+    assert pacer.due(248) == (True, True)
+
+
+def test_pacer_other_errors_keep_the_interval():
+    pacer = Pacer(5, now=0)
+    pacer.started(0, tickets=True)
+    pacer.fetched(1, ok=False, rate_limited=False)
+    assert not pacer.limited and pacer.due(5) == (True, True)
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+class SequenceProvider(FakeProvider):
+    """Answers each fetch with the next outcome: tickets, or an exception to raise."""
+
+    def __init__(self, outcomes):
+        super().__init__(TICKETS)
+        self.outcomes = list(outcomes)
+
+    def fetch(self, query):
+        self.calls += 1
+        outcome = self.outcomes.pop(0) if self.outcomes else TICKETS
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+
+def test_rate_limit_backs_off_shows_countdown_and_r_does_not_bypass():
+    async def scenario():
+        clock, bench = Clock(), FakeBench()
+        bench_calls = []
+        bench.sessions = lambda: bench_calls.append(clock.now) or {}
+        provider = SequenceProvider([TICKETS, RateLimited("gh: API rate limit exceeded"), TICKETS,
+                                     RateLimited("gh: You have exceeded a secondary rate limit")])
+        app = BoardApp(provider, Query(), interval=5, workbench=bench, clock=clock)
+
+        async def tick(seconds):
+            clock.now += seconds
+            app.tick()
+            await loaded(app, pilot)
+
+        def status():
+            return str(app.query_one("#status").render())
+
+        async with app.run_test(size=(200, 30)) as pilot:
+            await loaded(app, pilot)
+            assert provider.calls == 1 and "every 5s" in status()
+            await tick(5)
+            assert provider.calls == 2 and "rate-limited · next fetch in 60s" in status() and "⚠" not in status()
+            await tick(10)
+            await tick(8)
+            assert "next fetch in 42s" in status()
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert provider.calls == 2  # r refreshes sessions only
+            assert bench_calls[-3:] == [1005.0, 1015.0, 1023.0]  # every 10s, plus r
+            await tick(42)
+            assert provider.calls == 3 and "rate-limited" not in status() and "every 5s" in status()
+            await tick(5)
+            assert provider.calls == 4 and "once a minute until restart · next fetch in 60s" in status()
+            await tick(60)
+            assert provider.calls == 5 and "once a minute until restart" in status()
+            await tick(5)
+            assert provider.calls == 5
+
+    run(scenario())
+
+
 def status_of(app):
     return str(app.query_one("#status").render())
 
@@ -588,6 +691,23 @@ def test_missing_doc_warning_also_names_ticketmaster_setup(tmp_path):
         async with app.run_test(size=(240, 40)) as pilot:
             await loaded(app, pilot)
             assert "/setup-matt-pocock-skills, then ticketmaster setup" in status_of(app)
+
+    run(scenario())
+
+
+def test_non_rate_limit_error_keeps_the_interval():
+    async def scenario():
+        clock = Clock()
+        provider = SequenceProvider([ProviderError("gh: boom"), TICKETS])
+        app = BoardApp(provider, Query(), interval=5, clock=clock)
+        async with app.run_test(size=(160, 30)) as pilot:
+            await loaded(app, pilot)
+            status = str(app.query_one("#status").render())
+            assert "⚠ gh: boom" in status and "rate-limited" not in status
+            clock.now += 5
+            app.tick()
+            await loaded(app, pilot)
+            assert provider.calls == 2
 
     run(scenario())
 

@@ -213,6 +213,12 @@ whose body mentions `#<parent>`.
 GitHub's GraphQL budget is 5,000 points an hour. Every board makes 2 searches per refresh
 (about 1,500 an hour at 5s), so lengthen `--interval` if you run several boards at once.
 
+When the tracker rate-limits the board (GitHub's primary or secondary limit, or an HTTP 429 from
+GitLab or Gitea/Forgejo), ticket fetches drop to once a minute and herdr session states to every
+10s; the status line shows `rate-limited · next fetch in 42s`, and `r` refreshes only the sessions.
+The first good fetch restores `--interval`, once: a second rate limit keeps the board at once a
+minute until you restart it.
+
 ## Development
 
 ```bash
