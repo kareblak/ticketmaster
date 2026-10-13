@@ -136,7 +136,7 @@ Each issue lands in the first column whose rule matches:
 Review types are tags, not columns: an issue labelled `review:security` and `review:ux` shows
 one card in Review with a red `security` chip and a magenta `ux` chip. Cards show the issue
 number and title, the first ~90 characters (about two card lines) of the body (the `## Question` section when the
-issue has one, as wayfinder tickets do), review tags, up to three other labels and assignees.
+issue has one, as wayfinder tickets do), review tags, up to three other labels, the author (`by <login>`) and assignees.
 
 Ready and In progress sort by parent order (sub-issue position), then issue number. Done sorts
 newest first.

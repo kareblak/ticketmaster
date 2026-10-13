@@ -25,7 +25,7 @@ class FakeProvider:
 
 TICKETS = [
     Ticket(number=1, title="Ready one", url="u1", is_open=True, body="## Question\nWhat now?"),
-    Ticket(number=2, title="Doing", url="u2", is_open=True, assignees=("me",)),
+    Ticket(number=2, title="Doing", url="u2", is_open=True, author="alice", assignees=("me",)),
     Ticket(number=3, title="Reviewing", url="u3", is_open=True, labels=("review:security", "review:ux")),
 ]
 
@@ -72,6 +72,21 @@ def test_filter_and_refresh_keeps_focus():
             await pilot.press("escape")
             await pilot.pause()
             assert len(app.query(Card)) == 3
+
+    run(scenario())
+
+
+def test_card_shows_author_and_filter_matches_it():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            doing = app.query_one("#col-IN_PROGRESS").query(Card).first()
+            assert "by alice" in str(doing.render())
+            await pilot.press("slash", *"alice", "enter")
+            await pilot.pause()
+            assert [c.ticket.number for c in app.query(Card)] == [2]
 
     run(scenario())
 

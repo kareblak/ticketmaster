@@ -10,6 +10,7 @@ from . import ProviderError, Query, run_json
 
 ISSUE_FIELDS = """
   number title url body state closedAt
+  author { login }
   assignees(first: 10) { nodes { login } }
   labels(first: 30) { nodes { name } }
   issueDependenciesSummary { blockedBy }
@@ -101,6 +102,7 @@ def to_ticket(node: dict, order: int) -> Ticket:
         body=node.get("body") or "",
         is_open=node["state"] == "OPEN",
         closed_at=parse_time(node.get("closedAt")),
+        author=(node.get("author") or {}).get("login", ""),
         assignees=tuple(a["login"] for a in node["assignees"]["nodes"]),
         labels=tuple(label["name"] for label in node["labels"]["nodes"]),
         open_blockers=deps.get("blockedBy"),

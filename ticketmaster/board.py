@@ -80,6 +80,8 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         chips.append(f"⛔ {ticket.open_blockers} ", style="red")
     for label in ticket.other_labels[:3]:
         chips.append(f"[{label}] ", style="grey62")
+    if ticket.author:
+        chips.append(f"by {ticket.author} ", style="grey62")
     if ticket.assignees:
         chips.append(" ".join("@" + a for a in ticket.assignees), style="italic cyan")
     if chips.plain:
@@ -91,7 +93,7 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
 def matches(ticket: Ticket, needle: str) -> bool:
     if not needle:
         return True
-    haystack = " ".join([str(ticket.number), ticket.title, ticket.body, *ticket.labels, *ticket.assignees]).lower()
+    haystack = " ".join([str(ticket.number), ticket.title, ticket.body, ticket.author, *ticket.labels, *ticket.assignees]).lower()
     return all(word in haystack for word in needle.lower().split())
 
 
@@ -337,7 +339,7 @@ class BoardApp(App):
                 with Vertical(classes="column", id=f"column-{column.name}"):
                     yield Static(column.value, classes="column-title", id=f"title-{column.name}")
                     yield ColumnScroll(id=f"col-{column.name}")
-        yield Input(placeholder="filter: words match title, body, labels, assignees · esc clears", id="filter")
+        yield Input(placeholder="filter: words match title, body, author, labels, assignees · esc clears", id="filter")
         yield Footer()
 
     def on_mount(self) -> None:

@@ -32,6 +32,8 @@ class Ticket:
     is_open: bool
     body: str = ""
     closed_at: datetime | None = None
+    # Login/username of whoever opened the issue; empty when the provider did not say.
+    author: str = ""
     assignees: tuple[str, ...] = ()
     labels: tuple[str, ...] = ()
     # Open issues blocking this one; None when the provider cannot tell.

@@ -106,6 +106,7 @@ def to_ticket(issue: dict, open_blockers: int | None, pr_bodies: list[str]) -> T
         body=issue.get("body") or "",
         is_open=is_open,
         closed_at=parse_time(issue.get("closed_at")),
+        author=(issue.get("user") or {}).get("login", ""),
         assignees=tuple(a["login"] for a in issue.get("assignees") or []),
         labels=tuple(label["name"] for label in issue.get("labels") or []),
         open_blockers=open_blockers,
