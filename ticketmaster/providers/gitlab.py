@@ -32,7 +32,6 @@ query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
 }
 """
 
-ME = "query { currentUser { username } }"
 
 PARENT = """
 query($path: ID!, $iid: String!) {
@@ -50,19 +49,11 @@ class GitLabProvider:
 
     def fetch(self, query: Query) -> list[Ticket]:
         closed_after = (datetime.now(timezone.utc) - timedelta(days=query.done_days)).isoformat()
-        if query.parent is not None or query.label:
-            labels = [query.label] if query.label else None
-            filters = [
-                {"state": "opened", "labels": labels},
-                {"state": "closed", "closedAfter": closed_after, "labels": labels},
-            ]
-        else:
-            me = self._graphql(ME, {})["currentUser"]["username"]
-            filters = [
-                {"state": "opened", "assignees": [me]},
-                {"state": "opened", "wildcard": "NONE"},
-                {"state": "closed", "closedAfter": closed_after, "assignees": [me]},
-            ]
+        labels = [query.label] if query.label else None
+        filters = [
+            {"state": "opened", "labels": labels},
+            {"state": "closed", "closedAfter": closed_after, "labels": labels},
+        ]
         seen: dict[int, Ticket] = {}
         for variables in filters:
             for node in self._issues(variables, query.limit):

@@ -53,14 +53,8 @@ class GitHubProvider:
         since = (datetime.now(timezone.utc) - timedelta(days=query.done_days)).date().isoformat()
         base = f"repo:{self.repo} is:issue"
         if query.label:
-            label = f'label:"{query.label}"'
-            searches = [f"{base} is:open {label}", f"{base} is:closed closed:>={since} {label}"]
-        else:
-            searches = [
-                f"{base} is:open assignee:@me",
-                f"{base} is:open no:assignee",
-                f"{base} is:closed closed:>={since} assignee:@me",
-            ]
+            base += f' label:"{query.label}"'
+        searches = [f"{base} is:open", f"{base} is:closed closed:>={since}"]
         seen: dict[int, Ticket] = {}
         for q in searches:
             for node in self._paginate(SEARCH, {"q": q}, ["search"], query.limit):

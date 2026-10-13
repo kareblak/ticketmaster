@@ -1,30 +1,35 @@
 # ticketmaster
 
-A live terminal kanban board of issue-tracker work, packaged as a Claude Code skill. Run
-`/ticketmaster` in Claude Code and the board opens in a split pane beside the session; run
-`ticketmaster` in a shell and it takes over that pane. It refreshes every 5 seconds.
+A live kanban board of issue-tracker work for [herdr](https://herdr.dev), packaged as a Claude
+Code skill. Run `/ticketmaster` in a Claude session inside herdr and the board opens in a pane
+beside it. Every ticket you start gets its own git worktree, opened as a herdr workspace with
+Claude running in it as a herdr agent, and each card shows what that agent is doing. It
+refreshes every 5 seconds.
 
 ```
-Blocked (2)        Ready (3)          In progress (1)    Review (1)               Done (2)
-#12 Cache layer    #14 Pick a queue   #11 Auth flow      #9 Login page            #8 Schema
-  ⛔ 1               Should we use…     @kare              [security] [ux] @kare
+‹ 1 Blocked 0 ·  2 Ready 3  · 3 In progress 2 · 4 Review 1 · 5 Done 2 ›
+#14 Pick a queue                     ● working issue-11
+  Should we use…                     #11 Auth flow  @kare
 ```
 
 ## Install
 
-Needs Python 3.11+ and [pipx](https://pipx.pypa.io) (`brew install pipx`), plus the CLI for your
-tracker (`gh`, `glab`, or a `tea` login for Gitea/Forgejo).
+Needs [herdr](https://herdr.dev), Python 3.11+, [pipx](https://pipx.pypa.io)
+(`brew install pipx`), Claude Code, and the CLI for your tracker (`gh`, `glab`, or a `tea` login
+for Gitea/Forgejo). On each machine:
 
 ```bash
-pipx install git+ssh://git@github.com/kareblak/ticketmaster.git
+pipx install git+https://github.com/kareblak/ticketmaster.git
 ticketmaster install-skill
 ```
 
 The first command puts `ticketmaster` on your PATH (`~/.local/bin`). The second writes the
 skill to `~/.claude/skills/ticketmaster/SKILL.md`, so `/ticketmaster` works in every Claude Code
-session started afterwards (`CLAUDE_SKILLS_DIR` overrides the location).
+session started afterwards, in any repo (`CLAUDE_SKILLS_DIR` overrides the location). Nothing is
+installed per project: the board reads the repo it is started in.
 
-Upgrade with `pipx reinstall ticketmaster && ticketmaster install-skill`. Uninstall with
+Upgrade with `pipx install --force git+https://github.com/kareblak/ticketmaster.git && ticketmaster install-skill`
+(append `@<branch>` or `@<tag>` to the URL to pin a version). Uninstall with
 `pipx uninstall ticketmaster && rm -r ~/.claude/skills/ticketmaster`.
 
 For development, clone the repo and run `./install.sh`. It installs the clone as an editable
@@ -33,44 +38,53 @@ pipx app (code changes apply without reinstalling) and installs the skill.
 ## Usage
 
 ```
-ticketmaster [open|board|snapshot|install-skill] [parent] [--label NAME] [--repo OWNER/NAME]
-             [--provider github|gitlab|gitea|forgejo] [--host HOST]
+ticketmaster [open|snapshot|adopt|install-skill] [parent] [--label NAME] [--repo OWNER/NAME]
+             [--provider github|gitlab|gitea|forgejo] [--host HOST] [--columns auto|one|all]
              [--interval SECONDS] [--done-days DAYS] [--limit N]
 ```
 
-| Command    | Effect                                                    |
-| ---------- | --------------------------------------------------------- |
-| `open`     | opens the board beside the caller: split pane, else tab, else window |
-| `board`    | runs the board in the current terminal                    |
+| Command         | Effect                                                                         |
+| --------------- | ------------------------------------------------------------------------------ |
+| `open` (default)| opens the board in a herdr pane right of the caller, labelled `ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there |
+| `adopt`         | opens a herdr workspace for every `.claude/worktrees/*` checkout without one   |
+| `snapshot`      | prints every column once as plain text (works outside herdr)                   |
+| `install-skill` | writes the `/ticketmaster` skill into `~/.claude/skills`                       |
 
-With no command, `ticketmaster` runs `board` when started from a terminal and `open` otherwise
-(Claude Code's shell has no TTY, so `/ticketmaster` gets a split).
-| `snapshot` | prints every column once as plain text                    |
-| `install-skill` | writes the `/ticketmaster` skill into `~/.claude/skills` |
+`open` and `adopt` only run inside herdr (`HERDR_ENV=1`).
 
 Scope:
 
-- no filter: your open issues, unassigned open issues, and your recently closed issues
+- no filter: every open issue, and every issue closed within `--done-days`
 - `parent` (`42`, `#42` or an issue URL): the parent's sub-issues, e.g. a wayfinder map
 - `--label NAME`: issues with that label
 
-Keys: arrows or `hjkl` move between cards (or click one), `Enter` opens the issue in the
-browser, `s` or a double-click starts a session on it (see below), `/` filters (every word must
-match title, body, labels or assignees), `Esc` clears the filter, `r` refreshes now, `?` shows
-help (keys, columns, scope and session starting), `q` quits.
+The board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
+switch columns, `1`–`5` jump to one, `v` shows all side by side (`--columns` sets the start).
 
-## Starting work from the board
+## Keys
 
-Select a card in **Ready** and press `s` or double-click it. The board asks where to open the
-session: `t` new tab, `r` pane to the right, `d` pane below, `a` auto layout (`n` or `Esc`
-cancels). It runs:
+| Key            | Column            | Effect                                                              |
+| -------------- | ----------------- | ------------------------------------------------------------------- |
+| `Enter` / double-click | any       | go to the ticket's herdr workspace; with none: start (Ready, In progress) or review (Review) |
+| `s`            | all but Done      | start the ticket in a **new** worktree (always new; asks first)     |
+| `c`            | Review            | start a review session in a new `review-<n>` worktree               |
+| `x`            | Done              | remove the ticket's worktrees (herdr refuses if one has uncommitted changes) |
+| `a`            | any               | toggle auto-remove of Done tickets' worktrees (see below; saved)    |
+| `o`            | any               | open the issue in the browser                                       |
+| `/` `Esc` `r` `q` |                | filter, clear filter, refresh now, quit                             |
+| `?`            | any               | help: keys, columns, scope and how sessions start                   |
+
+Arrows or `hjkl` move between cards.
+
+## Sessions in herdr
+
+Starting a ticket runs `herdr worktree create --branch issue-<n>` (or `issue-<n>-2`, `-3`… when
+that branch already exists, so a start never reuses an old checkout), then starts Claude in the
+new workspace as herdr agent `issue-<n>`:
 
 ```
-claude -w issue-<n> -n "#<n> <title>" "<prompt>"
+claude -n "#<n> <title>" "<prompt>"
 ```
-
-so the session gets its own git worktree (`.claude/worktrees/issue-<n>`) and a recognizable
-name. The prompt depends on the ticket:
 
 | Ticket                                                        | Prompt                                         |
 | ------------------------------------------------------------- | ---------------------------------------------- |
@@ -78,53 +92,34 @@ name. The prompt depends on the ticket:
 | has a `wayfinder:<type>` label and its parent is a map        | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
 | anything else                                                 | "Work on issue #n … assign it to yourself before doing any work" |
 
+A review session (`c`) gets a `review-<n>` worktree and a prompt to check out the PR that closes
+the issue and review it, without pushing or commenting.
+
+The board finds a ticket's sessions through its worktrees: any checkout named `issue-<n>`,
+`issue-<n>-<k>` or `review-<n>`, including older `claude -w issue-<n>` ones under
+`.claude/worktrees`. Each card lists them with the state of the agent in their workspace:
+`● working`, `⚠ needs you`, `◌ idle`, `✓ done`, or `○ no agent` when the workspace is closed or
+Claude has exited. `Enter` on such a card focuses the workspace, reopening it and resuming
+Claude with `claude --continue` when needed.
+
+With auto-remove on (`a` toggles it; the status line shows `auto-remove on`), the board cleans
+up by itself: when a ticket is in Done, each of its worktrees is removed as `x` would, once its
+agent is no longer `working` or `needs you`. A worktree is kept, with a notification saying why, when it has uncommitted changes
+or commits that are on no remote (`git rev-list HEAD --not --remotes`). A squash-merged branch
+whose remote branch was deleted counts as unpushed, so remove that one with `x`. The board tries
+each worktree once per run; a kept one is retried after the board restarts. The setting is
+saved per user in `$XDG_CONFIG_HOME/ticketmaster/settings.json` (`~/.config/…`), so it applies to
+every board until toggled off.
+
 The board never writes to the tracker: wayfinder claims its tickets by assigning them, and the
 plain prompt tells the session to do the same, so the card moves to In progress on the next
-refresh. Until then it shows "▶ session started", and the board refuses to start the same
-ticket twice. Only Ready tickets can be started.
-
-## Terminal support
-
-| Terminal        | Split (board, `r`/`d`)         | Tab (`t`)                |
-| --------------- | ------------------------------ | ------------------------ |
-| tmux (any host) | `split-window -h`              | `new-window`             |
-| Ghostty 1.3+ (macOS) | AppleScript split of the focused pane | AppleScript new tab |
-| iTerm2          | split current session          | new tab                  |
-| WezTerm         | `wezterm cli split-pane`       | `wezterm cli spawn`      |
-| kitty           | `kitty @ launch` vsplit (needs `allow_remote_control`) | `--type=tab` |
-| Terminal.app    | new window                     | new window (no tab API)  |
-| gnome-terminal  | new tab                        | `--tab`                  |
-| others (Linux)  | new window (ghostty, konsole, x-terminal-emulator) | new window |
-
-tmux is checked first, so inside tmux everything opens as tmux panes and windows regardless of
-the host terminal. Ghostty splits the focused pane of its front window: the pane you typed `/ticketmaster` in,
-or the board itself when starting a session. Where a terminal can't split, `r`/`d` fall back to
-a tab, then a window.
-
-### Auto layout (`a`, Ghostty on macOS)
-
-Sessions are tiled in the board's tab as a two-row grid, with the board fixed top-left:
-
-```
-1 session    2            3            4                5
-B | 1        B | 1        B | 1        B | 1 | 4        B | 1 | 4
-             2 |          2 | 3        2 | 3            2 | 3 | 5
-```
-
-Ghostty can only split one pane at a time, so the order is fixed: session 1 splits the board
-right, 2 splits the board down, 3 splits session 1 down, then new sessions alternate between
-extending the top and bottom rows to the right. Each split is followed by `equalize_splits`.
-The board remembers which panes it placed; if you close one, the next session starts the
-layout again from the board. Outside Ghostty (or inside tmux), `a` behaves like `r`.
+refresh.
 
 Settings in `.ticketmaster.toml`:
 
 ```toml
-worktree = false                          # start sessions in the repo root, no `-w`
 wayfinder_command = "/wayfinder"          # if wayfinder is installed under another name
 ```
-
-`--no-worktree` does the same as `worktree = false` for one run.
 
 ## Columns
 
@@ -174,8 +169,8 @@ Where a provider lacks a feature, the board falls back: no dependency support me
 `blocked` label marks an issue Blocked, and no sub-issues means a parent board shows issues
 whose body mentions `#<parent>`.
 
-GitHub's GraphQL budget is 5,000 points an hour. The default board makes 3 searches per refresh
-(about 2,200 an hour at 5s), so lengthen `--interval` if you run several boards at once.
+GitHub's GraphQL budget is 5,000 points an hour. Every board makes 2 searches per refresh
+(about 1,500 an hour at 5s), so lengthen `--interval` if you run several boards at once.
 
 ## Development
 

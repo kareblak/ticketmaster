@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import subprocess
 import tomllib
@@ -46,6 +48,23 @@ def load_config(cwd: Path) -> dict:
         if (directory / ".git").exists():
             break
     return {}
+
+
+def settings_path() -> Path:
+    """Per-user board settings changed from inside the board, e.g. auto-remove."""
+    return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ticketmaster" / "settings.json"
+
+
+def load_settings(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(path: Path, settings: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings, indent=2) + "\n")
 
 
 def git_remote(cwd: Path, name: str) -> str:
