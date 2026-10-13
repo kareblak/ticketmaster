@@ -303,7 +303,7 @@ class FilterPicker(ModalScreen[None]):
 KEY_DETAILS = {
     "primary": "go to the ticket's herdr workspace; with none, start it (Ready, In progress) or review it (Review)",
     "start": "start the ticket in a new issue-<n> worktree, even when it already has one",
-    "review": "on a Review card, a review-<n> worktree where Claude checks out the PR and reviews it",
+    "review": "on a Review card, a review-<n> worktree where Claude checks out the PR and runs the code-review skill",
     "remove": "on a Done card, remove its worktrees (herdr refuses if one has uncommitted changes)",
     "toggle_auto_remove": "remove Done tickets' worktrees once their agent is idle; unpushed work is kept",
     "open": "open the issue in the browser",
@@ -368,9 +368,13 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     for kind, prompt in [
         ("wayfinder map", "the wayfinder skill with the map's URL"),
         ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs"),
-        ("plain issue", "work on the issue, assigning it to yourself first"),
+        ("plain issue", "the implement skill with the ticket's URL, plus a brief: assign it to\n"
+                        + " " * 20 + "yourself first, implement, then push and open a PR that closes it"),
     ]:
         row(kind, 16, prompt)
+    text.append("  c on a Review card does the same in a review-<n> worktree with the code-review skill\n"
+                "  (review_command in .ticketmaster.toml): check out the PR that closes the issue, review\n"
+                "  it from the PR's base branch against the issue, and report in the session only.\n")
     text.append(f"  Those skills need the repo set up once with {SETUP_COMMAND} (it writes\n"
                 f"  {SETUP_DOC}); without it a session stops to ask, so the status line warns.\n")
 
@@ -751,7 +755,7 @@ class BoardApp(App):
                 self._run(lambda: self.workbench.review(ticket))
 
         self.push_screen(Confirm(f"Review #{ticket.number} {ticket.title} in a new worktree?",
-                                 f"worktree: review-{ticket.number}; Claude checks out the PR and reviews it", "Review"),
+                                 f"worktree: review-{ticket.number}; Claude checks out the PR and runs the code-review skill", "Review"),
                          confirmed)
 
     def action_remove(self) -> None:

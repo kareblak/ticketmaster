@@ -127,16 +127,17 @@ def main(argv: list[str] | None = None) -> int:
 
     from .board import BoardApp
     from .config import load_config, settings_path
-    from .start import DEFAULT_WAYFINDER_COMMAND, Workbench, build_prompt
+    from .start import build_prompt, workbench_for
 
-    config = load_config(cwd)
-    workbench = Workbench(cwd, wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND))
+    workbench = workbench_for(cwd, load_config(cwd))
     BoardApp(
         provider,
         query,
         interval=args.interval,
         workbench=workbench,
-        describe_start=lambda ticket: build_prompt(ticket, workbench.wayfinder_command).splitlines()[0]
+        describe_start=lambda ticket: build_prompt(
+            ticket, workbench.wayfinder_command, workbench.implement_command
+        ).splitlines()[0]
         + f"\nworktree: issue-{ticket.number}, in its own herdr workspace",
         columns=args.columns,
         settings_path=settings_path(),

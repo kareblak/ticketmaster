@@ -91,15 +91,17 @@ claude -n "#<n> <title>" "<prompt>"
 | ------------------------------------------------------------- | ---------------------------------------------- |
 | a wayfinder map (`wayfinder:map`)                             | `/mattpocock-skills:wayfinder <map-url>`        |
 | has a `wayfinder:<type>` label and its parent is a map        | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
-| anything else                                                 | "Work on issue #n … assign it to yourself before doing any work" |
+| anything else                                                 | `/mattpocock-skills:implement <ticket-url>` plus a brief: assign it to yourself first, implement via the skill, then push and open a ready PR that closes it (body via the `pr` skill) |
 
 The mattpocock skills a session runs stop to ask for `/setup-matt-pocock-skills` when the repo
 has no `docs/agents/issue-tracker.md`, which would leave the session waiting. Until that file
 exists, the status line warns and names the command, so it can be run once before starting
 sessions. The board checks again on every refresh, and `s` and `c` still work while the warning shows.
 
-A review session (`c`) gets a `review-<n>` worktree and a prompt to check out the PR that closes
-the issue and review it, without pushing or commenting.
+A review session (`c`) gets a `review-<n>` worktree and starts `/mattpocock-skills:code-review`
+the same way: the prompt tells it to find the PR that closes the issue, check out its branch, and
+review it with the PR's base branch (e.g. `origin/main`) as the fixed point and the issue URL as
+the spec. Findings stay in the session; it does not push or comment on the PR without asking.
 
 The board finds a ticket's sessions through its worktrees: any checkout named `issue-<n>`,
 `issue-<n>-<k>` or `review-<n>`, including older `claude -w issue-<n>` ones under
@@ -129,13 +131,15 @@ until it comes back. This filters what the board shows, unlike
 `--label`, which scopes the query.
 
 The board never writes to the tracker: wayfinder claims its tickets by assigning them, and the
-plain prompt tells the session to do the same, so the card moves to In progress on the next
+implement prompt tells the session to do the same, so the card moves to In progress on the next
 refresh.
 
 Settings in `.ticketmaster.toml`:
 
 ```toml
 wayfinder_command = "/wayfinder"          # if wayfinder is installed under another name
+implement_command = "/implement"          # default /mattpocock-skills:implement (plain tickets)
+review_command = "/code-review"           # default /mattpocock-skills:code-review
 ```
 
 ## Columns
