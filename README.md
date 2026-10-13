@@ -59,7 +59,8 @@ ticketmaster [open|snapshot|adopt|setup|install-skill|upgrade] [parent] [--label
 Scope:
 
 - no filter: every open issue, and every issue closed within `--done-days`
-- `parent` (`42`, `#42` or an issue URL): the parent's sub-issues, e.g. a wayfinder map
+- `parent` (`42`, `#42` or an issue URL): the parent's sub-issues, e.g. a wayfinder map; for a map,
+  also the spec linked to it and that spec's implementation tickets (see [Wayfinding rules](#wayfinding-rules))
 - `--label NAME`: issues with that label
 
 The board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
@@ -70,11 +71,12 @@ switch columns, `1`–`5` jump to one, `v` shows all side by side (`--columns` s
 | Key            | Column            | Effect                                                              |
 | -------------- | ----------------- | ------------------------------------------------------------------- |
 | `Enter` / double-click | any       | go to the ticket's herdr workspace; with none: start (Ready, In progress) or review (Review) |
-| `s`            | all but Done      | start the ticket in a **new** worktree (always new; asks first)     |
-| `c`            | Review            | start a review session in a new `review-<n>` worktree               |
+| `s`            | all but Done      | start the ticket in a **new** worktree (always new; asks first); refused while it is blocked, assigned to someone else, or held by a triage label (see below) |
+| `c`            | Review            | start a review session in a new `review-<n>` worktree; never for wayfinder tickets |
 | `x`            | Done              | remove the ticket's worktrees (herdr refuses if one has uncommitted changes) |
 | `a`            | any               | toggle auto-remove of Done tickets' worktrees (see below; saved)    |
 | `o`            | any               | open the issue in the browser                                       |
+| `Backspace` `Delete` | Blocked, Ready, Done | delete the issue from the tracker (asks first; cannot be undone; its worktrees are left behind) |
 | `/` `Esc` `r` `q` |                | filter, clear both filters, refresh now, quit                       |
 | `f`            | any               | filter picker: labels cycle include → exclude → off, authors on/off (see below; saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
@@ -93,14 +95,28 @@ claude -n "#<n> <title>" "<prompt>"
 
 | Ticket                                                        | Prompt                                         |
 | ------------------------------------------------------------- | ---------------------------------------------- |
-| a wayfinder map (`wayfinder:map`)                             | `/mattpocock-skills:wayfinder <map-url>`        |
-| has a `wayfinder:<type>` label and its parent is a map        | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
+| has a `wayfinder:<type>` label (`research`, `prototype`, `grilling`, `task`; GitLab's `wayfinder::<type>` too) | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
 | anything else                                                 | `/mattpocock-skills:implement <ticket-url>` plus a brief: assign it to yourself first, implement via the skill, then push and open a ready PR that closes it (body via the `pr` skill) |
 
 The mattpocock skills a session runs stop to ask for `/setup-matt-pocock-skills` when the repo
 has no `docs/agents/issue-tracker.md`, which would leave the session waiting. Until that file
 exists, the status line warns and names the command, so it can be run once before starting
 sessions. The board checks again on every refresh, and `s` and `c` still work while the warning shows.
+
+A typed wayfinder ticket never starts implement. The board finds its map on every board (whole
+repo, `--label` or map) by the rule `ticketmaster setup` writes: the native link (a GitHub
+sub-issue's parent), else `Part of #<map>` as the first line of the body. When neither leads to a
+`wayfinder:map` issue, the card (and `snapshot`) says "map not found", and starting it (`s`, or
+`Enter` on a card without a session) only warns.
+
+A map (`wayfinder:map`) is never started itself. Its card sits in In progress and shows the map's
+progress: decisions so far (the top-level bullets of the body's Decisions-so-far section), and its
+open and blocked tickets on the board. `s` (or `Enter` with no session) on the map starts its first
+**frontier** ticket: open, unblocked, unassigned, not already started from this board or holding a
+session, in map order (GitHub's sub-issue order, asked for when you press `s`; else issue number).
+That ticket gets its own `issue-<n>` worktree, card and
+`/mattpocock-skills:wayfinder <map-url> <ticket-url>` session, so a second press starts the next
+frontier ticket. With an empty frontier the board says so and starts nothing.
 
 A review session (`c`) gets a `review-<n>` worktree and starts `/mattpocock-skills:code-review`
 the same way: the prompt tells it to find the PR that closes the issue, check out its branch, and
@@ -134,9 +150,16 @@ restored when the board reopens; a saved label or author that is no longer on th
 until it comes back. This filters what the board shows, unlike
 `--label`, which scopes the query.
 
-The board never writes to the tracker: wayfinder claims its tickets by assigning them, and the
-implement prompt tells the session to do the same, so the card moves to In progress on the next
-refresh.
+The board writes to the tracker only to delete an issue: wayfinder claims its tickets by assigning
+them, and the implement prompt tells the session to do the same, so the card moves to In progress
+on the next refresh.
+
+`Backspace` or `Delete` on a Blocked, Ready or Done card deletes the issue after a confirm dialog
+(`gh issue delete`, GitLab's and Gitea's issue `DELETE` endpoints). In progress and Review cards
+are refused. The ticket's worktrees are not removed; the dialog lists them so you can remove them
+in herdr yourself. All three trackers let only admins or owners delete issues; the tracker's refusal shows as an
+error notification and the board stays as it was. In the `/` filter input, `Backspace` edits the
+text as usual.
 
 ## Wayfinding rules
 
@@ -152,8 +175,22 @@ of the file alone, or creates the doc when there is none. It pins these encoding
 | GitLab          | `Part of #<map>` as the description's first line | native `blocks` issue link (GitLab Premium) | `out-of-scope` label, closed |
 | Gitea / Forgejo | `Part of #<map>` as the body's first line | native issue dependency (`/dependencies`)  | `out-of-scope` label, closed    |
 
-Blocking is always the native link, never a `Blocked by:` body line. The keyword `Part of` and the
-`out-of-scope` label are always English, even when the rest of the issue is in another language. While the repo's section is missing or differs
+Once the map is resolved, its destination becomes a spec (`/to-spec`) and then implementation tickets
+(`/to-tickets`). The section pins how they link back, so `ticketmaster <map>` shows the decision
+tickets, the spec and the spec's implementation tickets on one board:
+
+| Tracker         | Spec → map                       | Implementation ticket → spec                                          |
+| --------------- | -------------------------------- | --------------------------------------------------------------------- |
+| GitHub          | `Part of #<map>` as the first line | native sub-issue of the spec, and `## Parent` naming `#<spec>`      |
+| GitLab          | `Part of #<map>` as the first line | `## Parent` section naming `#<spec>`                                |
+| Gitea / Forgejo | `Part of #<map>` as the first line | `## Parent` section naming `#<spec>`                                |
+
+The spec and its tickets carry no `wayfinder:` label, so `s` starts them with the implement skill;
+decision tickets keep wayfinder. Only a `wayfinder:map` parent gets this; on GitHub a spec's ticket
+linked by only one of its two links still counts.
+
+Blocking is always the native link, never a `Blocked by:` body line. The keywords `Part of` and
+`## Parent` and the `out-of-scope` label are always English, even when the rest of the issue is in another language. While the repo's section is missing or differs
 from what this version writes, the status line warns and names `ticketmaster setup`; when the doc
 itself is missing, it names `/setup-matt-pocock-skills` first, then `ticketmaster setup`.
 
@@ -171,9 +208,9 @@ Each issue lands in the first column whose rule matches:
 
 | Column      | Rule                                                                       |
 | ----------- | -------------------------------------------------------------------------- |
-| Done        | closed within `--done-days` (default 7); older closed issues are hidden    |
-| Review      | has a `review:<type>` (or GitLab scoped `review::<type>`) label, or an open PR/MR that closes it |
-| Blocked     | has an open blocking issue, or a `blocked` label                           |
+| Done        | closed within `--done-days` (default 7); older closed issues are hidden; an `out-of-scope` label marks the card `out of scope` |
+| Review      | has a `review:<type>` (or GitLab scoped `review::<type>`) label, or an open PR/MR that closes it; never a `wayfinder:<type>` ticket |
+| Blocked     | has an open blocking issue (native, or listed in the body), or a `blocked` label |
 | In progress | has an assignee                                                            |
 | Ready       | everything else                                                            |
 
@@ -181,6 +218,19 @@ Review types are tags, not columns: an issue labelled `review:security` and `rev
 one card in Review with a red `security` chip and a magenta `ux` chip. Cards show the issue
 number and title, the first ~90 characters (about two card lines) of the body (the `## Question` section when the
 issue has one, as wayfinder tickets do), review tags, up to three other labels, the author (`by <login>`) and assignees.
+
+Cards speak wayfinder's and the triage labels' vocabulary:
+
+- A wayfinder ticket shows who it needs: `HITL` (you at the keyboard) for `grilling` and `prototype`, `AFK`
+  (the agent alone) for `research`, and for a `task` whichever of the words `HITL` / `AFK` its body names
+  first (no badge when it names neither).
+- A ticket closed with the `out-of-scope` label (as `ticketmaster setup` pins it) shows `out of scope` in Done,
+  apart from the decisions that were resolved.
+- Wayfinder tickets (`wayfinder:<type>`) resolve with a comment and close, never a PR, so they never show in Review and
+  `c` refuses them.
+- A ticket labelled `needs-info` or `ready-for-human` shows the label (`⏸ needs-info`) and `s` / `Enter`
+  refuse to start it, with the reason. The names are the repo's own, from the right-hand column of
+  `docs/agents/triage-labels.md`; without that doc the canonical names apply.
 
 Ready and In progress sort by parent order (sub-issue position), then issue number. Done sorts
 newest first.
@@ -198,23 +248,31 @@ repo = "group/project"      # optional; defaults to the remote's path
 remote = "upstream"         # optional; defaults to origin
 ```
 
-The parent's labels and URL (needed for the wayfinder prompt) come from GitHub's `parent` field;
-GitLab and Gitea boards only know a ticket's parent when the board is scoped to one.
+The map's labels and URL (needed for the wayfinder prompt) come from GitHub's `parent` field, else
+from the issue a typed ticket's `Part of #<map>` line names (fetched once per refresh when it is
+not on the board), on GitHub, GitLab and Gitea alike.
 
 Flags override the file, and the file overrides the remote.
 
 | Provider        | Access                                   | Blocking                  | Parent filter                       | Review via         |
 | --------------- | ---------------------------------------- | ------------------------- | ----------------------------------- | ------------------ |
-| GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | native sub-issues, in order         | open closing PRs   |
-| GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | issues mentioning `#<parent>`       | closing MRs        |
-| Gitea / Forgejo | REST with the `tea` login token, or `GITEA_TOKEN` / `FORGEJO_TOKEN` | `/dependencies` API | issues mentioning `#<parent>` | open PRs whose body says `closes/fixes/resolves #<n>` |
+| GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | native sub-issues, in order, plus the spec and its tickets | open closing PRs   |
+| GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | issues mentioning `#<parent>`, plus the spec's tickets | closing MRs        |
+| Gitea / Forgejo | REST with the `tea` login token, or `GITEA_TOKEN` / `FORGEJO_TOKEN` | `/dependencies` API | issues mentioning `#<parent>`, plus the spec's tickets | open PRs whose body says `closes/fixes/resolves #<n>` |
 
-Where a provider lacks a feature, the board falls back: no dependency support means only a
-`blocked` label marks an issue Blocked, and no sub-issues means a parent board shows issues
+Besides native links, every provider counts the open issues a body lists on a `Blocked by: #3, #4`
+line (or the older Norwegian `Blokkert av: #3`) or under a `## Blocked by` heading as `- #3` bullets.
+A ticket leaves Blocked once every listed blocker is closed. `s` and `Enter` refuse to start a
+blocked ticket, naming its blockers, and a ticket assigned to someone other than the tracker login
+the board runs as; your own claimed tickets still start.
+
+Where a provider lacks a feature, the board falls back: no dependency support means only body-listed
+blockers or a `blocked` label mark an issue Blocked, and no sub-issues means a parent board shows issues
 whose body mentions `#<parent>`.
 
 GitHub's GraphQL budget is 5,000 points an hour. Every board makes 2 searches per refresh
-(about 1,500 an hour at 5s), so lengthen `--interval` if you run several boards at once.
+(about 1,500 an hour at 5s); a map board makes one query for the map and one per spec instead.
+Lengthen `--interval` if you run several boards at once.
 
 When the tracker rate-limits the board (GitHub's primary or secondary limit, or an HTTP 429 from
 GitLab or Gitea/Forgejo), ticket fetches drop to once a minute and herdr session states to every

@@ -10,10 +10,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from .model import OUT_OF_SCOPE_LABEL
+
 TRACKER_DOC = Path("docs/agents/issue-tracker.md")
 HEADING = "## Wayfinding operations"
 SETUP_COMMAND = "ticketmaster setup"
-OUT_OF_SCOPE_LABEL = "out-of-scope"
 TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo"}
 
 PREAMBLE = f"""{HEADING}
@@ -25,13 +26,18 @@ Used by `/wayfinder`; the ticketmaster board reads the same encodings. The **map
 native link, never a `Blocked by:` body line. %s
 """
 
-PART_OF_ENGLISH = f"""The keyword `Part of` and the `{OUT_OF_SCOPE_LABEL}` label are always English, even
-when the rest of the issue is written in another language."""
+ENGLISH = f"""The keywords `Part of` and `## Parent` and the `{OUT_OF_SCOPE_LABEL}` label are
+always English, even when the rest of the issue is written in another language."""
 
-GITHUB = PREAMBLE % f"""Nothing goes in the body; the `{OUT_OF_SCOPE_LABEL}` label is always English,
-even when the rest of the issue is written in another language.""" + f"""
+SPEC = """- **Spec → map**: once the map is resolved, its destination becomes a spec (`/to-spec`): an issue with no `wayfinder:` label whose first line is `Part of #<map>`. The board shows it, and its implementation tickets, beside the map's decision tickets.
+"""
+
+PARENT = "its `## Parent` section names `#<spec>`, and it has no `wayfinder:` label, so the board starts it with the implement skill"
+
+GITHUB = PREAMBLE % ENGLISH + f"""
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
 - **Child → map**: a GitHub **sub-issue** of the map, nothing in the body: `gh api --method POST repos/<owner>/<repo>/issues/<map>/sub_issues -F sub_issue_id=<child-db-id>`. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`).
+""" + SPEC + f"""- **Implementation ticket → spec**: each ticket from `/to-tickets` is a GitHub **sub-issue** of the spec, `gh api --method POST repos/<owner>/<repo>/issues/<spec>/sub_issues -F sub_issue_id=<ticket-db-id>`; {PARENT}.
 - **Blocking**: GitHub's **native issue dependencies**: `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`. A ticket is unblocked when every blocker is closed.
 - **Database ids**: the `<…-db-id>` values above are numeric database ids (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`), _not_ the `#number` or `node_id`.
 - **Out of scope**: label it `{OUT_OF_SCOPE_LABEL}`, say why, and close it as not planned: `gh issue edit <n> --add-label {OUT_OF_SCOPE_LABEL}`, then `gh issue close <n> --reason "not planned" --comment "<why>"`.
@@ -40,22 +46,24 @@ even when the rest of the issue is written in another language.""" + f"""
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
 """
 
-GITLAB = PREAMBLE % PART_OF_ENGLISH + f"""
+GITLAB = PREAMBLE % ENGLISH + f"""
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `glab issue create --label wayfinder:map`.
 - **Child → map**: the first line of the child's description is `Part of #<map>`. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`).
+""" + SPEC + f"""- **Implementation ticket → spec**: each ticket from `/to-tickets` has no `Part of` line; {PARENT}.
 - **Blocking**: GitLab's **native `blocks` issue link** (GitLab Premium or Ultimate), from the blocker to the child: `glab api --method POST projects/:id/issues/<blocker>/links -f target_project_id=:id -f target_issue_iid=<child> -f link_type=blocks`. A ticket is unblocked when every blocker is closed.
 - **Out of scope**: label it `{OUT_OF_SCOPE_LABEL}`, say why, and close it: `glab issue update <n> --label {OUT_OF_SCOPE_LABEL}`, `glab issue note <n> -m "<why>"`, then `glab issue close <n>`.
-- **Frontier query**: open issues whose description starts with `Part of #<map>`, in issue order, minus any with an open blocker (`blockedByCount > 0`) or an assignee; first wins.
+- **Frontier query**: open issues labelled `wayfinder:<type>` whose description starts with `Part of #<map>`, in issue order, minus any with an open blocker (`blockedByCount > 0`) or an assignee; first wins.
 - **Claim**: `glab issue update <n> --assignee <your-username>`, the session's first write.
 - **Resolve**: `glab issue note <n> -m "<answer>"`, then `glab issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
 """
 
-GITEA = PREAMBLE % PART_OF_ENGLISH + f"""
+GITEA = PREAMBLE % ENGLISH + f"""
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `tea issues create --labels wayfinder:map`.
 - **Child → map**: the first line of the child's body is `Part of #<map>`. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`).
+""" + SPEC + f"""- **Implementation ticket → spec**: each ticket from `/to-tickets` has no `Part of` line; {PARENT}.
 - **Blocking**: Gitea/Forgejo's **native issue dependencies**: `POST /api/v1/repos/<owner>/<repo>/issues/<child>/dependencies` with body `{{"owner": "<owner>", "repo": "<repo>", "index": <blocker>}}` (token from the `tea` login, header `Authorization: token <token>`). A ticket is unblocked when every blocker is closed.
 - **Out of scope**: label it `{OUT_OF_SCOPE_LABEL}`, say why, and close it: `tea issues edit <n> --add-labels {OUT_OF_SCOPE_LABEL}`, `tea comment <n> "<why>"`, then `tea issues close <n>`.
-- **Frontier query**: open issues whose body starts with `Part of #<map>`, in issue order, minus any with an open dependency (`GET …/issues/<n>/dependencies`) or an assignee; first wins.
+- **Frontier query**: open issues labelled `wayfinder:<type>` whose body starts with `Part of #<map>`, in issue order, minus any with an open dependency (`GET …/issues/<n>/dependencies`) or an assignee; first wins.
 - **Claim**: `tea issues edit <n> --add-assignees <your-username>`, the session's first write.
 - **Resolve**: `tea comment <n> "<answer>"`, then `tea issues close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
 """

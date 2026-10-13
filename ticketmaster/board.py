@@ -21,8 +21,9 @@ from textual.widgets import Button, Footer, Input, Label, Static
 
 from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
-from .model import COLUMN_ORDER, Board, Column, Ticket, build_board
+from .model import COLUMN_ORDER, OUT_OF_SCOPE_LABEL, Board, Column, MapProgress, Ticket, build_board, frontier, map_progress
 from .providers import Provider, ProviderError, Query, RateLimited
+from .triage import DEFAULT_HOLDS, hold_labels
 from .wayfinding import SETUP_COMMAND as WAYFINDING_SETUP, drift
 
 TAG_COLORS = {
@@ -55,6 +56,8 @@ STATUS_STYLES = {  # herdr agent states
     "unknown": ("? unknown", "grey62"),
     None: ("○ no agent", "grey50"),
 }
+DELETABLE = (Column.BLOCKED, Column.READY, Column.DONE)  # not while someone works on it or it is in review
+MODE_STYLES = {"HITL": "black on yellow", "AFK": "black on cyan"}  # who a wayfinder ticket needs at the keyboard
 ACTIVE_STATES = ("working", "blocked")  # auto-remove waits until the agent is no longer busy or asking
 LIMITED_TICKETS_EVERY = 60.0  # ticket fetches while the tracker rate-limits the board
 LIMITED_SESSIONS_EVERY = 10.0  # herdr session refreshes meanwhile
@@ -64,7 +67,9 @@ def tag_style(kind: str) -> str:
     return TAG_COLORS.get(kind.lower()) or FALLBACK_COLORS[zlib.crc32(kind.lower().encode()) % len(FALLBACK_COLORS)]
 
 
-def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False) -> Text:
+def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
+                progress: MapProgress | None = None, hold: str | None = None) -> Text:
+    """`hold` is the triage label that keeps the ticket from an AFK start, see Ticket.triage_hold."""
     text = Text()
     for session in sessions:
         label, style = STATUS_STYLES.get(session.status, STATUS_STYLES["unknown"])
@@ -76,8 +81,23 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
     text.append(ticket.title, style="bold")
     if ticket.summary:
         text.append("\n" + ticket.summary, style="dim")
+    if progress is not None:
+        text.append(f"\n◆ map: {progress.decided} decided · {progress.open} open · {progress.blocked} blocked",
+                    style="bold cyan")
     chips = Text()
-    for kind in ticket.review_tags:
+    if ticket.mode:
+        chips.append(f" {ticket.mode} ", style=MODE_STYLES[ticket.mode])
+        chips.append(" ")
+    if ticket.is_out_of_scope:
+        chips.append(" out of scope ", style="black on grey50")
+        chips.append(" ")
+    if hold:
+        chips.append(f"⏸ {hold}", style="bold yellow")
+        chips.append(" ")
+    if ticket.map_missing:
+        chips.append(f"⚠ {ticket.map_warning}", style="bold yellow")
+        chips.append(" ")
+    for kind in [] if ticket.is_decision else ticket.review_tags:  # a decision never gets a review
         chips.append(f" {kind} ", style=tag_style(kind))
         chips.append(" ")
     if column is Column.REVIEW and not ticket.review_tags and ticket.has_open_change_request:
@@ -85,7 +105,10 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         chips.append(" ")
     if column is Column.BLOCKED and ticket.open_blockers:
         chips.append(f"⛔ {ticket.open_blockers} ", style="red")
-    for label in ticket.other_labels[:3]:
+    as_chips = {hold.lower()} if hold else set()
+    if ticket.is_out_of_scope:
+        as_chips.add(OUT_OF_SCOPE_LABEL)
+    for label in [label for label in ticket.other_labels if label.lower() not in as_chips][:3]:
         chips.append(f"[{label}] ", style="grey62")
     if ticket.author:
         chips.append(f"by {ticket.author} ", style="grey62")
@@ -184,8 +207,9 @@ class Card(Static, can_focus=True):
         Binding("right,l", "app.move(1,0)", show=False),
     ]
 
-    def __init__(self, ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False):
-        super().__init__(render_card(ticket, column, sessions, starting), classes="card")
+    def __init__(self, ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
+                 progress: MapProgress | None = None, hold: str | None = None):
+        super().__init__(render_card(ticket, column, sessions, starting, progress, hold), classes="card")
         self.ticket = ticket
         self.column = column
 
@@ -211,7 +235,7 @@ class Workbench(Protocol):
 
 
 class Confirm(ModalScreen[bool]):
-    """Yes/no before anything that makes or removes a worktree; a stray double-click is cancelled with n or Esc."""
+    """Yes/no before anything that makes or removes a worktree or deletes an issue; n or Esc cancels."""
 
     DEFAULT_CSS = """
     Confirm { align: center middle; }
@@ -348,11 +372,14 @@ class FilterPicker(ModalScreen[None]):
 
 KEY_DETAILS = {
     "primary": "go to the ticket's herdr workspace; with none, start it (Ready, In progress) or review it (Review)",
-    "start": "start the ticket in a new issue-<n> worktree, even when it already has one",
-    "review": "on a Review card, a review-<n> worktree where Claude checks out the PR and runs the code-review skill",
+    "start": "start the ticket in a new issue-<n> worktree, even when it already has one; not while blocked, claimed by "
+             "someone else, or labelled needs-info / ready-for-human",
+    "review": "on a Review card, a review-<n> worktree where Claude checks out the PR and runs the code-review skill; "
+              "never for wayfinder tickets, which resolve without a PR",
     "remove": "on a Done card, remove its worktrees (herdr refuses if one has uncommitted changes)",
     "toggle_auto_remove": "remove Done tickets' worktrees once their agent is idle; unpushed work is kept",
     "open": "open the issue in the browser",
+    "delete": "delete the issue from the tracker after asking; Blocked, Ready and Done only, needs admin/owner rights",
     "pick_filter": "include or exclude labels, select authors (Enter cycles); combines with /, Esc on the board clears all",
 }
 
@@ -389,9 +416,11 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
 
     heading("Columns (the first rule that matches)")
     for column, rule in [
-        (Column.DONE, f"closed in the last {query.done_days} days; older closed issues are hidden"),
-        (Column.REVIEW, "a review:<kind> label, or an open PR/MR that closes it"),
-        (Column.BLOCKED, "an open blocking issue, or a 'blocked' label"),
+        (Column.DONE, f"closed in the last {query.done_days} days; older closed issues are hidden;\n"
+                      + " " * 15 + "an out-of-scope label marks one ruled out of scope rather than resolved"),
+        (Column.REVIEW, "a review:<kind> label, or an open PR/MR that closes it; never a wayfinder\n"
+                        + " " * 15 + "ticket (research, prototype, grilling, task), which resolves with a comment"),
+        (Column.BLOCKED, "an open blocking issue (native or a 'Blocked by: #n' body line), or a 'blocked' label"),
         (Column.IN_PROGRESS, "assigned to someone"),
         (Column.READY, "everything else"),
     ]:
@@ -401,7 +430,8 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     current = "parent" if query.parent else "--label" if query.label else "no filter"
     for name, rule in [
         ("no filter", "every open issue, and every issue closed in the last --done-days"),
-        ("parent", "the sub-issues of one issue, e.g. a wayfinder map (ticketmaster 42)"),
+        ("parent", "the sub-issues of one issue, e.g. a wayfinder map (ticketmaster 42),\n"
+                   + " " * 13 + "plus the spec linked to a map and the spec's implementation tickets"),
         ("--label", "issues with that label (ticketmaster --label NAME)"),
     ]:
         row(name, 9, rule + ("  ← this board" if name == current else ""))
@@ -412,12 +442,22 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  herdr agent issue-<n>. The card then lists the session: ● working, ⚠ needs you,\n"
                 "  ◌ idle, ✓ done or ○ no agent. The prompt depends on the ticket:\n")
     for kind, prompt in [
-        ("wayfinder map", "the wayfinder skill with the map's URL"),
-        ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs"),
+        ("wayfinder map", "never started itself: its card (In progress) shows decided / open /\n"
+                          + " " * 20 + "blocked; s starts the map's first frontier ticket (open, unblocked,\n"
+                          + " " * 20 + "unclaimed, not started yet) on that ticket's own card and worktree"),
+        ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs: a\n"
+                             + " " * 20 + "wayfinder:research/prototype/grilling/task ticket (or wayfinder::…),\n"
+                             + " " * 20 + "on any board; its map is the native parent, else `Part of #<map>`\n"
+                             + " " * 20 + "on the body's first line. Without a map it warns and won't start"),
         ("plain issue", "the implement skill with the ticket's URL, plus a brief: assign it to\n"
                         + " " * 20 + "yourself first, implement, then push and open a PR that closes it"),
     ]:
         row(kind, 16, prompt)
+    text.append("  A wayfinder ticket's card says who it needs: HITL (you at the keyboard) for grilling and\n"
+                "  prototype, AFK (the agent alone) for research, and for a task whichever of the two\n"
+                "  words its body names first.\n"
+                "  A ticket labelled needs-info or ready-for-human (the repo's names for them in\n"
+                "  docs/agents/triage-labels.md) shows the label and is not started.\n")
     text.append("  c on a Review card does the same in a review-<n> worktree with the code-review skill\n"
                 "  (review_command in .ticketmaster.toml): check out the PR that closes the issue, review\n"
                 "  it from the PR's base branch against the issue, and report in the session only.\n")
@@ -427,9 +467,9 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 f"  scope) into that doc's Wayfinding operations section; the status line warns while\n"
                 f"  they are missing or differ from what this version writes.\n")
 
-    heading("The board only reads")
-    text.append("  It never writes to the tracker. A session claims its ticket by assigning it, so the\n"
-                "  card moves to In progress on the next refresh.")
+    heading("The board only reads, except for deleting")
+    text.append("  It writes to the tracker only when you delete an issue. A session claims its ticket by\n"
+                "  assigning it, so the card moves to In progress on the next refresh.")
     return text
 
 
@@ -478,6 +518,7 @@ class BoardApp(App):
         Binding("x", "remove", "Remove worktree"),
         Binding("a", "toggle_auto_remove", "Auto-remove"),
         Binding("o", "open", "Browser"),
+        Binding("backspace,delete", "delete", "Delete issue", show=False),
         Binding("v", "toggle_view", "One/all columns"),
         Binding("question_mark", "help", "Help"),
         *[Binding(str(i + 1), f"column({i})", "Show column", show=False) for i in range(len(COLUMN_ORDER))],
@@ -517,6 +558,7 @@ class BoardApp(App):
         self.repo_root = repo_root  # None: the skills setup is not checked
         self.setup_missing = False
         self.wayfinding_drift: str | None = None  # "missing" / "outdated" when `ticketmaster setup` should run
+        self.holds = dict(DEFAULT_HOLDS)  # triage label → why it keeps a ticket from an AFK start
         self.board_query = query
         self.interval = interval
         self.clock = clock
@@ -524,6 +566,7 @@ class BoardApp(App):
         self.fetching = False
         self.queued: bool | None = None  # a refresh asked for mid-fetch: whether it includes tickets
         self.board = Board()
+        self.viewer: str | None = None  # the tracker login; asked for with each ticket fetch until known
         self.needle = ""
         self.repo_key = f"{provider.name}:{provider.repo}"
         saved = self.settings.get("filters", {}).get(self.repo_key, {})
@@ -584,6 +627,7 @@ class BoardApp(App):
         sessions, herdr_error = self.sessions, None
         self.setup_missing = setup_missing(self.repo_root)
         self.wayfinding_drift = None if self.repo_root is None else drift(self.repo_root, self.provider.name)
+        self.holds = hold_labels(self.repo_root)
         if self.workbench is not None:
             try:
                 sessions = self.workbench.sessions()
@@ -593,6 +637,8 @@ class BoardApp(App):
             self.call_from_thread(self._apply, None, None, sessions, herdr_error, fetched_tickets=False)
             return
         try:
+            if self.viewer is None:
+                self.viewer = self._viewer()
             board = build_board(self.provider.fetch(self.board_query), done_days=self.board_query.done_days)
             self.call_from_thread(self._apply, board, None, sessions, herdr_error)
         except RateLimited:
@@ -602,6 +648,14 @@ class BoardApp(App):
         except BaseException:
             self.call_from_thread(setattr, self, "fetching", False)
             raise
+
+    def _viewer(self) -> str | None:
+        try:
+            return self.provider.viewer()
+        except RateLimited:
+            raise
+        except ProviderError:
+            return None  # claimed tickets then start after the confirm, as before the login was known
 
     def _apply(self, board: Board | None, error: str | None, sessions: dict[int, list[Session]] | None = None,
                herdr_error: str | None = None, fetched_tickets: bool = True, rate_limited: bool = False) -> None:
@@ -640,6 +694,9 @@ class BoardApp(App):
                 self.auto_tried.update(s.path for s in sessions)
                 self._run(lambda ticket=ticket, sessions=sessions: self.workbench.auto_remove(ticket, sessions))
 
+    def _tickets(self) -> list[Ticket]:
+        return [ticket for tickets in self.board.columns.values() for ticket in tickets]
+
     def _board_labels(self) -> set[str]:
         return {label for tickets in self.board.columns.values() for ticket in tickets for label in ticket.labels}
 
@@ -656,13 +713,16 @@ class BoardApp(App):
         focused_widget = self.query_one("#columns").screen.focused  # the board's, also under the filter picker
         focused = focused_widget.ticket.number if isinstance(focused_widget, Card) else None
         refocus: Card | None = None
+        everything = self._tickets()
         for column in COLUMN_ORDER:
             tickets = self._visible(column)
             title = self.query_one(f"#title-{column.name}", Static)
             title.update(Text(f"{column.value} ({len(tickets)})", style=f"bold {COLUMN_COLORS[column]}"))
             container = self.query_one(f"#col-{column.name}", VerticalScroll)
             container.remove_children()
-            cards = [Card(t, column, self.sessions.get(t.number, []), t.number in self.starting) for t in tickets]
+            cards = [Card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
+                          map_progress(t, everything) if t.is_wayfinder_map else None,
+                          None if column is Column.DONE else t.triage_hold(self.holds)) for t in tickets]
             container.mount_all(cards)
             refocus = refocus or next((c for c in cards if c.ticket.number == focused), None)
         if refocus is not None:
@@ -820,7 +880,8 @@ class BoardApp(App):
         elif card.column in (Column.READY, Column.IN_PROGRESS):
             self.action_start()
         else:
-            self.notify(f"#{ticket.number} has no worktree here; s starts one", severity="warning")
+            refusal = ticket.start_refusal(self.viewer, self.holds)
+            self.notify(refusal or f"#{ticket.number} has no worktree here; s starts one", severity="warning")
 
     def action_start(self) -> None:
         card = self._card()
@@ -830,10 +891,45 @@ class BoardApp(App):
         if card.column is Column.DONE:
             self.notify(f"#{ticket.number} is done", severity="warning")
             return
+        if ticket.is_wayfinder_map:  # the map is worked through its next frontier ticket, on that ticket's card
+            self._start_frontier(ticket)
+            return
+        if refusal := ticket.start_refusal(self.viewer, self.holds):
+            self.notify(refusal, severity="warning")
+            return
+        if ticket.map_missing:
+            self.notify(f"#{ticket.number} {ticket.map_warning}: link it to its map (sub-issue, or "
+                        "`Part of #<map>` as the body's first line)", severity="warning")
+            return
+        self._confirm_start(ticket)
+
+    def _start_frontier(self, map_ticket: Ticket) -> None:
+        """Asks the tracker for the map's own order when it has one (GitHub), then offers the first frontier ticket."""
+        map_order = getattr(self.provider, "map_order", None)
+        if map_order is None:
+            self._start_first_frontier(map_ticket, None)
+            return
+
+        def work() -> None:
+            try:
+                order = map_order(map_ticket.number)
+            except ProviderError:
+                order = None  # the board's own order is the fallback
+            self.call_from_thread(self._start_first_frontier, map_ticket, order)
+
+        self.run_worker(work, thread=True, group="herdr")
+
+    def _start_first_frontier(self, map_ticket: Ticket, order: list[int] | None) -> None:
+        taken = self.starting | {n for n, sessions in self.sessions.items() if sessions}
+        if not (ready := frontier(map_ticket, self._tickets(), taken, order)):
+            self.notify(f"Map #{map_ticket.number} has no frontier ticket: none open, unblocked, unclaimed "
+                        "and not already started", severity="warning")
+            return
+        self._confirm_start(ready[0], f" (next on map #{map_ticket.number})")
+
+    def _confirm_start(self, ticket: Ticket, via: str = "") -> None:
         existing = [Path(s.path).name for s in self.sessions.get(ticket.number, [])]
         warn = f"\nalready has {', '.join(existing)}: this makes another" if existing else ""
-        if card.column is Column.BLOCKED:
-            warn += f"\nblocked by {ticket.open_blockers or 'a label'}"
 
         def confirmed(yes: bool | None) -> None:
             if yes:
@@ -841,7 +937,7 @@ class BoardApp(App):
                 self._render_board()
                 self._run(lambda: self.workbench.start(ticket))
 
-        self.push_screen(Confirm(f"Start #{ticket.number} {ticket.title} in a new worktree?",
+        self.push_screen(Confirm(f"Start #{ticket.number} {ticket.title}{via} in a new worktree?",
                                  self.describe_start(ticket) + warn, "Start"), confirmed)
 
     def action_review(self) -> None:
@@ -849,6 +945,10 @@ class BoardApp(App):
         if card is None:
             return
         ticket = card.ticket
+        if ticket.is_decision:
+            self.notify(f"#{ticket.number} is a wayfinder ticket: it resolves with a comment, so there is no PR to review",
+                        severity="warning")
+            return
         if card.column is not Column.REVIEW:
             self.notify(f"#{ticket.number} is not in Review", severity="warning")
             return
@@ -880,6 +980,37 @@ class BoardApp(App):
         paths = "\n".join(s.path for s in sessions)
         self.push_screen(Confirm(f"Remove the worktrees of #{ticket.number}?",
                                  f"{paths}\nherdr refuses if one has uncommitted changes", "Remove"), confirmed)
+
+    def action_delete(self) -> None:
+        """Backspace/Delete: deletes the issue from the tracker; its worktrees stay."""
+        if not isinstance(self.focused, Card):
+            self.notify("Select a ticket first", severity="warning")
+            return
+        card = self.focused
+        ticket, sessions = card.ticket, self.sessions.get(card.ticket.number, [])
+        if card.column not in DELETABLE:
+            self.notify(f"#{ticket.number} is {card.column.value}; only Blocked, Ready and Done tickets can be deleted",
+                        severity="warning")
+            return
+
+        def delete() -> None:
+            try:
+                self.provider.delete(ticket.number)
+            except ProviderError as exc:
+                self.call_from_thread(self.notify, f"Delete #{ticket.number}: {exc}", severity="error")
+                return
+            self.call_from_thread(self.notify, f"Deleted #{ticket.number} {ticket.title}")
+            self.call_from_thread(self._refresh_now)
+
+        def confirmed(yes: bool | None) -> None:
+            if yes:
+                self.run_worker(delete, thread=True, group="tracker")
+
+        detail = "This cannot be undone."
+        if sessions:
+            paths = "\n".join(s.path for s in sessions)
+            detail += f"\nIts worktrees are left behind, not removed:\n{paths}"
+        self.push_screen(Confirm(f"Delete #{ticket.number} {ticket.title}?", detail, "Delete"), confirmed)
 
     def action_toggle_auto_remove(self) -> None:
         self.auto_remove = not self.auto_remove

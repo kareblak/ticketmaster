@@ -14,7 +14,8 @@ ticketmaster open $ARGUMENTS
 ```
 
 - No arguments: every open issue, and every issue closed in the last 7 days.
-- A number (`42`, `#42`, or an issue URL): the sub-issues of that parent, e.g. a wayfinder map.
+- A number (`42`, `#42`, or an issue URL): the sub-issues of that parent, e.g. a wayfinder map; for a
+  map, also the spec linked to it (`Part of #<map>`) and that spec's implementation tickets.
 - `--label <name>`: issues with that label.
 
 Then reply with the script's one-line result.
@@ -30,17 +31,21 @@ as printed and the fix: `gh auth login`, `glab auth login`, `tea login add`, or 
 If the board's status line says to run `ticketmaster setup`, or the user wants wayfinder and the
 board to agree on how tickets are linked, run `ticketmaster setup` in the repo: it writes the
 "Wayfinding operations" section of `docs/agents/issue-tracker.md` for the repo's tracker (child →
-map, blocking, out-of-scope, English keywords), replacing an older copy in place. Read that section
+map, spec → map, implementation ticket → spec, blocking, out-of-scope, English keywords), replacing
+an older copy in place. Read that section
 before creating or linking wayfinder tickets.
 
 To answer a question about the board's contents without opening a pane, run the same script
 with `snapshot` instead of `open`; it prints every column once as plain text.
 
 On the board, `Enter` goes to a ticket's herdr workspace (resuming Claude with `--continue` if it
-exited), or starts one when there is none. `s` always starts the ticket in a new worktree
+exited), or starts one when there is none; both refuse a blocked ticket, or one assigned to someone
+else, and say why. `s` always starts the ticket in a new worktree
 (`issue-<n>`, `issue-<n>-2`…) as herdr agent `issue-<n>`, with `/mattpocock-skills:wayfinder
-<map> <ticket>` for wayfinder tickets or `/mattpocock-skills:implement <ticket>` plus a short
-brief otherwise. `c` starts a review session for a Review ticket in a `review-<n>` worktree; `x` removes a Done ticket's
+<map> <ticket>` for wayfinder tickets (never implement; one whose map can't be found only warns)
+and, on a map's card (In progress, showing decided / open / blocked), for the map's first frontier ticket
+(open, unblocked, unclaimed, not already started), in that ticket's own worktree and card,
+or `/mattpocock-skills:implement <ticket>` plus a short brief otherwise. `c` starts a review session for a Review ticket in a `review-<n>` worktree; `x` removes a Done ticket's
 worktrees; `a` toggles auto-remove (saved per user), where the board does that itself once the
 agent is idle, keeping worktrees with uncommitted or unpushed work. Cards
 show each session's agent state (working, needs you, idle, done, no agent).
@@ -52,7 +57,7 @@ The board never changes issues. Column rules (first match wins):
 | ----------- | ------------------------------------------------------------------------ |
 | Done        | closed within the last 7 days (`--done-days`); older closed issues hidden |
 | Review      | has a `review:<type>` / `review::<type>` label, or an open linked PR/MR  |
-| Blocked     | has an open blocking issue, or a `blocked` label                         |
+| Blocked     | has an open blocking issue (native, or a `Blocked by: #n` body line or `## Blocked by` section), or a `blocked` label |
 | In progress | has an assignee                                                          |
 | Ready       | everything else                                                          |
 
