@@ -151,7 +151,8 @@ def test_grilling_and_prototype_are_hitl_research_afk():
 def test_a_task_is_hitl_or_afk_by_the_first_of_those_words_in_its_body():
     task = ("wayfinder:task",)
     assert ticket(labels=task, body="## Question\nProvision access. AFK: the agent can do it.").mode == "AFK"
-    assert ticket(labels=task, body="hitl, then afk").mode == "HITL"
+    assert ticket(labels=task, body="HITL, then AFK").mode == "HITL"
+    assert ticket(labels=task, body="I'll be afk; hitl later").mode is None
     assert ticket(labels=task, body="Sign up for the service").mode is None
     assert ticket(labels=task, body="the HITLER and AFKs").mode is None
 
@@ -179,3 +180,10 @@ def test_triage_hold_names_the_first_held_label():
     assert ticket(labels=("human",)).triage_hold(holds) == "human"
     assert ticket(labels=("ready-for-human",)).triage_hold(holds) is None
     assert ticket().triage_hold({}) is None
+
+
+def test_start_refusal_names_a_triage_hold_with_its_reason():
+    holds = {"needs-info": "waits on more information"}
+    assert ticket(labels=("Needs-Info",)).start_refusal("me", holds) == \
+        "#1 is labelled Needs-Info: waits on more information; not started"
+    assert ticket(labels=("needs-info",)).start_refusal("me") is None

@@ -29,7 +29,7 @@ PART_OF = re.compile(r"^Part of #(?P<map>\d+)\.?$")
 OUT_OF_SCOPE_LABEL = "out-of-scope"  # pinned by `ticketmaster setup`, always English
 # HITL: worked with a human; AFK: the agent alone. A task says which in its body.
 TYPE_MODES = {"grilling": "HITL", "prototype": "HITL", "research": "AFK"}
-_MODE_WORD = re.compile(r"\b(HITL|AFK)\b", re.IGNORECASE)
+_MODE_WORD = re.compile(r"\b(HITL|AFK)\b")  # the acronyms, not "afk" in prose
 
 
 @dataclass(frozen=True)
@@ -69,8 +69,11 @@ class Ticket:
             return True
         return any(label.lower() == BLOCKED_LABEL for label in self.labels)
 
-    def start_refusal(self, viewer: str | None) -> str | None:
-        """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart."""
+    def start_refusal(self, viewer: str | None, holds: dict[str, str] | None = None) -> str | None:
+        """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart.
+
+        `holds` maps the triage labels that keep a ticket from an AFK start to why, see triage.hold_labels.
+        """
         if self.blocked_by:
             return f"#{self.number} is blocked by {', '.join(self.blocked_by)}"
         if self.open_blockers:
@@ -79,6 +82,9 @@ class Ticket:
             return f"#{self.number} has the '{BLOCKED_LABEL}' label"
         if viewer and self.assignees and viewer.lower() not in (a.lower() for a in self.assignees):
             return f"#{self.number} is claimed by {', '.join('@' + a for a in self.assignees)}"
+        if hold := self.triage_hold(holds or {}):
+            reason = next(why for label, why in holds.items() if label.lower() == hold.lower())
+            return f"#{self.number} is labelled {hold}: {reason}; not started"
         return None
 
     @property
@@ -117,7 +123,7 @@ class Ticket:
         """`HITL` or `AFK` for a wayfinder ticket; a task by the first of those words in its body, else None."""
         if self.wayfinder_type == "task":
             match = _MODE_WORD.search(self.body or "")
-            return match.group(1).upper() if match else None
+            return match.group(1) if match else None
         return TYPE_MODES.get(self.wayfinder_type)
 
     @property

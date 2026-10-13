@@ -94,7 +94,7 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
     if ticket.map_missing:
         chips.append(f"⚠ {ticket.map_warning}", style="bold yellow")
         chips.append(" ")
-    for kind in ticket.review_tags:
+    for kind in [] if ticket.is_decision else ticket.review_tags:  # a decision never gets a review
         chips.append(f" {kind} ", style=tag_style(kind))
         chips.append(" ")
     if column is Column.REVIEW and not ticket.review_tags and ticket.has_open_change_request:
@@ -102,8 +102,10 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         chips.append(" ")
     if column is Column.BLOCKED and ticket.open_blockers:
         chips.append(f"⛔ {ticket.open_blockers} ", style="red")
-    chipped = {label.lower() for label in (hold, ticket.is_out_of_scope and OUT_OF_SCOPE_LABEL) if label}
-    for label in [label for label in ticket.other_labels if label.lower() not in chipped][:3]:
+    as_chips = {hold.lower()} if hold else set()
+    if ticket.is_out_of_scope:
+        as_chips.add(OUT_OF_SCOPE_LABEL)
+    for label in [label for label in ticket.other_labels if label.lower() not in as_chips][:3]:
         chips.append(f"[{label}] ", style="grey62")
     if ticket.author:
         chips.append(f"by {ticket.author} ", style="grey62")
@@ -868,7 +870,7 @@ class BoardApp(App):
         elif card.column in (Column.READY, Column.IN_PROGRESS):
             self.action_start()
         else:
-            refusal = ticket.start_refusal(self.viewer)
+            refusal = ticket.start_refusal(self.viewer, self.holds)
             self.notify(refusal or f"#{ticket.number} has no worktree here; s starts one", severity="warning")
 
     def action_start(self) -> None:
@@ -879,12 +881,8 @@ class BoardApp(App):
         if card.column is Column.DONE:
             self.notify(f"#{ticket.number} is done", severity="warning")
             return
-        if refusal := ticket.start_refusal(self.viewer):
+        if refusal := ticket.start_refusal(self.viewer, self.holds):
             self.notify(refusal, severity="warning")
-            return
-        if hold := ticket.triage_hold(self.holds):
-            reason = next(why for label, why in self.holds.items() if label.lower() == hold.lower())
-            self.notify(f"#{ticket.number} is labelled {hold}: {reason}; not started", severity="warning")
             return
         if ticket.map_missing:
             self.notify(f"#{ticket.number} {ticket.map_warning}: link it to its map (sub-issue, or "
