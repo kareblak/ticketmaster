@@ -80,3 +80,15 @@ def test_split_down_per_terminal(monkeypatch):
     assert "split horizontally" in candidates(CWD, "c", down, {"TERM_PROGRAM": "iTerm.app"})[0].argv[2]
     assert "--bottom" in candidates(CWD, "c", down, {"TERM_PROGRAM": "WezTerm"})[0].argv
     assert "--location=hsplit" in candidates(CWD, "c", down, {"KITTY_WINDOW_ID": "1"})[0].argv
+
+
+def test_detects_ghostty_when_term_program_is_stripped(monkeypatch):
+    monkeypatch.setattr(launch.sys, "platform", "darwin")
+    env = {"GHOSTTY_RESOURCES_DIR": "/Applications/Ghostty.app/Contents/Resources/ghostty", "TERM": "xterm-256color"}
+    first = candidates(CWD, "tm", Placement.SPLIT_RIGHT, env)[0]
+    assert (first.terminal, first.placement) == ("Ghostty", Placement.SPLIT_RIGHT)
+
+
+def test_term_program_wins_over_markers():
+    env = {"TERM_PROGRAM": "WezTerm", "GHOSTTY_RESOURCES_DIR": "/x"}
+    assert launch.terminal_program(env) == "WezTerm"

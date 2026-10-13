@@ -52,6 +52,20 @@ def applescript_string(value: str) -> str:
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+def terminal_program(env: Mapping[str, str]) -> str:
+    """TERM_PROGRAM, or a guess from terminal-specific variables when a host strips it
+    (Claude Code's background session host does)."""
+    if env.get("TERM_PROGRAM"):
+        return env["TERM_PROGRAM"]
+    markers = [
+        ("GHOSTTY_RESOURCES_DIR", "ghostty"),
+        ("ITERM_SESSION_ID", "iTerm.app"),
+        ("WEZTERM_PANE", "WezTerm"),
+        ("TERM_SESSION_ID", "Apple_Terminal"),
+    ]
+    return next((program for var, program in markers if env.get(var)), "")
+
+
 def login_shell(env: Mapping[str, str]) -> str:
     return env.get("SHELL") or "/bin/sh"
 
@@ -62,7 +76,7 @@ def candidates(cwd: Path, command: str, placement: Placement, env: Mapping[str, 
     shell = login_shell(env)
     in_shell = [shell, "-lc", command]
     shell_line = f"cd {shlex.quote(str(cwd))} && {command}"
-    program = env.get("TERM_PROGRAM", "")
+    program = terminal_program(env)
     out: list[Launch] = []
 
     for step in FALLBACKS[placement]:
