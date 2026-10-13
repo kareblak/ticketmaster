@@ -6,7 +6,7 @@ import pytest
 
 from ticketmaster import __version__
 from ticketmaster.cli import main
-from ticketmaster.upgrade import SOURCE, Install, describe, install_from, main_head, upgrade, upgrade_notice
+from ticketmaster.upgrade import SOURCE, Install, describe, UPGRADE_NOTICE, install_from, main_head, upgrade, upgrade_notice
 
 VENVS = "/home/me/.local/pipx/venvs"
 APP = f"{VENVS}/ticketmaster"
@@ -145,7 +145,7 @@ def never_asked():
 
 
 def test_notice_when_main_has_moved_on():
-    assert upgrade_notice(GIT, lambda: SHA) == "a newer ticketmaster is available: run `ticketmaster upgrade`"
+    assert upgrade_notice(GIT, lambda: SHA) == UPGRADE_NOTICE
 
 
 def test_no_notice_when_up_to_date():

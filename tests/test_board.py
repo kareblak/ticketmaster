@@ -2,11 +2,14 @@ import json
 import asyncio
 from datetime import datetime, timezone
 
+import pytest
+
 from ticketmaster.board import (BoardApp, Card, FilterPicker, HelpScreen, Pacer, PickerOption, passes_authors,
                                passes_labels, tag_style)
 from ticketmaster.herdr import Session
 from ticketmaster.model import Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
+from ticketmaster.upgrade import UPGRADE_NOTICE as NOTICE
 
 
 class FakeProvider:
@@ -1370,9 +1373,6 @@ def test_map_order_lookup_failure_falls_back_to_board_order():
     run(scenario())
 
 
-NOTICE = "a newer ticketmaster is available: run `ticketmaster upgrade`"
-
-
 def test_newer_version_shows_a_toast_and_stays_in_the_status_line_checked_once():
     checks = []
 
@@ -1396,17 +1396,18 @@ def test_newer_version_shows_a_toast_and_stays_in_the_status_line_checked_once()
     run(scenario())
 
 
-def test_no_notice_when_the_check_finds_nothing_or_fails():
-    def failing():
-        raise RuntimeError("boom")
+def failing_check():
+    raise RuntimeError("boom")
 
-    for update_check in (lambda: None, failing):
-        async def scenario():
-            app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, update_check=update_check)
-            async with app.run_test(size=(200, 40)) as pilot:
-                await app.workers.wait_for_complete()
-                await pilot.pause()
-                assert list(app._notifications) == []
-                assert "upgrade" not in str(app.query_one("#status").render())
 
-        run(scenario())
+@pytest.mark.parametrize("update_check", [lambda: None, failing_check])
+def test_no_notice_when_the_check_finds_nothing_or_fails(update_check):
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, update_check=update_check)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert list(app._notifications) == []
+            assert "upgrade" not in str(app.query_one("#status").render())
+
+    run(scenario())

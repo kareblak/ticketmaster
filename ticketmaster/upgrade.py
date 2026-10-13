@@ -21,6 +21,7 @@ from . import __version__
 
 SOURCE = "git+https://github.com/kareblak/ticketmaster.git"
 REMOTE = SOURCE.removeprefix("git+")
+UPGRADE_NOTICE = "a newer ticketmaster is available: run `ticketmaster upgrade`"
 LOOKUP_TIMEOUT = 5.0  # seconds; the board runs the lookup in the background, so this only bounds a stuck git
 READ_DIRECT_URL = "from importlib import metadata; print(metadata.distribution('ticketmaster').read_text('direct_url.json') or '')"
 
@@ -74,15 +75,12 @@ def main_head(run: Callable[..., subprocess.CompletedProcess] = subprocess.run) 
     return sha.strip() or None
 
 
-UPGRADE_NOTICE = "a newer ticketmaster is available: run `ticketmaster upgrade`"
-
-
-def upgrade_notice(install: Install, main_head: Callable[[], str | None]) -> str | None:
-    """The board's notice when a git install's commit is not the head of `main` on GitHub. `main_head` is only
+def upgrade_notice(install: Install, lookup: Callable[[], str | None] = main_head) -> str | None:
+    """The board's notice when a git install's commit is not the head of `main` on GitHub. `lookup` is only
     asked for an install that knows its commit, and None from it (offline, no git) means no notice."""
     if install.commit is None:
         return None  # an editable (dev) install, or one that cannot say what it was built from
-    head = main_head()
+    head = lookup()
     return UPGRADE_NOTICE if head and head != install.commit else None
 
 

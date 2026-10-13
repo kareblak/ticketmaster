@@ -146,7 +146,7 @@ def main(argv: list[str] | None = None) -> int:
     from .board import BoardApp
     from .config import load_config, settings_path
     from .start import build_prompt, workbench_for
-    from .upgrade import installed, main_head, upgrade_notice
+    from .upgrade import installed, upgrade_notice
 
     workbench = workbench_for(cwd, load_config(cwd))
     BoardApp(
@@ -161,6 +161,6 @@ def main(argv: list[str] | None = None) -> int:
         columns=args.columns,
         settings_path=settings_path(),
         repo_root=herdr.repo_root(cwd),
-        update_check=lambda: upgrade_notice(installed(), main_head),
+        update_check=lambda: upgrade_notice(installed()),
     ).run()
     return 0
