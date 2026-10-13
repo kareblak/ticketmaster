@@ -139,3 +139,43 @@ def test_part_of_reads_the_first_line_of_the_body():
 
 def test_wayfinder_label_prefix_is_case_insensitive():
     assert ticket(labels=("Wayfinder:Task",)).wayfinder_type == "task"
+
+
+def test_grilling_and_prototype_are_hitl_research_afk():
+    assert ticket(labels=("wayfinder:grilling",)).mode == "HITL"
+    assert ticket(labels=("wayfinder::prototype",)).mode == "HITL"
+    assert ticket(labels=("wayfinder:research",)).mode == "AFK"
+    assert ticket(labels=MAP).mode is None and ticket().mode is None
+
+
+def test_a_task_is_hitl_or_afk_by_the_first_of_those_words_in_its_body():
+    task = ("wayfinder:task",)
+    assert ticket(labels=task, body="## Question\nProvision access. AFK: the agent can do it.").mode == "AFK"
+    assert ticket(labels=task, body="hitl, then afk").mode == "HITL"
+    assert ticket(labels=task, body="Sign up for the service").mode is None
+    assert ticket(labels=task, body="the HITLER and AFKs").mode is None
+
+
+def test_wayfinder_tickets_and_maps_are_decisions_and_never_in_review():
+    for labels in (("wayfinder:grilling",), ("wayfinder::task",), MAP):
+        t = ticket(labels=(*labels, "review:ux"), has_open_change_request=True)
+        assert t.is_decision
+        assert classify(t, NOW, 7) is Column.READY
+    assert not ticket(labels=("wayfinder:epic",)).is_decision
+    assert classify(ticket(labels=("wayfinder:epic",), has_open_change_request=True), NOW, 7) is Column.REVIEW
+
+
+def test_a_closed_ticket_labelled_out_of_scope_is_out_of_scope():
+    closed = dict(is_open=False, closed_at=NOW)
+    assert ticket(labels=("wayfinder:grilling", "out-of-scope"), **closed).is_out_of_scope
+    assert ticket(labels=("Out-of-Scope",), **closed).is_out_of_scope
+    assert not ticket(labels=("wayfinder:grilling",), **closed).is_out_of_scope
+    assert not ticket(labels=("out-of-scope",)).is_out_of_scope  # still open: not ruled out yet
+
+
+def test_triage_hold_names_the_first_held_label():
+    holds = {"needs-info": "waits on more information", "human": "needs a human"}
+    assert ticket(labels=("bug", "Needs-Info")).triage_hold(holds) == "Needs-Info"
+    assert ticket(labels=("human",)).triage_hold(holds) == "human"
+    assert ticket(labels=("ready-for-human",)).triage_hold(holds) is None
+    assert ticket().triage_hold({}) is None

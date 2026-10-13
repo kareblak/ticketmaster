@@ -26,6 +26,10 @@ WAYFINDER_TYPES = ("research", "prototype", "grilling", "task")
 WAYFINDER_LABEL = re.compile(r"^wayfinder::?(?P<kind>[^:].*)$", re.IGNORECASE)
 # The child→map rule for trackers without a native link: the body's first line is `Part of #<map>`.
 PART_OF = re.compile(r"^Part of #(?P<map>\d+)\.?$")
+OUT_OF_SCOPE_LABEL = "out-of-scope"  # pinned by `ticketmaster setup`, always English
+# HITL: worked with a human; AFK: the agent alone. A task says which in its body.
+TYPE_MODES = {"grilling": "HITL", "prototype": "HITL", "research": "AFK"}
+_MODE_WORD = re.compile(r"\b(HITL|AFK)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -104,6 +108,29 @@ class Ticket:
         return f"wayfinder:{self.wayfinder_type}, map not found"
 
     @property
+    def is_decision(self) -> bool:
+        """A wayfinder map or ticket: it resolves with a comment and closes, never through a PR."""
+        return self.is_wayfinder_map or self.wayfinder_type is not None
+
+    @property
+    def mode(self) -> str | None:
+        """`HITL` or `AFK` for a wayfinder ticket; a task by the first of those words in its body, else None."""
+        if self.wayfinder_type == "task":
+            match = _MODE_WORD.search(self.body or "")
+            return match.group(1).upper() if match else None
+        return TYPE_MODES.get(self.wayfinder_type)
+
+    @property
+    def is_out_of_scope(self) -> bool:
+        """Closed as ruled out of scope, rather than resolved."""
+        return not self.is_open and any(label.lower() == OUT_OF_SCOPE_LABEL for label in self.labels)
+
+    def triage_hold(self, holds: dict[str, str]) -> str | None:
+        """This ticket's first label among `holds` (label → reason, see triage.hold_labels), or None."""
+        wanted = {label.lower() for label in holds}
+        return next((label for label in self.labels if label.lower() in wanted), None)
+
+    @property
     def summary(self) -> str:
         return summarize(self.body)
 
@@ -133,7 +160,7 @@ def classify(ticket: Ticket, now: datetime, done_days: int) -> Column | None:
         if ticket.closed_at is None or now - ticket.closed_at > timedelta(days=done_days):
             return None
         return Column.DONE
-    if ticket.review_tags or ticket.has_open_change_request:
+    if (ticket.review_tags or ticket.has_open_change_request) and not ticket.is_decision:
         return Column.REVIEW
     if ticket.is_blocked:
         return Column.BLOCKED
