@@ -178,9 +178,11 @@ class Herdr:
         try:
             self.call("agent", "start", unique, "--kind", "claude", "--pane", pane, "--timeout", "60000", "--", *claude_args, timeout=90)
         except HerdrError as exc:
-            if str(exc) != "agent_not_ready":
-                raise
-            return f" as agent {unique} (waiting at a startup prompt)"
+            if str(exc) == "agent_not_ready":
+                return f" as agent {unique} (waiting at a startup prompt)"
+            if str(exc) == "timeout":  # Claude went straight to work on the prompt, so herdr never saw it idle
+                return f" as agent {unique} (still starting)"
+            raise
         return f" as agent {unique}"
 
     # --- adopting older `claude -w` worktrees ---------------------------------------------------

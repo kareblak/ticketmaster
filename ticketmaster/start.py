@@ -42,7 +42,12 @@ def session_label(ticket: Ticket) -> str:
 
 
 def claude_args(ticket: Ticket, prompt: str) -> list[str]:
-    return ["-n", session_label(ticket), prompt]
+    """One line per argument: `herdr agent start` rejects newlines (invalid_agent_argument)."""
+    return ["-n", session_label(ticket), one_line(prompt)]
+
+
+def one_line(text: str) -> str:
+    return " ".join(line.strip() for line in text.splitlines() if line.strip())
 
 
 @dataclass

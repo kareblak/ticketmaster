@@ -138,6 +138,16 @@ def test_startup_prompt_is_reported_not_failed():
     assert bench(fake).start(ticket()).endswith("(waiting at a startup prompt)")
 
 
+def test_readiness_timeout_is_reported_not_failed():
+    fake = FakeHerdr({
+        ("worktree", "list"): worktrees(),
+        ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
+        ("agent", "list"): {"agents": []},
+        ("agent", "start"): HerdrError("timeout"),
+    })
+    assert bench(fake).start(ticket()).endswith("(still starting)")
+
+
 def test_custom_claude_binary_runs_as_a_plain_command():
     fake = FakeHerdr({("worktree", "list"): worktrees(), ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}}})
     bench(fake, claude="/opt/my-claude").start(ticket())
