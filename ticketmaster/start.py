@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .herdr import Herdr, Session
+from .herdr import Herdr, Session, unsaved_work
 from .model import Ticket
 
 DEFAULT_WAYFINDER_COMMAND = "/mattpocock-skills:wayfinder"
@@ -58,6 +59,7 @@ class Workbench:
     wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND
     claude: str = "claude"
     herdr: Herdr = field(default_factory=Herdr)
+    check_unsaved: Callable[[str], str | None] = unsaved_work  # why removing a checkout would lose work
 
     def sessions(self) -> dict[int, list[Session]]:
         return self.herdr.sessions(self.cwd)
@@ -83,3 +85,13 @@ class Workbench:
         for session in sessions:
             self.herdr.remove(self.cwd, session, session_label(ticket))
         return f"Removed {len(sessions)} worktree(s) of #{ticket.number}"
+
+    def auto_remove(self, ticket: Ticket, sessions: list[Session]) -> str:
+        """Removes the worktrees that hold no uncommitted or unpushed work; names the ones it keeps."""
+        kept = {s.path: reason for s in sessions if (reason := self.check_unsaved(s.path))}
+        safe = [s for s in sessions if s.path not in kept]
+        if safe:
+            self.remove(ticket, safe)
+        parts = [f"auto-removed {', '.join(Path(s.path).name for s in safe)}"] if safe else []
+        parts += [f"kept {Path(path).name} ({reason})" for path, reason in kept.items()]
+        return f"#{ticket.number} done: " + "; ".join(parts)

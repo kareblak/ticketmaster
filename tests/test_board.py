@@ -1,3 +1,4 @@
+import json
 import asyncio
 from datetime import datetime, timezone
 
@@ -110,6 +111,10 @@ class FakeBench:
 
     def remove(self, ticket, sessions):
         self.calls.append(("remove", ticket.number, len(sessions)))
+        return "ok"
+
+    def auto_remove(self, ticket, sessions):
+        self.calls.append(("auto_remove", ticket.number, [x.path for x in sessions]))
         return "ok"
 
 
@@ -335,5 +340,58 @@ def test_wide_board_can_be_forced_to_one_column():
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             assert [c.id for c in app.query(".column") if c.display] == ["column-READY"]
+
+    run(scenario())
+
+
+def test_auto_remove_cleans_done_tickets_whose_agent_is_not_busy_and_only_once(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text('{"auto_remove": true}')
+
+    async def scenario():
+        bench = FakeBench({
+            4: [Session(4, "issue", "/w/issue-4", status="idle"), Session(4, "review", "/w/review-4", status="working")],
+            2: [Session(2, "issue", "/w/issue-2")],
+        })
+        app = BoardApp(FakeProvider(TICKETS + [DONE]), Query(), interval=60, workbench=bench, settings_path=settings)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert bench.calls == [("auto_remove", 4, ["/w/issue-4"])]
+            bench.current = {4: [Session(4, "issue", "/w/issue-4", status="idle"), Session(4, "review", "/w/review-4", status="done")]}
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert bench.calls == [("auto_remove", 4, ["/w/issue-4"]), ("auto_remove", 4, ["/w/review-4"])]
+
+    run(scenario())
+
+
+def test_auto_remove_is_off_by_default():
+    async def scenario():
+        bench = FakeBench({4: [Session(4, "issue", "/w/issue-4")]})
+        app = bench_app(bench, TICKETS + [DONE])
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert bench.calls == []
+
+    run(scenario())
+
+
+def test_a_toggles_auto_remove_saves_it_and_cleans_up_right_away(tmp_path):
+    settings = tmp_path / "ticketmaster" / "settings.json"
+
+    async def scenario():
+        bench = FakeBench({4: [Session(4, "issue", "/w/issue-4")]})
+        app = BoardApp(FakeProvider(TICKETS + [DONE]), Query(), interval=60, workbench=bench, settings_path=settings)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert bench.calls == [] and "auto-remove" not in str(app.query_one("#status").render())
+            await pilot.press("a")
+            await loaded(app, pilot)
+            assert bench.calls == [("auto_remove", 4, ["/w/issue-4"])]
+            assert "auto-remove on" in str(app.query_one("#status").render())
+            assert json.loads(settings.read_text()) == {"auto_remove": True}
+            await pilot.press("a")
+            await pilot.pause()
+            assert json.loads(settings.read_text()) == {"auto_remove": False}
 
     run(scenario())

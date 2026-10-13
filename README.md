@@ -70,6 +70,7 @@ switch columns, `1`–`5` jump to one, `v` shows all side by side (`--columns` s
 | `s`            | all but Done      | start the ticket in a **new** worktree (always new; asks first)     |
 | `c`            | Review            | start a review session in a new `review-<n>` worktree               |
 | `x`            | Done              | remove the ticket's worktrees (herdr refuses if one has uncommitted changes) |
+| `a`            | any               | toggle auto-remove of Done tickets' worktrees (see below; saved)    |
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | filter, clear filter, refresh now, quit                             |
 
@@ -100,6 +101,15 @@ The board finds a ticket's sessions through its worktrees: any checkout named `i
 `● working`, `⚠ needs you`, `◌ idle`, `✓ done`, or `○ no agent` when the workspace is closed or
 Claude has exited. `Enter` on such a card focuses the workspace, reopening it and resuming
 Claude with `claude --continue` when needed.
+
+With auto-remove on (`a` toggles it; the status line shows `auto-remove on`), the board cleans
+up by itself: when a ticket is in Done, each of its worktrees is removed as `x` would, once its
+agent is no longer `working` or `needs you`. A worktree is kept, with a notification saying why, when it has uncommitted changes
+or commits that are on no remote (`git rev-list HEAD --not --remotes`). A squash-merged branch
+whose remote branch was deleted counts as unpushed, so remove that one with `x`. The board tries
+each worktree once per run; a kept one is retried after the board restarts. The setting is
+saved per user in `$XDG_CONFIG_HOME/ticketmaster/settings.json` (`~/.config/…`), so it applies to
+every board until toggled off.
 
 The board never writes to the tracker: wayfinder claims its tickets by assigning them, and the
 plain prompt tells the session to do the same, so the card moves to In progress on the next

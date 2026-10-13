@@ -120,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     from .board import BoardApp
-    from .config import load_config
+    from .config import load_config, settings_path
     from .start import DEFAULT_WAYFINDER_COMMAND, Workbench, build_prompt
 
     config = load_config(cwd)
@@ -133,5 +133,6 @@ def main(argv: list[str] | None = None) -> int:
         describe_start=lambda ticket: build_prompt(ticket, workbench.wayfinder_command).splitlines()[0]
         + f"\nworktree: issue-{ticket.number}, in its own herdr workspace",
         columns=args.columns,
+        settings_path=settings_path(),
     ).run()
     return 0

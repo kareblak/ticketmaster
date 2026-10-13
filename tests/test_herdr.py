@@ -214,3 +214,33 @@ def test_adopt_opens_only_unopened_claude_worktrees():
     assert Herdr(fake).adopt(REPO, {"issue-692": "#692 Fuel"}) == ["#692 Fuel"]
     opens = [c for c in fake.calls if c[:2] == ["worktree", "open"]]
     assert len(opens) == 1 and opens[0][5] == "/code/shiplog/.claude/worktrees/issue-692"
+
+
+def test_auto_remove_keeps_worktrees_with_unsaved_work():
+    fake = FakeHerdr({})
+    unsaved = {"/w/issue-686-2": "unpushed commits"}
+    sessions = [Session(686, "issue", "/w/issue-686", workspace="wA"), Session(686, "issue", "/w/issue-686-2", workspace="wB")]
+    message = bench(fake, check_unsaved=unsaved.get).auto_remove(ticket(), sessions)
+    assert [c for c in fake.calls if c[:2] == ["worktree", "remove"]] == [["worktree", "remove", "--workspace", "wA"]]
+    assert message == "#686 done: auto-removed issue-686; kept issue-686-2 (unpushed commits)"
+
+
+def git(cwd, *args):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def test_unsaved_work_sees_uncommitted_and_unpushed_changes(tmp_path):
+    remote, clone = tmp_path / "remote.git", tmp_path / "clone"
+    git(tmp_path, "init", "--bare", "-q", str(remote))
+    git(tmp_path, "clone", "-q", str(remote), str(clone))
+    for key, value in (("user.name", "t"), ("user.email", "t@t"), ("commit.gpgsign", "false")):
+        git(clone, "config", key, value)
+    (clone / "a").write_text("1")
+    git(clone, "add", "a")
+    git(clone, "commit", "-qm", "a")
+    assert herdr.unsaved_work(str(clone)) == "unpushed commits"
+    git(clone, "push", "-q", "origin", "HEAD")
+    assert herdr.unsaved_work(str(clone)) is None
+    (clone / "a").write_text("2")
+    assert herdr.unsaved_work(str(clone)) == "uncommitted changes"
+    assert herdr.unsaved_work(str(tmp_path)) == "not a git checkout"

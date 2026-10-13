@@ -33,7 +33,9 @@ exited), or starts one when there is none. `s` always starts the ticket in a new
 (`issue-<n>`, `issue-<n>-2`…) as herdr agent `issue-<n>`, with `/mattpocock-skills:wayfinder
 <map> <ticket>` for wayfinder tickets or a plain "work on issue" prompt otherwise. `c` starts a
 review session for a Review ticket in a `review-<n>` worktree; `x` removes a Done ticket's
-worktrees. Cards show each session's agent state (working, needs you, idle, done, no agent).
+worktrees; `a` toggles auto-remove (saved per user), where the board does that itself once the
+agent is idle, keeping worktrees with uncommitted or unpushed work. Cards
+show each session's agent state (working, needs you, idle, done, no agent).
 `ticketmaster adopt` opens herdr workspaces for older `claude -w` worktrees.
 
 The board never changes issues. Column rules (first match wins):

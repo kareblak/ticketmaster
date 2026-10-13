@@ -17,6 +17,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Label, Static
 
+from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
 from .model import COLUMN_ORDER, Board, Column, Ticket, build_board
 from .providers import Provider, ProviderError, Query
@@ -48,6 +49,7 @@ STATUS_STYLES = {  # herdr agent states
     "unknown": ("? unknown", "grey62"),
     None: ("○ no agent", "grey50"),
 }
+ACTIVE_STATES = ("working", "blocked")  # auto-remove waits until the agent is no longer busy or asking
 
 
 def tag_style(kind: str) -> str:
@@ -124,6 +126,7 @@ class Workbench(Protocol):
     def review(self, ticket: Ticket) -> str: ...
     def go_to(self, ticket: Ticket, session: Session) -> str: ...
     def remove(self, ticket: Ticket, sessions: list[Session]) -> str: ...
+    def auto_remove(self, ticket: Ticket, sessions: list[Session]) -> str: ...
 
 
 class Confirm(ModalScreen[bool]):
@@ -185,6 +188,7 @@ class BoardApp(App):
         Binding("s", "start", "New worktree"),
         Binding("c", "review", "Review"),
         Binding("x", "remove", "Remove worktree"),
+        Binding("a", "toggle_auto_remove", "Auto-remove"),
         Binding("o", "open", "Browser"),
         Binding("v", "toggle_view", "One/all columns"),
         *[Binding(str(i + 1), f"column({i})", show=False) for i in range(len(COLUMN_ORDER))],
@@ -203,6 +207,7 @@ class BoardApp(App):
         workbench: Workbench | None = None,
         describe_start: Callable[[Ticket], str] | None = None,
         columns: str = "auto",
+        settings_path: Path | None = None,
     ):
         super().__init__()
         self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
@@ -213,6 +218,10 @@ class BoardApp(App):
         self.describe_start = describe_start or (lambda ticket: "")
         self.starting: set[int] = set()  # started from this board, until herdr lists the worktree
         self.sessions: dict[int, list[Session]] = {}
+        self.settings_path = settings_path  # None: settings live only as long as the board
+        self.settings = load_settings(settings_path) if settings_path else {}
+        self.auto_remove = bool(self.settings.get("auto_remove", False))
+        self.auto_tried: set[str] = set()  # worktree paths auto-remove has handled, so a kept one is not retried
         self.herdr_error: str | None = None
         self.board_query = query
         self.interval = interval
@@ -273,6 +282,19 @@ class BoardApp(App):
             self._render_board()  # rebuilding resets scroll, so only when tickets changed
         else:
             self._render_status()
+        if board is not None and herdr_error is None:
+            self._auto_remove_done()
+
+    def _auto_remove_done(self) -> None:
+        """Removes Done tickets' worktrees once their agent is idle, done or gone; once per worktree per board run."""
+        if not self.auto_remove or self.workbench is None:
+            return
+        for ticket in self.board.columns[Column.DONE]:
+            sessions = [s for s in self.sessions.get(ticket.number, [])
+                        if s.path not in self.auto_tried and s.status not in ACTIVE_STATES]
+            if sessions:
+                self.auto_tried.update(s.path for s in sessions)
+                self._run(lambda ticket=ticket, sessions=sessions: self.workbench.auto_remove(ticket, sessions))
 
     def _render_board(self) -> None:
         focused = self.focused.ticket.number if isinstance(self.focused, Card) else None
@@ -298,6 +320,8 @@ class BoardApp(App):
             status.append(f"updated {self.last_ok:%H:%M:%S} · {self.board.total()} tickets · every {self.interval:g}s")
         if self.needle:
             status.append(f" · filter: {self.needle}", style="yellow")
+        if self.auto_remove:
+            status.append(" · auto-remove on", style="green")
         for error in (self.last_error, self.herdr_error):
             if error:
                 status.append(f"  ⚠ {error}", style="bold red")
@@ -484,6 +508,19 @@ class BoardApp(App):
         paths = "\n".join(s.path for s in sessions)
         self.push_screen(Confirm(f"Remove the worktrees of #{ticket.number}?",
                                  f"{paths}\nherdr refuses if one has uncommitted changes", "Remove"), confirmed)
+
+    def action_toggle_auto_remove(self) -> None:
+        self.auto_remove = not self.auto_remove
+        self.settings["auto_remove"] = self.auto_remove
+        if self.settings_path:
+            try:
+                save_settings(self.settings_path, self.settings)
+            except OSError as exc:
+                self.notify(f"auto-remove not saved: {exc}", severity="warning")
+        self.notify("Auto-remove on: Done tickets' worktrees go once their agent is idle; unsaved work is kept"
+                    if self.auto_remove else "Auto-remove off")
+        self._render_status()
+        self._auto_remove_done()
 
     def action_filter(self) -> None:
         box = self.query_one("#filter", Input)
