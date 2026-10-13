@@ -6,6 +6,8 @@ import webbrowser
 import zlib
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
+from typing import Protocol
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -15,7 +17,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Label, Static
 
-from .launch import Placement
+from .herdr import HerdrError, Session
 from .model import COLUMN_ORDER, Board, Column, Ticket, build_board
 from .providers import Provider, ProviderError, Query
 
@@ -29,6 +31,7 @@ TAG_COLORS = {
     "a11y": "black on green",
     "docs": "black on white",
 }
+NARROW_WIDTH = 100  # below this the "auto" view shows one column at a time
 FALLBACK_COLORS = ["white on dark_green", "white on purple4", "black on orange3", "white on grey37", "black on gold3"]
 COLUMN_COLORS = {
     Column.BLOCKED: "red",
@@ -37,16 +40,28 @@ COLUMN_COLORS = {
     Column.REVIEW: "magenta",
     Column.DONE: "grey50",
 }
+STATUS_STYLES = {  # herdr agent states
+    "working": ("● working", "bold yellow"),
+    "blocked": ("⚠ needs you", "bold red"),
+    "idle": ("◌ idle", "cyan"),
+    "done": ("✓ done", "green"),
+    "unknown": ("? unknown", "grey62"),
+    None: ("○ no agent", "grey50"),
+}
 
 
 def tag_style(kind: str) -> str:
     return TAG_COLORS.get(kind.lower()) or FALLBACK_COLORS[zlib.crc32(kind.lower().encode()) % len(FALLBACK_COLORS)]
 
 
-def render_card(ticket: Ticket, column: Column, started: bool = False) -> Text:
+def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False) -> Text:
     text = Text()
-    if started:
-        text.append("▶ session started\n", style="bold green")
+    for session in sessions:
+        label, style = STATUS_STYLES.get(session.status, STATUS_STYLES["unknown"])
+        text.append(f"{label} ", style=style)
+        text.append(f"{Path(session.path).name}\n", style="dim")
+    if starting and not sessions:
+        text.append("▶ starting…\n", style="bold green")
     text.append(f"#{ticket.number} ", style=f"bold {COLUMN_COLORS[column]}")
     text.append(ticket.title, style="bold")
     if ticket.summary:
@@ -86,60 +101,64 @@ class Card(Static, can_focus=True):
         Binding("right,l", "app.move(1,0)", show=False),
     ]
 
-    def __init__(self, ticket: Ticket, column: Column, started: bool = False):
-        super().__init__(render_card(ticket, column, started), classes="card")
+    def __init__(self, ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False):
+        super().__init__(render_card(ticket, column, sessions, starting), classes="card")
         self.ticket = ticket
         self.column = column
 
     def on_click(self, event: events.Click) -> None:
         self.focus()
         if event.chain >= 2:
-            self.app.action_start()
+            self.app.action_primary()
 
 
 class ColumnScroll(VerticalScroll, can_focus=False):
     """Scrolls with the mouse wheel and follows the focused card, but never takes focus itself."""
 
 
-class ConfirmStart(ModalScreen[Placement | None]):
-    """Asks where to open the session; a stray double-click is cancelled with n or Esc."""
+class Workbench(Protocol):
+    """The herdr side of the board, see start.Workbench. Every call blocks."""
+
+    def sessions(self) -> dict[int, list[Session]]: ...
+    def start(self, ticket: Ticket) -> str: ...
+    def review(self, ticket: Ticket) -> str: ...
+    def go_to(self, ticket: Ticket, session: Session) -> str: ...
+    def remove(self, ticket: Ticket, sessions: list[Session]) -> str: ...
+
+
+class Confirm(ModalScreen[bool]):
+    """Yes/no before anything that makes or removes a worktree; a stray double-click is cancelled with n or Esc."""
 
     DEFAULT_CSS = """
-    ConfirmStart { align: center middle; }
-    #dialog { width: 96; height: auto; padding: 1 2; border: thick $accent; background: $surface; }
+    Confirm { align: center middle; }
+    #dialog { width: 96; max-width: 100%; height: auto; padding: 1 2; border: thick $accent; background: $surface; }
     #prompt { margin-bottom: 1; }
     #buttons { height: auto; align-horizontal: right; }
     #buttons Button { margin-left: 2; }
     """
-    BINDINGS = [
-        Binding("t", "answer('tab')", "New tab"),
-        Binding("r", "answer('split right')", "Pane right"),
-        Binding("d", "answer('split down')", "Pane down"),
-        Binding("a", "answer('auto')", "Auto layout"),
-        Binding("n,escape", "answer('')", "Cancel"),
-    ]
+    AUTO_FOCUS = "#yes"  # Enter presses the focused button
+    BINDINGS = [Binding("n,escape", "answer(False)", "Cancel"), Binding("y", "answer(True)", "Yes")]
 
-    def __init__(self, ticket: Ticket, detail: str):
+    def __init__(self, question: str, detail: str = "", yes: str = "Yes"):
         super().__init__()
-        self.ticket = ticket
+        self.question = question
         self.detail = detail
+        self.yes = yes
 
     def compose(self) -> ComposeResult:
         with Vertical(id="dialog"):
-            yield Label(Text(f"Start #{self.ticket.number} {self.ticket.title} in a new session?", style="bold"), id="prompt")
-            yield Label(Text(self.detail, style="dim"))
+            yield Label(Text(self.question, style="bold"), id="prompt")
+            if self.detail:
+                yield Label(Text(self.detail, style="dim"))
             with Horizontal(id="buttons"):
-                yield Button("Cancel (n)", id="cancel")
-                yield Button("New tab (t)", id="tab", variant="primary")
-                yield Button("Pane right (r)", id="split-right", variant="primary")
-                yield Button("Pane down (d)", id="split-down", variant="primary")
-                yield Button("Auto (a)", id="auto", variant="primary")
+                yield Button("Cancel (n)", id="no")
+                yield Button(f"{self.yes} (y)", id="yes", variant="primary")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.action_answer(event.button.id.replace("-", " "))
+        self.dismiss(event.button.id == "yes")
 
-    def action_answer(self, answer: str) -> None:
-        self.dismiss(Placement(answer) if answer in {p.value for p in Placement} else None)
+    def action_answer(self, answer: bool) -> None:
+        self.dismiss(answer)
 
 
 class BoardApp(App):
@@ -147,7 +166,9 @@ class BoardApp(App):
     AUTO_FOCUS = None  # otherwise the hidden filter input grabs focus and eats keystrokes
     CSS = """
     Screen { layout: vertical; }
-    #status { height: 1; padding: 0 1; background: $panel; }
+    #status { height: auto; padding: 0 1; background: $panel; }
+    #tabs { height: auto; padding: 0 1; display: none; }
+    #tabs.visible { display: block; }
     #columns { height: 1fr; }
     .column { width: 1fr; border: round $panel-lighten-2; padding: 0 0; }
     .column-title { height: 1; padding: 0 1; text-style: bold; }
@@ -160,8 +181,13 @@ class BoardApp(App):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("slash", "filter", "Filter"),
-        Binding("enter", "open", "Open"),
-        Binding("s", "start", "Start session"),
+        Binding("enter", "primary", "Go/start"),
+        Binding("s", "start", "New worktree"),
+        Binding("c", "review", "Review"),
+        Binding("x", "remove", "Remove worktree"),
+        Binding("o", "open", "Browser"),
+        Binding("v", "toggle_view", "One/all columns"),
+        *[Binding(str(i + 1), f"column({i})", show=False) for i in range(len(COLUMN_ORDER))],
         Binding("up,k", "move(0,-1)", show=False),
         Binding("down,j", "move(0,1)", show=False),
         Binding("left,h", "move(-1,0)", show=False),
@@ -174,14 +200,20 @@ class BoardApp(App):
         provider: Provider,
         query: Query,
         interval: float = 5.0,
-        starter: Callable[[Ticket, Placement], str] | None = None,
+        workbench: Workbench | None = None,
         describe_start: Callable[[Ticket], str] | None = None,
+        columns: str = "auto",
     ):
         super().__init__()
+        self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
+        self.single = False
+        self.column_index = COLUMN_ORDER.index(Column.READY)
         self.provider = provider
-        self.starter = starter
+        self.workbench = workbench
         self.describe_start = describe_start or (lambda ticket: "")
-        self.started: set[int] = set()
+        self.starting: set[int] = set()  # started from this board, until herdr lists the worktree
+        self.sessions: dict[int, list[Session]] = {}
+        self.herdr_error: str | None = None
         self.board_query = query
         self.interval = interval
         self.board = Board()
@@ -193,15 +225,17 @@ class BoardApp(App):
 
     def compose(self) -> ComposeResult:
         yield Static("loading…", id="status")
+        yield Static(id="tabs")
         with Horizontal(id="columns"):
             for column in COLUMN_ORDER:
-                with Vertical(classes="column"):
+                with Vertical(classes="column", id=f"column-{column.name}"):
                     yield Static(column.value, classes="column-title", id=f"title-{column.name}")
                     yield ColumnScroll(id=f"col-{column.name}")
         yield Input(placeholder="filter: words match title, body, labels, assignees · esc clears", id="filter")
         yield Footer()
 
     def on_mount(self) -> None:
+        self._apply_view()
         self.action_refresh()
         self.set_interval(self.interval, self.action_refresh)
 
@@ -209,20 +243,32 @@ class BoardApp(App):
         self.run_worker(self._fetch, thread=True, exclusive=True, group="fetch")
 
     def _fetch(self) -> None:
+        sessions, herdr_error = self.sessions, None
+        if self.workbench is not None:
+            try:
+                sessions = self.workbench.sessions()
+            except HerdrError as exc:
+                herdr_error = f"herdr: {exc}"
         try:
             tickets = self.provider.fetch(self.board_query)
             board = build_board(tickets, done_days=self.board_query.done_days)
-            self.call_from_thread(self._apply, board, None)
+            self.call_from_thread(self._apply, board, None, sessions, herdr_error)
         except ProviderError as exc:
-            self.call_from_thread(self._apply, None, str(exc))
+            self.call_from_thread(self._apply, None, str(exc), sessions, herdr_error)
 
-    def _apply(self, board: Board | None, error: str | None) -> None:
+    def _apply(self, board: Board | None, error: str | None, sessions: dict[int, list[Session]] | None = None,
+               herdr_error: str | None = None) -> None:
         changed = False
         if board is not None:
             changed = board.columns != self.board.columns or self.last_ok is None
             self.board = board
             self.last_ok = datetime.now()
+        if sessions is not None and sessions != self.sessions:
+            self.starting -= set(sessions) - set(self.sessions)
+            self.sessions = sessions
+            changed = True
         self.last_error = error
+        self.herdr_error = herdr_error
         if changed:
             self._render_board()  # rebuilding resets scroll, so only when tickets changed
         else:
@@ -237,12 +283,13 @@ class BoardApp(App):
             title.update(Text(f"{column.value} ({len(tickets)})", style=f"bold {COLUMN_COLORS[column]}"))
             container = self.query_one(f"#col-{column.name}", VerticalScroll)
             container.remove_children()
-            cards = [Card(t, column, t.number in self.started) for t in tickets]
+            cards = [Card(t, column, self.sessions.get(t.number, []), t.number in self.starting) for t in tickets]
             container.mount_all(cards)
             refocus = refocus or next((c for c in cards if c.ticket.number == focused), None)
         if refocus is not None:
             self.call_after_refresh(refocus.focus, scroll_visible=False)
         self._render_status()
+        self._render_tabs()
 
     def _render_status(self) -> None:
         status = Text(self.sub_title, style="bold")
@@ -251,15 +298,70 @@ class BoardApp(App):
             status.append(f"updated {self.last_ok:%H:%M:%S} · {self.board.total()} tickets · every {self.interval:g}s")
         if self.needle:
             status.append(f" · filter: {self.needle}", style="yellow")
-        if self.last_error:
-            status.append(f"  ⚠ {self.last_error}", style="bold red")
+        for error in (self.last_error, self.herdr_error):
+            if error:
+                status.append(f"  ⚠ {error}", style="bold red")
         self.query_one("#status", Static).update(status)
+
+    # --- one column at a time (narrow panes, e.g. a herdr side pane) ------------------------------
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._apply_view()
+
+    def _apply_view(self) -> None:
+        single = self.view == "one" or (self.view == "auto" and self.size.width < NARROW_WIDTH)
+        if single and not self.single and isinstance(self.focused, Card):
+            self.column_index = COLUMN_ORDER.index(self.focused.column)  # keep the selection in view
+        self.single = single
+        for i, column in enumerate(COLUMN_ORDER):
+            self.query_one(f"#column-{column.name}").display = not single or i == self.column_index
+        self.query_one("#tabs", Static).set_class(single, "visible")
+        self._render_tabs()
+
+    def _render_tabs(self) -> None:
+        tabs = Text("‹ ", style="dim")
+        for i, column in enumerate(COLUMN_ORDER):
+            if i:
+                tabs.append(" · ", style="dim")
+            label = f"{i + 1} {column.value} {self._visible_count(column)}"
+            tabs.append(f" {label} " if i == self.column_index else label,
+                        style=f"bold black on {COLUMN_COLORS[column]}" if i == self.column_index else COLUMN_COLORS[column])
+        tabs.append(" ›", style="dim")
+        self.query_one("#tabs", Static).update(tabs)
+
+    def _visible_count(self, column: Column) -> int:
+        return sum(1 for t in self.board.columns[column] if matches(t, self.needle))
+
+    def action_toggle_view(self) -> None:
+        self.view = "all" if self.single else "one"
+        self._apply_view()
+
+    def action_column(self, index: int) -> None:
+        self._show_column(index)
+
+    def _show_column(self, index: int, row: int = 0) -> None:
+        self.column_index = max(0, min(len(COLUMN_ORDER) - 1, index))
+        self._apply_view()
+        cards = self._cards_by_column()[self.column_index]
+        if cards:
+            self._select(cards[min(row, len(cards) - 1)])
+        elif self.single:
+            self.set_focus(None)
 
     def _cards_by_column(self) -> list[list[Card]]:
         return [list(self.query_one(f"#col-{c.name}", VerticalScroll).query(Card)) for c in COLUMN_ORDER]
 
     def action_move(self, dx: int, dy: int) -> None:
         grid = self._cards_by_column()
+        if self.single:
+            current = grid[self.column_index]
+            focused = isinstance(self.focused, Card) and self.focused in current
+            row = current.index(self.focused) if focused else 0
+            if dx:
+                self._show_column(self.column_index + dx, row)
+            elif current:
+                self._select(current[max(0, min(len(current) - 1, row + dy)) if focused else 0])
+            return
         if not any(grid):
             return
         if not isinstance(self.focused, Card):
@@ -277,6 +379,8 @@ class BoardApp(App):
             self._select(grid[target][min(row, len(grid[target]) - 1)])
 
     def _select(self, card: Card) -> None:
+        self.column_index = COLUMN_ORDER.index(card.column)
+        self._render_tabs()
         card.focus(scroll_visible=False)
         card.scroll_visible(animate=False)
 
@@ -284,33 +388,102 @@ class BoardApp(App):
         if isinstance(self.focused, Card):
             webbrowser.open(self.focused.ticket.url)
 
+    # --- herdr actions ----------------------------------------------------------------------------
+
+    def _card(self) -> Card | None:
+        if not isinstance(self.focused, Card):
+            self.notify("Select a ticket first", severity="warning")
+            return None
+        if self.workbench is None:
+            self.notify("Sessions need herdr; run the board from a herdr pane", severity="warning")
+            return None
+        return self.focused
+
+    def _run(self, job: Callable[[], str]) -> None:
+        def work() -> None:
+            try:
+                message, severity = job(), "information"
+            except HerdrError as exc:
+                message, severity = f"herdr: {exc}", "error"
+            self.call_from_thread(self.notify, message, severity=severity)
+            self.call_from_thread(self.action_refresh)
+
+        self.run_worker(work, thread=True, group="herdr")
+
+    def action_primary(self) -> None:
+        """Enter: go to the ticket's session; with none, start one (Ready, In progress) or review it (Review)."""
+        card = self._card()
+        if card is None:
+            return
+        ticket, sessions = card.ticket, self.sessions.get(card.ticket.number, [])
+        if sessions:
+            session = min(sessions, key=lambda s: (s.kind != "issue", s.status is None, s.workspace is None))
+            self._run(lambda: self.workbench.go_to(ticket, session))
+        elif card.column is Column.REVIEW:
+            self.action_review()
+        elif card.column in (Column.READY, Column.IN_PROGRESS):
+            self.action_start()
+        else:
+            self.notify(f"#{ticket.number} has no worktree here; s starts one", severity="warning")
+
     def action_start(self) -> None:
-        card = self.focused
-        if not isinstance(card, Card):
-            self.notify("Select a Ready ticket first", severity="warning")
+        card = self._card()
+        if card is None:
             return
         ticket = card.ticket
-        if card.column is not Column.READY:
-            self.notify(f"Only Ready tickets can be started; #{ticket.number} is {card.column.value}", severity="warning")
+        if card.column is Column.DONE:
+            self.notify(f"#{ticket.number} is done", severity="warning")
             return
-        if self.starter is None:
-            self.notify("Starting sessions is not available here", severity="warning")
-            return
-        if ticket.number in self.started:
-            self.notify(f"A session for #{ticket.number} was already started from this board", severity="warning")
-            return
+        existing = [Path(s.path).name for s in self.sessions.get(ticket.number, [])]
+        warn = f"\nalready has {', '.join(existing)}: this makes another" if existing else ""
+        if card.column is Column.BLOCKED:
+            warn += f"\nblocked by {ticket.open_blockers or 'a label'}"
 
-        def confirmed(placement: Placement | None) -> None:
-            if placement is not None:
-                self.started.add(ticket.number)
+        def confirmed(yes: bool | None) -> None:
+            if yes:
+                self.starting.add(ticket.number)
                 self._render_board()
-                self.run_worker(lambda: self._start(ticket, placement), thread=True, group="start")
+                self._run(lambda: self.workbench.start(ticket))
 
-        self.push_screen(ConfirmStart(ticket, self.describe_start(ticket)), confirmed)
+        self.push_screen(Confirm(f"Start #{ticket.number} {ticket.title} in a new worktree?",
+                                 self.describe_start(ticket) + warn, "Start"), confirmed)
 
-    def _start(self, ticket: Ticket, placement: Placement) -> None:
-        message = self.starter(ticket, placement)
-        self.call_from_thread(self.notify, message)
+    def action_review(self) -> None:
+        card = self._card()
+        if card is None:
+            return
+        ticket = card.ticket
+        if card.column is not Column.REVIEW:
+            self.notify(f"#{ticket.number} is not in Review", severity="warning")
+            return
+
+        def confirmed(yes: bool | None) -> None:
+            if yes:
+                self._run(lambda: self.workbench.review(ticket))
+
+        self.push_screen(Confirm(f"Review #{ticket.number} {ticket.title} in a new worktree?",
+                                 f"worktree: review-{ticket.number}; Claude checks out the PR and reviews it", "Review"),
+                         confirmed)
+
+    def action_remove(self) -> None:
+        card = self._card()
+        if card is None:
+            return
+        ticket, sessions = card.ticket, self.sessions.get(card.ticket.number, [])
+        if card.column is not Column.DONE:
+            self.notify("Only Done tickets' worktrees can be removed here", severity="warning")
+            return
+        if not sessions:
+            self.notify(f"#{ticket.number} has no worktrees", severity="warning")
+            return
+
+        def confirmed(yes: bool | None) -> None:
+            if yes:
+                self._run(lambda: self.workbench.remove(ticket, sessions))
+
+        paths = "\n".join(s.path for s in sessions)
+        self.push_screen(Confirm(f"Remove the worktrees of #{ticket.number}?",
+                                 f"{paths}\nherdr refuses if one has uncommitted changes", "Remove"), confirmed)
 
     def action_filter(self) -> None:
         box = self.query_one("#filter", Input)

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ticketmaster"
 dynamic = ["version"]
-description = "Live terminal kanban board of GitHub, GitLab and Gitea/Forgejo issues, with a Claude Code skill"
+description = "Live kanban board of GitHub, GitLab and Gitea/Forgejo issues in herdr, starting each ticket in its own worktree workspace with Claude Code"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["textual>=0.80,<9", "pyyaml>=6"]

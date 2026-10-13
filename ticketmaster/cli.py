@@ -1,7 +1,7 @@
-"""Command line: `open` (split beside the caller), `board` (run here), `snapshot` (print once).
+"""Command line: `open` (the board in a herdr pane beside the caller), `board` (run here, inside herdr),
+`snapshot` (print once), `adopt` (open herdr workspaces for existing `claude -w` worktrees).
 
-With no command, a terminal runs the board in place; anything else (e.g. Claude Code's shell,
-which has no TTY) opens it beside the caller.
+Everything but `snapshot` and `install-skill` runs inside herdr (HERDR_ENV=1).
 """
 
 from __future__ import annotations
@@ -10,18 +10,20 @@ import argparse
 import sys
 from pathlib import Path
 
+from . import herdr
 from .model import COLUMN_ORDER, build_board
 from .providers import ProviderError, Query
 
 
-COMMANDS = ("open", "board", "snapshot", "install-skill")
+COMMANDS = ("open", "board", "snapshot", "adopt", "install-skill")
+NEEDS_HERDR = ("open", "board", "adopt")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ticketmaster",
-        usage="ticketmaster [open|board|snapshot|install-skill] [parent] [options]",
-        description="Live kanban board of issue-tracker work.",
+        usage="ticketmaster [open|board|snapshot|adopt|install-skill] [parent] [options]",
+        description="Live kanban board of issue-tracker work, in herdr.",
     )
     parser.add_argument("parent", nargs="?", type=parse_number, help="parent issue: show its sub-issues")
     parser.add_argument("--label", help="show issues with this label")
@@ -31,10 +33,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--interval", type=float, default=5.0, help="refresh seconds (default 5)")
     parser.add_argument("--done-days", type=int, default=7, help="days closed issues stay in Done (default 7)")
     parser.add_argument("--limit", type=int, default=300, help="max issues per query (default 300)")
-    parser.add_argument("--no-worktree", action="store_true", help="start sessions without `claude -w`")
+    parser.add_argument("--columns", choices=["auto", "one", "all"], default="auto",
+                        help="one column at a time, all side by side, or auto by width (default)")
     command = argv[0] if argv and argv[0] in COMMANDS else None
     args = parser.parse_args(argv[1:] if command else argv)
-    args.command = command
+    args.command = command or "open"
     return args
 
 
@@ -49,25 +52,23 @@ def passthrough(args: argparse.Namespace) -> list[str]:
     for flag in ("label", "repo", "provider", "host"):
         if getattr(args, flag):
             out += [f"--{flag}", getattr(args, flag)]
-    if args.no_worktree:
-        out.append("--no-worktree")
+    if args.columns != "auto":
+        out += ["--columns", args.columns]
     out += ["--interval", f"{args.interval:g}", "--done-days", str(args.done_days), "--limit", str(args.limit)]
     return out
 
 
-def default_command() -> str:
-    return "board" if sys.stdin.isatty() and sys.stdout.isatty() else "open"
-
-
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
-    args.command = args.command or default_command()
     if args.command == "install-skill":
         from .install_skill import install_skill
 
         path = install_skill()
         print(f"Installed /ticketmaster skill at {path}. Restart Claude Code sessions to pick it up.")
         return 0
+    if args.command in NEEDS_HERDR and not herdr.available():
+        print(f"ticketmaster: `{args.command}` runs inside herdr; start herdr and run it from a herdr pane", file=sys.stderr)
+        return 2
     cwd = Path.cwd()
     from .config import resolve_provider
 
@@ -79,14 +80,27 @@ def main(argv: list[str] | None = None) -> int:
     query = Query(parent=args.parent, label=args.label, done_days=args.done_days, limit=args.limit)
 
     if args.command == "open":
-        from .launch import Placement, board_command, describe, open_beside
+        try:
+            pane = herdr.Herdr().open_board(cwd, herdr.board_command(passthrough(args)))
+        except herdr.HerdrError as exc:
+            print(f"ticketmaster: herdr: {exc}", file=sys.stderr)
+            return 1
+        print(f"Board opened in herdr pane {pane} ({herdr.BOARD_LABEL}) for {provider.name}:{provider.repo}.")
+        return 0
 
-        command = board_command(passthrough(args))
-        launch = open_beside(cwd, command, Placement.SPLIT_RIGHT)
-        if launch:
-            print(f"Board opened in {describe(launch)} for {provider.name}:{provider.repo}.")
-        else:
-            print(f"No terminal launcher worked. Run this in another window:\n  {command}")
+    if args.command == "adopt":
+        from .start import session_label, worktree_name
+
+        try:
+            labels = {worktree_name(t): session_label(t) for t in provider.fetch(query)}
+        except ProviderError:
+            labels = {}  # titles are a nicety; open the workspaces with bare issue-<n> labels
+        try:
+            opened = herdr.Herdr().adopt(cwd, labels)
+        except herdr.HerdrError as exc:
+            print(f"ticketmaster: {exc}", file=sys.stderr)
+            return 1
+        print(f"Opened {len(opened)} herdr workspace(s): {', '.join(opened)}" if opened else "No unopened .claude/worktrees checkouts.")
         return 0
 
     if args.command == "snapshot":
@@ -107,20 +121,17 @@ def main(argv: list[str] | None = None) -> int:
 
     from .board import BoardApp
     from .config import load_config
-    from .start import DEFAULT_WAYFINDER_COMMAND, StartOptions, build_prompt, start_session
+    from .start import DEFAULT_WAYFINDER_COMMAND, Workbench, build_prompt
 
     config = load_config(cwd)
-    options = StartOptions(
-        cwd=cwd,
-        worktree=not args.no_worktree and config.get("worktree", True),
-        wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND),
-    )
+    workbench = Workbench(cwd, wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND))
     BoardApp(
         provider,
         query,
         interval=args.interval,
-        starter=lambda ticket, placement: start_session(ticket, options, placement),
-        describe_start=lambda ticket: build_prompt(ticket, options.wayfinder_command).splitlines()[0]
-        + (f"\nworktree: issue-{ticket.number}" if options.worktree else ""),
+        workbench=workbench,
+        describe_start=lambda ticket: build_prompt(ticket, workbench.wayfinder_command).splitlines()[0]
+        + f"\nworktree: issue-{ticket.number}, in its own herdr workspace",
+        columns=args.columns,
     ).run()
     return 0

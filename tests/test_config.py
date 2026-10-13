@@ -35,8 +35,8 @@ def test_unknown_provider_errors():
 def test_cli_accepts_bare_parent_and_explicit_command():
     from ticketmaster.cli import parse_args
 
-    assert (parse_args(["680"]).command, parse_args(["680"]).parent) == (None, 680)
+    assert (parse_args(["680"]).command, parse_args(["680"]).parent) == ("open", 680)
     args = parse_args(["board", "#12", "--label", "x"])
     assert (args.command, args.parent, args.label) == ("board", 12, "x")
     assert parse_args(["snapshot", "https://github.com/o/r/issues/9"]).parent == 9
-    assert parse_args([]).command is None
+    assert parse_args([]).command == "open"

@@ -1,7 +1,8 @@
 import asyncio
+from datetime import datetime, timezone
 
 from ticketmaster.board import BoardApp, Card
-from ticketmaster.launch import Placement
+from ticketmaster.herdr import Session
 from ticketmaster.model import Ticket
 from ticketmaster.providers import ProviderError, Query
 
@@ -85,12 +86,38 @@ def test_provider_error_is_shown_in_status():
     run(scenario())
 
 
-def start_app(starter_calls):
-    def starter(ticket, placement):
-        starter_calls.append((ticket.number, placement))
+class FakeBench:
+    """Records the board's herdr actions; `sessions` is what herdr reports."""
+
+    def __init__(self, sessions=None):
+        self.calls = []
+        self.current = sessions or {}
+
+    def sessions(self):
+        return self.current
+
+    def start(self, ticket):
+        self.calls.append(("start", ticket.number))
         return f"Started #{ticket.number}"
 
-    return BoardApp(FakeProvider(TICKETS), Query(), interval=60, starter=starter)
+    def review(self, ticket):
+        self.calls.append(("review", ticket.number))
+        return "ok"
+
+    def go_to(self, ticket, session):
+        self.calls.append(("go_to", ticket.number, session.path))
+        return "ok"
+
+    def remove(self, ticket, sessions):
+        self.calls.append(("remove", ticket.number, len(sessions)))
+        return "ok"
+
+
+DONE = Ticket(number=4, title="Shipped", url="u4", is_open=False, closed_at=datetime.now(timezone.utc))
+
+
+def bench_app(bench, tickets=TICKETS):
+    return BoardApp(FakeProvider(tickets), Query(), interval=60, workbench=bench)
 
 
 async def loaded(app, pilot):
@@ -98,80 +125,161 @@ async def loaded(app, pilot):
     await pilot.pause()
 
 
+def is_confirm(app):
+    return type(app.screen).__name__ == "Confirm"
+
+
 def test_start_ready_ticket_after_confirm():
     async def scenario():
-        calls = []
-        app = start_app(calls)
+        bench = FakeBench()
+        app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             await pilot.press("down", "s")
             await pilot.pause()
-            assert type(app.screen).__name__ == "ConfirmStart"
-            await pilot.press("t")
+            assert is_confirm(app)
+            await pilot.press("y")
             await loaded(app, pilot)
-            assert calls == [(1, Placement.TAB)]
+            assert bench.calls == [("start", 1)]
             card = app.query_one("#col-READY").query(Card).first()
-            assert "session started" in str(card.render())
-            await pilot.press("down", "s")
-            await pilot.pause()
-            assert type(app.screen).__name__ != "ConfirmStart" and len(calls) == 1
+            assert "starting" in str(card.render())
 
     run(scenario())
 
 
 def test_cancel_does_not_start():
     async def scenario():
-        calls = []
-        app = start_app(calls)
+        bench = FakeBench()
+        app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             await pilot.press("down", "s", "n")
             await loaded(app, pilot)
-            assert calls == []
+            assert bench.calls == []
 
     run(scenario())
 
 
-def test_only_ready_tickets_can_start():
+def test_enter_on_ready_card_without_session_asks_to_start_and_enter_confirms():
     async def scenario():
-        calls = []
-        app = start_app(calls)
+        bench = FakeBench()
+        app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
-            await pilot.press("down", "right", "s")
+            await pilot.press("down", "enter")
             await pilot.pause()
-            assert app.focused.ticket.number == 2
-            assert type(app.screen).__name__ != "ConfirmStart" and calls == []
+            assert is_confirm(app)
+            await pilot.press("enter")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 1)]
 
     run(scenario())
 
 
 def test_double_click_opens_confirm():
     async def scenario():
-        calls = []
-        app = start_app(calls)
+        bench = FakeBench()
+        app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             card = app.query_one("#col-READY").query(Card).first()
             await pilot.click(card, times=2)
             await pilot.pause()
-            assert type(app.screen).__name__ == "ConfirmStart"
-            await pilot.click("#split-right")
+            assert is_confirm(app)
+            await pilot.click("#yes")
             await loaded(app, pilot)
-            assert calls == [(1, Placement.SPLIT_RIGHT)]
+            assert bench.calls == [("start", 1)]
 
     run(scenario())
 
 
-def test_pane_down_key():
+def test_cards_show_agent_state_and_enter_goes_to_the_session():
     async def scenario():
-        calls = []
-        app = start_app(calls)
+        bench = FakeBench({2: [Session(2, "issue", "/w/issue-2", workspace="w5", status="blocked")]})
+        app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
-            await pilot.press("down", "s", "d")
+            card = app.query_one("#col-IN_PROGRESS").query(Card).first()
+            assert "needs you" in str(card.render()) and "issue-2" in str(card.render())
+            await pilot.press("down", "right", "enter")
             await loaded(app, pilot)
-            assert calls == [(1, Placement.SPLIT_DOWN)]
+            assert not is_confirm(app) and bench.calls == [("go_to", 2, "/w/issue-2")]
+
+    run(scenario())
+
+
+def test_new_herdr_session_shows_up_on_refresh():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            bench.current = {1: [Session(1, "issue", "/w/issue-1", workspace="w9", status="working")]}
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert "working" in str(app.query_one("#col-READY").query(Card).first().render())
+
+    run(scenario())
+
+
+def test_review_key_starts_a_review_worktree_only_in_review():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "c")  # Ready card
+            await pilot.pause()
+            assert not is_confirm(app)
+            await pilot.press("right", "right", "c", "y")
+            await loaded(app, pilot)
+            assert bench.calls == [("review", 3)]
+
+    run(scenario())
+
+
+def test_enter_in_review_without_session_offers_a_review():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "right", "right", "enter", "y")
+            await loaded(app, pilot)
+            assert bench.calls == [("review", 3)]
+
+    run(scenario())
+
+
+def test_remove_only_for_done_tickets_with_worktrees():
+    async def scenario():
+        bench = FakeBench({4: [Session(4, "issue", "/w/issue-4")], 2: [Session(2, "issue", "/w/issue-2")]})
+        app = bench_app(bench, TICKETS + [DONE])
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "right", "x")  # In progress
+            await pilot.pause()
+            assert not is_confirm(app)
+            await pilot.press("right", "right")
+            assert app.focused.ticket.number == 4
+            await pilot.press("x")
+            await pilot.pause()
+            assert is_confirm(app)
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("remove", 4, 1)]
+
+    run(scenario())
+
+
+def test_without_herdr_nothing_starts():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "s")
+            await pilot.pause()
+            assert not is_confirm(app)
 
     run(scenario())
 
@@ -199,14 +307,33 @@ def test_up_down_move_between_cards_in_a_column():
     run(scenario())
 
 
-def test_auto_key():
+def test_narrow_board_shows_one_column_and_switches_with_arrows():
     async def scenario():
-        calls = []
-        app = start_app(calls)
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(60, 30)) as pilot:
+            await loaded(app, pilot)
+            visible = lambda: [c.id for c in app.query(".column") if c.display]
+            assert app.single and visible() == ["column-READY"]
+            assert "Ready 1" in str(app.query_one("#tabs").render())
+            await pilot.press("down")
+            assert app.focused.ticket.number == 1
+            await pilot.press("right")
+            assert visible() == ["column-IN_PROGRESS"] and app.focused.ticket.number == 2
+            await pilot.press("left", "left")
+            assert visible() == ["column-BLOCKED"] and app.focused is None  # empty columns still show
+            await pilot.press("4")
+            assert visible() == ["column-REVIEW"] and app.focused.ticket.number == 3
+            await pilot.press("v")
+            assert len(visible()) == 5 and app.focused.ticket.number == 3
+
+    run(scenario())
+
+
+def test_wide_board_can_be_forced_to_one_column():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, columns="one")
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
-            await pilot.press("down", "s", "a")
-            await loaded(app, pilot)
-            assert calls == [(1, Placement.AUTO)]
+            assert [c.id for c in app.query(".column") if c.display] == ["column-READY"]
 
     run(scenario())
