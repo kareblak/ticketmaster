@@ -9,6 +9,7 @@ the spec in their `## Parent` section. Open pull requests count as review when t
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import re
@@ -82,20 +83,18 @@ class GiteaProvider:
         pulls = self._list(f"/repos/{self.repo}/pulls", {"state": "open"}, 200)
         pr_bodies = [f"{p.get('title', '')}\n{p.get('body') or ''}" for p in pulls]
         tickets = [to_ticket(i, None, pr_bodies) for i in raw]
+        issue = functools.cache(self._issue)  # each chain issue off the board once per refresh
         if query.parent is not None:
-            tickets = map_family(tickets, query.parent, self._map(query.parent))
+            tickets = map_family(tickets, query.parent, issue(query.parent))
         open_numbers = [t.number for t in tickets if t.is_open]
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
         tickets = [with_native_blockers(t, blockers.get(t.number)) for t in tickets]
-        return with_body_blockers(resolve_maps(tickets, self._map), self.states)
+        return with_body_blockers(resolve_maps(tickets, issue), self.states)
 
-    def _map(self, number: int) -> tuple[str, tuple[str, ...]] | None:
-        try:
-            issue = self._get(f"/repos/{self.repo}/issues/{number}")
-        except NotFound:
-            return None
-        return issue["html_url"], tuple(label["name"] for label in issue.get("labels") or [])
+    def _issue(self, number: int) -> Ticket | None:
+        found = self._issue_or_none(number)
+        return to_ticket(found, None, []) if found else None
 
     def close(self, number: int) -> None:
         """Gitea has no close reason, so the `wontfix` label marks it not planned; labelled first, so a

@@ -101,6 +101,7 @@ claude -n "#<n> <title>" "<prompt>"
 | Ticket                                                        | Prompt                                         |
 | ------------------------------------------------------------- | ---------------------------------------------- |
 | has a `wayfinder:<type>` label (`research`, `prototype`, `grilling`, `task`; GitLab's `wayfinder::<type>` too) | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
+| the spec a map led to, or one of its implementation tickets (see [Wayfinding rules](#wayfinding-rules)) | `/mattpocock-skills:wayfinder <map-url> <ticket-url>`; wayfinder runs the flow, and the ticket still lands through a PR |
 | anything else                                                 | `/mattpocock-skills:implement <ticket-url>` plus a brief: assign it to yourself first, implement via the skill, then push and open a ready PR that closes it (body via the `pr` skill) |
 
 The mattpocock skills a session runs stop to ask for `/setup-matt-pocock-skills` when the repo
@@ -197,9 +198,16 @@ tickets, the spec and the spec's implementation tickets on one board:
 | GitLab          | `Part of #<map>` as the first line | `## Parent` section naming `#<spec>`                                |
 | Gitea / Forgejo | `Part of #<map>` as the first line | `## Parent` section naming `#<spec>`                                |
 
-The spec and its tickets carry no `wayfinder:` label, so `s` starts them with the implement skill;
-decision tickets keep wayfinder. Only a `wayfinder:map` parent gets this; on GitHub a spec's ticket
-linked by only one of its two links still counts.
+The spec and its tickets carry no `wayfinder:` label, so they are no decision tickets: they show in
+Review and `c` reviews them as usual. They have a map all the same, so `s` starts them like a
+decision ticket, with `/mattpocock-skills:wayfinder <map-url> <ticket-url>` (`wayfinder_command`),
+and no implement brief. The spec stays a ticket's parent on the board; the map only drives the
+prompt. On a map board the spec and its tickets come with their map. On a whole-repo or `--label`
+board the board follows ticket → spec (the GitHub sub-issue parent, else the `## Parent` section) →
+the spec's `Part of #<map>` line → a `wayfinder:map` issue, fetching each issue of that chain that is
+not on the board once per refresh. When the chain ends anywhere but a map, the ticket starts
+implement as before, with no warning. On GitHub a spec's ticket linked by only one of its two links
+still counts.
 
 Blocking is always the native link, never a `Blocked by:` body line. The keywords `Part of` and
 `## Parent` and the `out-of-scope` label are always English, even when the rest of the issue is in another language. While the repo's section is missing or differs

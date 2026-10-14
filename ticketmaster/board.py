@@ -446,16 +446,19 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  ◌ idle, ✓ done or ○ no agent. The prompt depends on the ticket:\n")
     for kind, prompt in [
         ("wayfinder map", "never started itself: its card (In progress) shows decided / open /\n"
-                          + " " * 20 + "blocked; s starts the map's first frontier ticket (open, unblocked,\n"
-                          + " " * 20 + "unclaimed, not started yet) on that ticket's own card and worktree"),
+                          + " " * 22 + "blocked; s starts the map's first frontier ticket (open, unblocked,\n"
+                          + " " * 22 + "unclaimed, not started yet) on that ticket's own card and worktree"),
         ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs: a\n"
-                             + " " * 20 + "wayfinder:research/prototype/grilling/task ticket (or wayfinder::…),\n"
-                             + " " * 20 + "on any board; its map is the native parent, else `Part of #<map>`\n"
-                             + " " * 20 + "on the body's first line. Without a map it warns and won't start"),
+                             + " " * 22 + "wayfinder:research/prototype/grilling/task ticket (or wayfinder::…),\n"
+                             + " " * 22 + "on any board; its map is the native parent, else `Part of #<map>`\n"
+                             + " " * 22 + "on the body's first line. Without a map it warns and won't start"),
+        ("spec or its ticket", "the wayfinder skill with the map's and the ticket's URLs: the spec a\n"
+                               + " " * 22 + "map led to (`Part of #<map>`) and its implementation tickets (sub-issue\n"
+                               + " " * 22 + "or `## Parent` naming the spec), on any board; they land through a PR"),
         ("plain issue", "the implement skill with the ticket's URL, plus a brief: assign it to\n"
-                        + " " * 20 + "yourself first, implement, then push and open a PR that closes it"),
+                        + " " * 22 + "yourself first, implement, then push and open a PR that closes it"),
     ]:
-        row(kind, 16, prompt)
+        row(kind, 18, prompt)
     text.append("  A wayfinder ticket's card says who it needs: HITL (you at the keyboard) for grilling and\n"
                 "  prototype, AFK (the agent alone) for research, and for a task whichever of the two\n"
                 "  words its body names first.\n"
