@@ -26,8 +26,11 @@ Labels are workspace labels, so they mean the same in every team.
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
 
 A pull request links to its Linear issue when its title starts with the issue key (`TM-12`) and its body carries
-`Closes TM-12`; merging it closes the issue. Use the issue's `gitBranchName` (from `get_issue`) as the branch name
-where the session picks the branch.
+`Closes TM-12`; merging it closes the issue. The branch is the issue's `gitBranchName` (from `get_issue`, e.g.
+`kaareblakstad/tm-12-short-title`), so the branch links it too. A worktree made with `EnterWorktree` starts on
+`worktree-<name>`, which Linear does not match: rename it before the first push with `git branch -m <gitBranchName>`.
+Once the PR is open, `get_issue` shows it under the issue's `attachments`; if it does not, the PR is not linked, and
+merging it will not close the issue.
 
 ## When a skill says "publish to the issue tracker"
 
