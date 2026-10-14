@@ -24,7 +24,8 @@ def build_prompt(
     wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND,
     implement_command: str = DEFAULT_IMPLEMENT_COMMAND,
 ) -> str:
-    """Wayfinder claims and resolves map tickets itself; anything else runs the implement skill with a brief.
+    """Wayfinder claims and resolves map tickets itself, and drives a ticket that has a map (the spec a map
+    led to, and its implementation tickets); anything else runs the implement skill with a brief.
 
     A typed wayfinder ticket never falls back to implement: without its map it raises MapNotFound.
     """
@@ -34,6 +35,8 @@ def build_prompt(
         return f"{wayfinder_command} {ticket.parent_url} {ticket.url}"
     if ticket.map_missing:
         raise MapNotFound(f"#{ticket.number} {ticket.map_warning}")
+    if ticket.map_url:
+        return f"{wayfinder_command} {ticket.map_url} {ticket.url}"
     return (
         f"{implement_command} {ticket.url}\n\n"
         "1. Read the issue and its comments, then assign it to yourself before doing any work.\n"

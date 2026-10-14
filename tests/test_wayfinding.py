@@ -72,6 +72,18 @@ def test_each_tracker_pins_how_the_spec_and_its_tickets_link_back(tmp_path, kind
         assert "open issues labelled `wayfinder:<type>` whose" in text
 
 
+@pytest.mark.parametrize("kind", ["github", "gitlab", "gitea"])
+def test_spec_and_its_tickets_start_wayfinder_and_the_old_implement_rule_is_drift(tmp_path, kind):
+    path = setup(tmp_path, kind)
+    text = path.read_text()
+    assert "implement skill" not in text
+    assert "starts the spec and its implementation tickets with `/wayfinder <map> <ticket>`" in text
+    path.write_text(text.replace(
+        "and it has no `wayfinder:` label, so the board starts it like the spec, with wayfinder on the map",
+        "and it has no `wayfinder:` label, so the board starts it with the implement skill"))
+    assert drift(tmp_path, kind) == "outdated"
+
+
 def test_drift_names_a_missing_or_outdated_section(tmp_path):
     assert drift(tmp_path, "github") == "missing"  # no doc at all
     path = write_doc(tmp_path, HEAD)

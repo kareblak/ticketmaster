@@ -29,6 +29,21 @@ def test_typed_ticket_without_a_map_is_never_started_with_implement():
             build_prompt(t)
 
 
+def test_ticket_with_a_map_runs_wayfinder_on_that_map_not_implement():
+    # The spec (its parent is the map) and a spec's implementation ticket (its parent is the spec).
+    spec = ticket(parent_number=680, parent_url="https://gh/680", parent_labels=MAP,
+                  map_number=680, map_url="https://gh/680")
+    slice_ = ticket(parent_number=690, parent_url="https://gh/690", map_number=680, map_url="https://gh/680")
+    for t in (spec, slice_):
+        assert build_prompt(t) == "/mattpocock-skills:wayfinder https://gh/680 https://gh/686"
+    assert build_prompt(slice_, "/wayfinder", "/implement") == "/wayfinder https://gh/680 https://gh/686"
+
+
+def test_ticket_whose_parent_is_no_map_still_runs_implement():
+    t = ticket(parent_number=690, parent_url="https://gh/690")
+    assert build_prompt(t).startswith("/mattpocock-skills:implement https://gh/686\n")
+
+
 def test_unknown_wayfinder_label_gets_plain_prompt():
     t = ticket(labels=("wayfinder:epic",))
     assert build_prompt(t).startswith("/mattpocock-skills:implement https://gh/686\n")

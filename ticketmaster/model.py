@@ -59,6 +59,9 @@ class Ticket:
     parent_number: int | None = None
     parent_url: str | None = None
     parent_labels: tuple[str, ...] = ()
+    # The map a spec, or a spec's implementation ticket, leads to; the parent stays the spec for those tickets.
+    map_number: int | None = None
+    map_url: str | None = None
 
     @property
     def review_tags(self) -> list[str]:

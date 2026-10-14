@@ -7,6 +7,7 @@ spec (`Part of #<map>`), which name the spec in their `## Parent` section.
 
 from __future__ import annotations
 
+import functools
 import json
 import urllib.parse
 from datetime import datetime, timedelta, timezone
@@ -38,7 +39,7 @@ query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
 
 PARENT = """
 query($path: ID!, $iid: String!) {
-  project(fullPath: $path) { issue(iid: $iid) { webUrl labels { nodes { title } } } }
+  project(fullPath: $path) { issue(iid: $iid) { webUrl description labels { nodes { title } } } }
 }
 """
 
@@ -85,9 +86,10 @@ class GitLabProvider:
                 ticket = to_ticket(node, self.repo)
                 seen.setdefault(ticket.number, ticket)
         tickets = list(seen.values())
+        issue = functools.cache(self._issue)  # each chain issue off the board once per refresh
         if query.parent is not None:
-            tickets = map_family(tickets, query.parent, self._map(query.parent))
-        return with_body_blockers(resolve_maps(tickets, self._map), self.states)
+            tickets = map_family(tickets, query.parent, issue(query.parent))
+        return with_body_blockers(resolve_maps(tickets, issue), self.states)
 
     def close(self, number: int) -> None:
         """GitLab has no close reason, so the `wontfix` label (created if missing) marks it not planned."""
@@ -95,9 +97,12 @@ class GitLabProvider:
         run_cli(["glab", "api", "--hostname", self.host, "-X", "PUT", f"projects/{project}/issues/{number}",
                  "-f", "state_event=close", "-f", f"add_labels={WONTFIX_LABEL}"])
 
-    def _map(self, iid: int) -> tuple[str, tuple[str, ...]] | None:
+    def _issue(self, iid: int) -> Ticket | None:
         issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(iid)}).get("project") or {}).get("issue")
-        return (issue["webUrl"], tuple(label["title"] for label in issue["labels"]["nodes"])) if issue else None
+        if not issue:
+            return None
+        return Ticket(number=iid, title="", url=issue["webUrl"], is_open=True, body=issue.get("description") or "",
+                      labels=tuple(label["title"] for label in issue["labels"]["nodes"]))
 
     def _issues(self, variables: dict, limit: int) -> list[dict]:
         nodes: list[dict] = []
