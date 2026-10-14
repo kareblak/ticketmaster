@@ -105,10 +105,8 @@ class GitHubProvider:
         for key, name in (("graphql", "GraphQL"), ("core", "REST")):
             quota = resources.get(key) or {}
             if quota.get("remaining") == 0 and quota.get("reset"):
-                return RateLimited(str(error), error.status, limit=f"hourly {name} quota",
-                                   resets_at=datetime.fromtimestamp(quota["reset"], timezone.utc))
-        return RateLimited(str(error), error.status, limit="secondary limit",
-                           hint="too many calls per minute; every board and agent on the account shares it")
+                return error.hit(f"hourly {name} quota", datetime.fromtimestamp(quota["reset"], timezone.utc))
+        return error.hit("secondary limit", hint="too many calls per minute; every board and agent on the account shares it")
 
     def viewer(self) -> str | None:
         return (self._graphql(VIEWER, {}).get("viewer") or {}).get("login")

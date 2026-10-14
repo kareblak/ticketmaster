@@ -767,10 +767,10 @@ class BoardApp(App):
     def _tracker_error(self, error: ProviderError | None) -> None:
         """One notification per error episode: when an error appears, or turns into another; a good fetch ends it."""
         notice = None if error is None else error_notice(self.provider.name, error)
-        if notice is not None and (self.notice is None or self.notice.reason != notice.reason):
+        if notice is not None and (self.notice is None or self.notice.episode != notice.episode):
             self.notify(notice.text, severity=notice.severity, timeout=NOTICE_SECONDS)
         self.notice = notice
-        self.last_error = None if notice is None or isinstance(error, RateLimited) else notice.line
+        self.last_error = None if notice is None or isinstance(error, RateLimited) else notice.status_text
 
     def _render_status(self) -> None:
         status = Text(self.sub_title, style="bold")

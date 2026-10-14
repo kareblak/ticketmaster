@@ -811,7 +811,7 @@ class ExplainingProvider(SequenceProvider):
     name = "github"
 
     def explain(self, error):
-        return RateLimited(str(error), error.status, limit="secondary limit", hint="shared")
+        return error.hit("secondary limit", hint="shared")
 
 
 def tracker_notices(app):
@@ -877,6 +877,22 @@ def test_other_tracker_errors_notify_with_status_once_until_they_change():
             await tick(5)  # a good fetch ends the episode
             await tick(5)
             assert tracker_notices(app) == [auth, auth, gateway, auth]
+
+    run(scenario())
+
+
+def test_errors_without_a_status_notify_each_time_the_message_changes():
+    async def scenario():
+        clock = Clock()
+        provider = SequenceProvider([ProviderError("gh: not logged in"), ProviderError("`gh` timed out")])
+        app = BoardApp(provider, Query(), interval=5, clock=clock)
+        async with app.run_test(size=(200, 30)) as pilot:
+            await loaded(app, pilot)
+            clock.now += 5
+            app.tick()
+            await loaded(app, pilot)
+            assert tracker_notices(app) == [("fake error\ngh: not logged in", "error"),
+                                            ("fake error\n`gh` timed out", "error")]
 
     run(scenario())
 

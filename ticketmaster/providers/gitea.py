@@ -26,22 +26,25 @@ from . import (IssueStates, NotFound, ProviderError, Query, RateLimited, blocker
                tracker_error, with_body_blockers)
 
 PAGE = 50
+CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
 
 
 def now() -> datetime:
+    """The clock a `Retry-After` in seconds counts from."""
     return datetime.now(timezone.utc)
 
 
 def lifts_at(headers) -> datetime | None:
-    """When a 429 lifts: `Retry-After` (seconds or an HTTP date), else `X-RateLimit-Reset` (epoch seconds)."""
+    """When a 429 lifts: `Retry-After` (seconds or an HTTP date), else a reset header (epoch seconds)."""
     if retry := headers.get("Retry-After"):
         if retry.strip().isdigit():
             return now() + timedelta(seconds=int(retry))
         try:
-            return parsedate_to_datetime(retry)
+            lifts = parsedate_to_datetime(retry)
+            return lifts if lifts.tzinfo else lifts.replace(tzinfo=timezone.utc)  # `-0000`: UTC, no zone given
         except (TypeError, ValueError):
             pass
-    reset = headers.get("X-RateLimit-Reset")
+    reset = headers.get("X-RateLimit-Reset") or headers.get("RateLimit-Reset")
     return datetime.fromtimestamp(int(reset), timezone.utc) if reset and reset.strip().isdigit() else None
 
 
@@ -51,7 +54,6 @@ def error_message(exc: urllib.error.HTTPError) -> str:
         return str(json.loads(exc.read() or b"null").get("message") or "")
     except (ValueError, AttributeError, OSError):
         return ""
-CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
 
 
 class GiteaProvider:

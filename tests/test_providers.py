@@ -806,7 +806,7 @@ def test_notice_for_a_secondary_limit_gives_the_hint():
 def test_notice_for_a_bare_429_names_the_status():
     notice = providers.error_notice("gitea", providers.RateLimited("codeberg.org/x: HTTP 429 Too Many Requests"))
     assert notice.reason == "429" and notice.severity == "warning"
-    assert notice.text.splitlines()[0] == "Gitea rate-limited the board: 429"
+    assert notice.text.splitlines()[0] == "Gitea/Forgejo rate-limited the board: 429"
 
 
 @pytest.mark.parametrize("message, reason, severity, line", [
@@ -816,7 +816,7 @@ def test_notice_for_a_bare_429_names_the_status():
 ])
 def test_notice_for_other_errors_names_the_status_class(message, reason, severity, line):
     notice = providers.error_notice("gitlab", ProviderError(message))
-    assert (notice.reason, notice.severity, notice.line) == (reason, severity, line)
+    assert (notice.reason, notice.severity, notice.status_text) == (reason, severity, line)
     assert notice.text.splitlines()[-1] == message
 
 
@@ -857,7 +857,9 @@ def test_github_keeps_the_trackers_message_when_the_rate_limit_lookup_fails(monk
 @pytest.mark.parametrize("headers, resets_at", [
     ({"Retry-After": "120"}, datetime(2026, 10, 14, 8, 2, tzinfo=timezone.utc)),
     ({"Retry-After": "Wed, 14 Oct 2026 08:30:00 GMT"}, datetime(2026, 10, 14, 8, 30, tzinfo=timezone.utc)),
+    ({"Retry-After": "Wed, 14 Oct 2026 08:30:00 -0000"}, datetime(2026, 10, 14, 8, 30, tzinfo=timezone.utc)),
     ({"X-RateLimit-Reset": "1791966600"}, datetime.fromtimestamp(1791966600, timezone.utc)),
+    ({"RateLimit-Reset": "1791966600"}, datetime.fromtimestamp(1791966600, timezone.utc)),
     ({}, None),
 ])
 def test_gitea_429_says_when_the_limit_lifts(monkeypatch, headers, resets_at):
@@ -870,6 +872,7 @@ def test_gitea_429_says_when_the_limit_lifts(monkeypatch, headers, resets_at):
     with pytest.raises(RateLimited) as raised:
         gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
     assert raised.value.status == 429 and raised.value.resets_at == resets_at
+    assert resets_at is None or raised.value.resets_at.tzinfo is not None
 
 
 def test_gitea_errors_carry_the_trackers_own_message(monkeypatch):
