@@ -1,6 +1,6 @@
 # Issue tracker: Linear
 
-Issues and specs for this repo live in Linear, team **Ticketmaster** (key `<KEY>`, so issues read `<KEY>-12`).
+Issues and specs for this repo live in Linear, team **Ticketmaster** (key `TM`, so issues read `TM-12`).
 Use the `linear-server` MCP tools (`https://mcp.linear.app/mcp`, user scope; authenticate once with `/mcp`).
 Code, branches and pull requests stay on GitHub (`kareblak/ticketmaster`); only tracking moved.
 
@@ -10,7 +10,7 @@ to its Linear copy.
 ## Conventions
 
 - **Create an issue**: `save_issue` with `team: "Ticketmaster"`, `title`, `description` (Markdown), and `labels` by name.
-- **Read an issue**: `get_issue` with `id: "<KEY>-12"` and `includeRelations: true`; comments with `list_comments` and `issueId`.
+- **Read an issue**: `get_issue` with `id: "TM-12"` and `includeRelations: true`; comments with `list_comments` and `issueId`.
 - **List issues**: `list_issues` with `team: "Ticketmaster"`, filtered by `state`, `label`, `assignee` or `parentId`.
 - **Comment on an issue**: `save_comment` with `issueId` and `body`.
 - **Apply / remove labels**: `save_issue` with `id` and `addLabels` / `removeLabels`. Never pass `labels` on an update:
@@ -24,7 +24,7 @@ Labels are workspace labels, so they mean the same in every team.
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
 
-A pull request closes its Linear issue when its branch name or title carries the issue key (`<KEY>-12`); use the
+A pull request closes its Linear issue when its branch name or title carries the issue key (`TM-12`); use the
 issue's `gitBranchName` (from `get_issue`) as the branch name.
 
 ## When a skill says "publish to the issue tracker"
