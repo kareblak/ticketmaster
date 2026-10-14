@@ -1,6 +1,7 @@
 import io
 import json
 import urllib.error
+from datetime import datetime, timezone
 
 import pytest
 
@@ -771,6 +772,123 @@ def test_github_map_order_is_the_maps_sub_issue_order(monkeypatch):
     monkeypatch.setattr(github, "run_json", fake_run_json)
     assert github.GitHubProvider("o/r").map_order(1) == [9, 4, 6]
     assert [c["number"] for c in calls] == [1, 1] and calls[1]["after"] == "c1"
+
+
+@pytest.mark.parametrize("stderr, status", [
+    ("gh: Bad credentials (HTTP 401)", 401),
+    ("gh: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (HTTP 403)", 403),
+    ("glab: 502 Bad Gateway", 502),
+    ("ERROR: Too Many Requests (HTTP 429)", 429),
+    ("gh: API rate limit already exceeded for user ID 842012.", None),
+    ("gh: Could not resolve issue 429", None),
+])
+def test_cli_errors_carry_the_http_status_the_cli_names(monkeypatch, stderr, status):
+    monkeypatch.setattr(providers.subprocess, "run", lambda *a, **k: FakeCompleted(stderr))
+    with pytest.raises(ProviderError) as raised:
+        providers.run_cli(["gh", "api", "graphql"])
+    assert raised.value.status == status
+
+
+def test_notice_for_a_used_up_quota_names_it_and_when_it_lifts():
+    resets = datetime(2026, 10, 14, 8, 4, tzinfo=timezone.utc)
+    error = providers.RateLimited("gh: API rate limit exceeded for user ID 1.", limit="hourly GraphQL quota",
+                                  resets_at=resets)
+    notice = providers.error_notice("github", error)
+    assert notice.reason == "hourly GraphQL quota" and notice.severity == "warning"
+    assert notice.text == (f"GitHub rate-limited the board: hourly GraphQL quota, lifts at "
+                           f"{resets.astimezone():%H:%M}\ngh: API rate limit exceeded for user ID 1.")
+
+
+def test_notice_for_a_secondary_limit_gives_the_hint():
+    error = providers.RateLimited("gh: API rate limit already exceeded for user ID 1.", limit="secondary limit",
+                                  hint="too many calls per minute; every board and agent on the account shares it")
+    notice = providers.error_notice("github", error)
+    assert notice.reason == "secondary limit"
+    assert notice.text.splitlines()[0] == ("GitHub rate-limited the board: secondary limit (too many calls per minute; "
+                                           "every board and agent on the account shares it)")
+
+
+def test_notice_for_a_bare_429_names_the_status():
+    notice = providers.error_notice("gitea", providers.RateLimited("codeberg.org/x: HTTP 429 Too Many Requests"))
+    assert notice.reason == "429" and notice.severity == "warning"
+    assert notice.text.splitlines()[0] == "Gitea/Forgejo rate-limited the board: 429"
+
+
+@pytest.mark.parametrize("message, reason, severity, line", [
+    ("gh: Bad credentials (HTTP 401)", "401 unauthorized", "error", "401 unauthorized · gh: Bad credentials (HTTP 401)"),
+    ("glab: 502 Bad Gateway", "502 bad gateway", "warning", "502 bad gateway · glab: 502 Bad Gateway"),
+    ("gh: not logged in", "error", "error", "gh: not logged in"),
+])
+def test_notice_for_other_errors_names_the_status_class(message, reason, severity, line):
+    notice = providers.error_notice("gitlab", ProviderError(message))
+    assert (notice.reason, notice.severity, notice.status_text) == (reason, severity, line)
+    assert notice.text.splitlines()[-1] == message
+
+
+def rate_limit_answer(graphql=4470, core=4972, reset=1791964800):
+    return {"resources": {"graphql": {"remaining": graphql, "limit": 5000, "reset": reset},
+                          "core": {"remaining": core, "limit": 5000, "reset": reset}}}
+
+
+@pytest.mark.parametrize("answer, limit", [
+    (rate_limit_answer(graphql=0), "hourly GraphQL quota"),
+    (rate_limit_answer(core=0), "hourly REST quota"),
+])
+def test_github_names_the_used_up_hourly_quota(monkeypatch, answer, limit):
+    asked = []
+    monkeypatch.setattr(github, "run_json", lambda args, stdin=None: asked.append(args) or answer)
+    error = github.GitHubProvider("o/r").explain(RateLimited("gh: API rate limit exceeded for user ID 1."))
+    assert asked == [["gh", "api", "rate_limit", "--hostname", "github.com"]]
+    assert error.limit == limit and error.resets_at == datetime.fromtimestamp(1791964800, timezone.utc)
+    assert str(error) == "gh: API rate limit exceeded for user ID 1."
+
+
+def test_github_with_quota_left_names_the_secondary_limit(monkeypatch):
+    monkeypatch.setattr(github, "run_json", lambda args, stdin=None: rate_limit_answer())
+    error = github.GitHubProvider("o/r").explain(RateLimited("gh: API rate limit already exceeded for user ID 1. (HTTP 403)"))
+    assert error.limit == "secondary limit" and error.resets_at is None and error.status == 403
+    assert "every board and agent on the account shares it" in error.hint
+
+
+def test_github_keeps_the_trackers_message_when_the_rate_limit_lookup_fails(monkeypatch):
+    def fail(args, stdin=None):
+        raise ProviderError("gh: boom")
+
+    monkeypatch.setattr(github, "run_json", fail)
+    original = RateLimited("gh: API rate limit exceeded")
+    assert github.GitHubProvider("o/r").explain(original) is original
+
+
+@pytest.mark.parametrize("headers, resets_at", [
+    ({"Retry-After": "120"}, datetime(2026, 10, 14, 8, 2, tzinfo=timezone.utc)),
+    ({"Retry-After": "Wed, 14 Oct 2026 08:30:00 GMT"}, datetime(2026, 10, 14, 8, 30, tzinfo=timezone.utc)),
+    ({"Retry-After": "Wed, 14 Oct 2026 08:30:00 -0000"}, datetime(2026, 10, 14, 8, 30, tzinfo=timezone.utc)),
+    ({"X-RateLimit-Reset": "1791966600"}, datetime.fromtimestamp(1791966600, timezone.utc)),
+    ({"RateLimit-Reset": "1791966600"}, datetime.fromtimestamp(1791966600, timezone.utc)),
+    ({}, None),
+])
+def test_gitea_429_says_when_the_limit_lifts(monkeypatch, headers, resets_at):
+    def urlopen(request, timeout=None):
+        raise urllib.error.HTTPError("https://codeberg.org/api/v1/x", 429, "Too Many Requests", headers,
+                                     io.BytesIO(b""))
+
+    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(gitea, "now", lambda: datetime(2026, 10, 14, 8, 0, tzinfo=timezone.utc))
+    with pytest.raises(RateLimited) as raised:
+        gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+    assert raised.value.status == 429 and raised.value.resets_at == resets_at
+    assert resets_at is None or raised.value.resets_at.tzinfo is not None
+
+
+def test_gitea_errors_carry_the_trackers_own_message(monkeypatch):
+    def urlopen(request, timeout=None):
+        raise urllib.error.HTTPError("https://codeberg.org/api/v1/x", 403, "Forbidden", {},
+                                     io.BytesIO(b'{"message": "token does not have required scope"}'))
+
+    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    with pytest.raises(ProviderError) as raised:
+        gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+    assert raised.value.status == 403 and str(raised.value).endswith("HTTP 403 Forbidden: token does not have required scope")
 
 
 def test_parent_ref_is_the_first_issue_the_parent_section_names():

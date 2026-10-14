@@ -7,17 +7,38 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Protocol
+from datetime import datetime
+from http import HTTPStatus
+from typing import Literal, Protocol
 
 from ..model import Ticket, parse_blockers, part_of, wayfinder_kinds
+from ..wayfinding import TRACKER_NAMES
 
 
 class ProviderError(RuntimeError):
-    pass
+    """A tracker call failed. `status` is the HTTP status, when the tracker or its CLI said which."""
+
+    def __init__(self, message: str = "", status: int | None = None):
+        super().__init__(message)
+        self.status = status if status is not None else http_status(message)
 
 
 class RateLimited(ProviderError):
-    """The tracker refused the call for exceeding its rate limit; the board backs off."""
+    """The tracker refused the call for exceeding its rate limit; the board backs off.
+
+    `limit` names the limit hit (e.g. "secondary limit") and `resets_at` when it lifts, when the tracker says.
+    """
+
+    def __init__(self, message: str = "", status: int | None = None, limit: str | None = None,
+                 resets_at: datetime | None = None, hint: str | None = None):
+        super().__init__(message, status)
+        self.limit = limit
+        self.resets_at = resets_at
+        self.hint = hint  # what the limit means, e.g. that every board on the account shares it
+
+    def hit(self, limit: str, resets_at: datetime | None = None, hint: str | None = None) -> RateLimited:
+        """The same refusal, naming the limit it hit."""
+        return RateLimited(str(self), self.status, limit, resets_at, hint)
 
 
 class NotFound(ProviderError):
@@ -27,9 +48,50 @@ class NotFound(ProviderError):
 RATE_LIMIT = re.compile(r"rate.?limit|too many requests|\bHTTP 429\b|\b429 Too Many\b", re.IGNORECASE)
 
 
+# `… (HTTP 401)` from gh and others, or `glab: 502 Bad Gateway`.
+_HTTP_STATUS = re.compile(r"\bHTTP (?P<code>[1-5]\d\d)\b|^\w+: (?P<lead>[45]\d\d) [A-Z]")
+
+
+def http_status(message: str) -> int | None:
+    """The HTTP status a tracker or CLI message names, or None when it names none."""
+    match = _HTTP_STATUS.search(message or "")
+    return int(match.group("code") or match.group("lead")) if match else None
+
+
 def tracker_error(message: str) -> ProviderError:
     """A ProviderError, or RateLimited when the message is GitHub's, GitLab's or Gitea's rate-limit answer."""
     return RateLimited(message) if RATE_LIMIT.search(message) else ProviderError(message)
+
+
+@dataclass(frozen=True)
+class ErrorNotice:
+    """What the board tells the user about a tracker error."""
+
+    reason: str  # short: `secondary limit`, `429`, `401 unauthorized`
+    text: str  # the notification: what happened, then the tracker's own message
+    severity: Literal["warning", "error"]  # warning when the board retries by itself, error when it needs the user
+    status_text: str  # what the status line shows
+    episode: str  # an error that differs here is a new one: the reason, or the message when there is no status
+
+
+def error_notice(tracker: str, error: ProviderError) -> ErrorNotice:
+    """How the board reports a tracker error: rate limits and 5xx as warnings, anything else as an error."""
+    name, message, status = TRACKER_NAMES.get(tracker, tracker), str(error), error.status
+    if isinstance(error, RateLimited):
+        reason = error.limit or (str(status) if status else "rate limit")
+        head = f"{name} rate-limited the board: {reason}"
+        head += f" ({error.hint})" if error.hint else ""
+        head += f", lifts at {error.resets_at.astimezone():%H:%M}" if error.resets_at else ""
+        return ErrorNotice(reason, f"{head}\n{message}", "warning", f"rate-limited · {reason}", reason)
+    if status is None:
+        return ErrorNotice("error", f"{name} error\n{message}", "error", message, message)
+    try:
+        reason = f"{status} {HTTPStatus(status).phrase.lower()}"
+    except ValueError:
+        reason = f"HTTP {status}"
+    severity = "warning" if status >= 500 else "error"
+    return ErrorNotice(reason, f"{name} refused the board: {reason}\n{message}", severity, f"{reason} · {message}",
+                       reason)
 
 
 @dataclass(frozen=True)

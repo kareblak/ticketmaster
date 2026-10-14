@@ -805,6 +805,98 @@ def test_non_rate_limit_error_keeps_the_interval():
     run(scenario())
 
 
+class ExplainingProvider(SequenceProvider):
+    """Like GitHub: names the limit a rate limit hit."""
+
+    name = "github"
+
+    def explain(self, error):
+        return error.hit("secondary limit", hint="shared")
+
+
+def tracker_notices(app):
+    return [(m, severity) for m, severity in notifications(app) if "the board" in m or " error\n" in m]
+
+
+def test_a_rate_limit_notifies_its_reason_once_per_episode():
+    async def scenario():
+        clock = Clock()
+        limited = RateLimited("gh: API rate limit already exceeded for user ID 1.")
+        provider = ExplainingProvider([TICKETS, limited, limited, TICKETS, limited])
+        app = BoardApp(provider, Query(), interval=5, clock=clock)
+
+        async def tick(seconds):
+            clock.now += seconds
+            app.tick()
+            await loaded(app, pilot)
+
+        async with app.run_test(size=(200, 30)) as pilot:
+            await loaded(app, pilot)
+            await tick(5)
+            notice = ("GitHub rate-limited the board: secondary limit (shared)\n"
+                      "gh: API rate limit already exceeded for user ID 1.", "warning")
+            assert tracker_notices(app) == [notice]
+            assert "rate-limited · next fetch in 60s · secondary limit" in status_of(app)
+            await tick(60)  # still limited: the same episode
+            assert provider.calls == 3 and tracker_notices(app) == [notice]
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert ("Rate-limited (secondary limit): next ticket fetch in 60s", "warning") in notifications(app)
+            await tick(60)  # recovered
+            assert provider.calls == 4 and "rate-limited" not in status_of(app)
+            await tick(5)  # limited again: a new episode
+            assert tracker_notices(app) == [notice, notice]
+
+    run(scenario())
+
+
+def test_other_tracker_errors_notify_with_status_once_until_they_change():
+    async def scenario():
+        clock = Clock()
+        unauthorized = ProviderError("gh: Bad credentials (HTTP 401)")
+        provider = SequenceProvider([unauthorized, unauthorized, ProviderError("glab: 502 Bad Gateway"),
+                                     TICKETS, unauthorized])
+        app = BoardApp(provider, Query(), interval=5, clock=clock)
+
+        async def tick(seconds):
+            clock.now += seconds
+            app.tick()
+            await loaded(app, pilot)
+
+        async with app.run_test(size=(200, 30)) as pilot:
+            await loaded(app, pilot)
+            auth = ("fake refused the board: 401 unauthorized\ngh: Bad credentials (HTTP 401)", "error")
+            assert tracker_notices(app) == [auth]
+            assert "⚠ 401 unauthorized · gh: Bad credentials (HTTP 401)" in status_of(app)
+            await tick(5)
+            assert tracker_notices(app) == [auth]
+            await pilot.press("r")  # repeats the standing error, then fetches (the 502)
+            await loaded(app, pilot)
+            gateway = ("fake refused the board: 502 bad gateway\nglab: 502 Bad Gateway", "warning")
+            assert tracker_notices(app) == [auth, auth, gateway]
+            await tick(5)  # a good fetch ends the episode
+            await tick(5)
+            assert tracker_notices(app) == [auth, auth, gateway, auth]
+
+    run(scenario())
+
+
+def test_errors_without_a_status_notify_each_time_the_message_changes():
+    async def scenario():
+        clock = Clock()
+        provider = SequenceProvider([ProviderError("gh: not logged in"), ProviderError("`gh` timed out")])
+        app = BoardApp(provider, Query(), interval=5, clock=clock)
+        async with app.run_test(size=(200, 30)) as pilot:
+            await loaded(app, pilot)
+            clock.now += 5
+            app.tick()
+            await loaded(app, pilot)
+            assert tracker_notices(app) == [("fake error\ngh: not logged in", "error"),
+                                            ("fake error\n`gh` timed out", "error")]
+
+    run(scenario())
+
+
 def test_no_warning_when_the_skills_setup_exists(tmp_path):
     (tmp_path / "docs" / "agents").mkdir(parents=True)
     (tmp_path / "docs" / "agents" / "issue-tracker.md").write_text("# Issue tracker\n")
