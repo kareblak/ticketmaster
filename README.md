@@ -288,9 +288,19 @@ Lengthen `--interval` if you run several boards at once.
 
 When the tracker rate-limits the board (GitHub's primary or secondary limit, or an HTTP 429 from
 GitLab or Gitea/Forgejo), ticket fetches drop to once a minute and herdr session states to every
-10s; the status line shows `rate-limited · next fetch in 42s`, and `r` refreshes only the sessions.
+10s; the status line shows `rate-limited · next fetch in 42s · secondary limit`, and `r` refreshes only the sessions.
 The first good fetch restores `--interval`, once: a second rate limit keeps the board at once a
 minute until you restart it.
+
+Any tracker error while fetching (a rate limit, a 4xx such as `401 unauthorized`, a 5xx such as
+`502 bad gateway`) shows a notification: the tracker, the reason, and the tracker's own message. A
+rate limit or a 5xx is a warning, since the board retries by itself; any other error needs you (e.g.
+`gh auth login`). The board notifies once per error: again only when it changes, or when it comes back
+after a good fetch; `r` repeats it. On GitHub the board asks the `rate_limit` endpoint (it costs no
+quota) which limit it hit: an hourly quota at 0 is named with the time it resets, otherwise it is the
+secondary limit (too many calls per minute, shared by every board and agent on the account). Gitea and
+Forgejo say when a 429 lifts when the response's `Retry-After` or `X-RateLimit-Reset` does. `gh` and
+`glab` do not always print the HTTP status; then the notification gives the message alone.
 
 ## Development
 

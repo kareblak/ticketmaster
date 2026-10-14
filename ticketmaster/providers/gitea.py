@@ -18,6 +18,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from ..model import WONTFIX_LABEL, Ticket, parse_time
@@ -25,6 +26,31 @@ from . import (IssueStates, NotFound, ProviderError, Query, RateLimited, blocker
                tracker_error, with_body_blockers)
 
 PAGE = 50
+
+
+def now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def lifts_at(headers) -> datetime | None:
+    """When a 429 lifts: `Retry-After` (seconds or an HTTP date), else `X-RateLimit-Reset` (epoch seconds)."""
+    if retry := headers.get("Retry-After"):
+        if retry.strip().isdigit():
+            return now() + timedelta(seconds=int(retry))
+        try:
+            return parsedate_to_datetime(retry)
+        except (TypeError, ValueError):
+            pass
+    reset = headers.get("X-RateLimit-Reset")
+    return datetime.fromtimestamp(int(reset), timezone.utc) if reset and reset.strip().isdigit() else None
+
+
+def error_message(exc: urllib.error.HTTPError) -> str:
+    """The `message` of the tracker's JSON error body, when it sent one."""
+    try:
+        return str(json.loads(exc.read() or b"null").get("message") or "")
+    except (ValueError, AttributeError, OSError):
+        return ""
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
 
 
@@ -125,10 +151,12 @@ class GiteaProvider:
                 return json.loads(answer) if answer else None
         except urllib.error.HTTPError as exc:
             if exc.code == 429:
-                raise RateLimited(f"{self.host}{path}: HTTP 429 rate limit exceeded") from exc
+                raise RateLimited(f"{self.host}{path}: HTTP 429 rate limit exceeded", 429,
+                                  resets_at=lifts_at(exc.headers or {})) from exc
             if exc.code == 404:
                 raise NotFound(f"{self.host}{path}: HTTP 404 {exc.reason}") from exc
-            raise tracker_error(f"{self.host}{path}: HTTP {exc.code} {exc.reason}") from exc
+            said = error_message(exc)
+            raise tracker_error(f"{self.host}{path}: HTTP {exc.code} {exc.reason}" + (f": {said}" if said else "")) from exc
         except urllib.error.URLError as exc:
             raise ProviderError(f"{self.host}: {exc.reason}") from exc
 

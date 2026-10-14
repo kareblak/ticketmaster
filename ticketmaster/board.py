@@ -23,7 +23,7 @@ from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
 from .model import (COLUMN_ORDER, OUT_OF_SCOPE_LABEL, WONTFIX_LABEL, Board, Column, MapProgress, Ticket, build_board,
                     frontier, map_progress)
-from .providers import Provider, ProviderError, Query, RateLimited
+from .providers import ErrorNotice, Provider, ProviderError, Query, RateLimited, error_notice
 from .triage import DEFAULT_HOLDS, hold_labels
 from .wayfinding import SETUP_COMMAND as WAYFINDING_SETUP, drift
 
@@ -60,6 +60,7 @@ STATUS_STYLES = {  # herdr agent states
 CLOSABLE = (Column.BLOCKED, Column.READY)  # not while someone works on it or it is in review; Done is closed already
 MODE_STYLES = {"HITL": "black on yellow", "AFK": "black on cyan"}  # who a wayfinder ticket needs at the keyboard
 ACTIVE_STATES = ("working", "blocked")  # auto-remove waits until the agent is no longer busy or asking
+NOTICE_SECONDS = 10  # a tracker error's notification stays up this long
 LIMITED_TICKETS_EVERY = 60.0  # ticket fetches while the tracker rate-limits the board
 LIMITED_SESSIONS_EVERY = 10.0  # herdr session refreshes meanwhile
 
@@ -587,6 +588,7 @@ class BoardApp(App):
             "Authors": dict.fromkeys(saved.get("authors", []), INCLUDE),
         }
         self.last_error: str | None = None
+        self.notice: ErrorNotice | None = None  # the tracker error standing since the last good fetch
         self.last_ok: datetime | None = None
         scope = f"parent #{query.parent}" if query.parent else f"label {query.label}" if query.label else "all issues"
         self.sub_title = f"{provider.name}:{provider.repo} · {scope}"
@@ -633,7 +635,10 @@ class BoardApp(App):
     def action_refresh(self) -> None:
         """Fetches now, except tickets while rate-limited: then only herdr sessions refresh."""
         if self.pacer.limited:
-            self.notify(f"Rate-limited: next ticket fetch in {self.pacer.wait(self.clock())}s", severity="warning")
+            reason = f" ({self.notice.reason})" if self.notice else ""
+            self.notify(f"Rate-limited{reason}: next ticket fetch in {self.pacer.wait(self.clock())}s", severity="warning")
+        elif self.notice:
+            self.notify(self.notice.text, severity=self.notice.severity, timeout=NOTICE_SECONDS)
         self._refresh_now()
 
     def _refresh_now(self) -> None:
@@ -668,10 +673,12 @@ class BoardApp(App):
                 self.viewer = self._viewer()
             board = build_board(self.provider.fetch(self.board_query), done_days=self.board_query.done_days)
             self.call_from_thread(self._apply, board, None, sessions, herdr_error)
-        except RateLimited:
-            self.call_from_thread(self._apply, None, None, sessions, herdr_error, rate_limited=True)
+        except RateLimited as exc:
+            explain = getattr(self.provider, "explain", None)  # GitHub can say which limit it was
+            self.call_from_thread(self._apply, None, explain(exc) if explain else exc, sessions, herdr_error,
+                                  rate_limited=True)
         except ProviderError as exc:
-            self.call_from_thread(self._apply, None, str(exc), sessions, herdr_error)
+            self.call_from_thread(self._apply, None, exc, sessions, herdr_error)
         except BaseException:
             self.call_from_thread(setattr, self, "fetching", False)
             raise
@@ -684,12 +691,12 @@ class BoardApp(App):
         except ProviderError:
             return None  # claimed tickets then start after the confirm, as before the login was known
 
-    def _apply(self, board: Board | None, error: str | None, sessions: dict[int, list[Session]] | None = None,
+    def _apply(self, board: Board | None, error: ProviderError | None, sessions: dict[int, list[Session]] | None = None,
                herdr_error: str | None = None, fetched_tickets: bool = True, rate_limited: bool = False) -> None:
         self.fetching = False
         if fetched_tickets:
             self.pacer.fetched(self.clock(), ok=board is not None, rate_limited=rate_limited)
-            self.last_error = error
+            self._tracker_error(error)
         if self.queued is not None:
             tickets, self.queued = self.queued and not self.pacer.limited, None
             self._fetch_in_background(tickets)
@@ -757,6 +764,14 @@ class BoardApp(App):
         self._render_status()
         self._render_tabs()
 
+    def _tracker_error(self, error: ProviderError | None) -> None:
+        """One notification per error episode: when an error appears, or turns into another; a good fetch ends it."""
+        notice = None if error is None else error_notice(self.provider.name, error)
+        if notice is not None and (self.notice is None or self.notice.reason != notice.reason):
+            self.notify(notice.text, severity=notice.severity, timeout=NOTICE_SECONDS)
+        self.notice = notice
+        self.last_error = None if notice is None or isinstance(error, RateLimited) else notice.line
+
     def _render_status(self) -> None:
         status = Text(self.sub_title, style="bold")
         if self.last_ok:
@@ -766,7 +781,8 @@ class BoardApp(App):
                 status.append(f" · every {self.interval:g}s")
         if self.pacer.limited:
             slow = "rate-limited again · once a minute until restart" if self.pacer.stuck else "rate-limited"
-            status.append(f" · {slow} · next fetch in {self.pacer.wait(self.clock())}s", style="bold yellow")
+            reason = f" · {self.notice.reason}" if self.notice else ""
+            status.append(f" · {slow} · next fetch in {self.pacer.wait(self.clock())}s{reason}", style="bold yellow")
         if self.needle:
             status.append(f" · filter: {self.needle}", style="yellow")
         if labels := describe_modes(self.filters["Labels"], self._board_labels()):

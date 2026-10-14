@@ -13,7 +13,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from ..model import WONTFIX_LABEL, Ticket, parse_time
-from . import (IssueStates, NotFound, ProviderError, Query, blocker_ref, is_map, is_spec, names_parent, resolve_maps,
+from . import (IssueStates, NotFound, ProviderError, Query, RateLimited, blocker_ref, is_map, is_spec, names_parent, resolve_maps,
                run_cli, run_json, tracker_error, under_spec, with_body_blockers, with_map)
 
 ISSUE_FIELDS = """
@@ -92,6 +92,23 @@ class GitHubProvider:
         nodes = self._paginate(SUB_ISSUES, {"owner": owner, "name": name, "number": number},
                                ["repository", "issue", "subIssues"], limit=1000)
         return [node["number"] for node in nodes]
+
+    def explain(self, error: RateLimited) -> RateLimited:
+        """Which limit GitHub hit: an hourly quota at 0, with its reset, else the per-minute secondary limit.
+
+        The `rate_limit` endpoint costs no quota; when it fails too, the tracker's message is all there is.
+        """
+        try:
+            resources = run_json(["gh", "api", "rate_limit", "--hostname", self.host])["resources"]
+        except (ProviderError, KeyError, TypeError):
+            return error
+        for key, name in (("graphql", "GraphQL"), ("core", "REST")):
+            quota = resources.get(key) or {}
+            if quota.get("remaining") == 0 and quota.get("reset"):
+                return RateLimited(str(error), error.status, limit=f"hourly {name} quota",
+                                   resets_at=datetime.fromtimestamp(quota["reset"], timezone.utc))
+        return RateLimited(str(error), error.status, limit="secondary limit",
+                           hint="too many calls per minute; every board and agent on the account shares it")
 
     def viewer(self) -> str | None:
         return (self._graphql(VIEWER, {}).get("viewer") or {}).get("login")
