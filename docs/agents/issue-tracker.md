@@ -15,6 +15,7 @@ to its Linear copy.
 - **Comment on an issue**: `save_comment` with `issueId` and `body`.
 - **Apply / remove labels**: `save_issue` with `id` and `addLabels` / `removeLabels`. Never pass `labels` on an update:
   it replaces the whole set.
+- **Start, PR opened, merged**: the states follow the work, see "Issue lifecycle" in `AGENTS.md`.
 - **Close**: `save_issue` with `id` and a `state` of type completed (`Done`); not planned is a `state` of type canceled
   (`Canceled`), after a comment saying why.
 
@@ -24,8 +25,9 @@ Labels are workspace labels, so they mean the same in every team.
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
 
-A pull request closes its Linear issue when its branch name or title carries the issue key (`TM-12`); use the
-issue's `gitBranchName` (from `get_issue`) as the branch name.
+A pull request links to its Linear issue when its title starts with the issue key (`TM-12`) and its body carries
+`Closes TM-12`; merging it closes the issue. Use the issue's `gitBranchName` (from `get_issue`) as the branch name
+where the session picks the branch.
 
 ## When a skill says "publish to the issue tracker"
 
