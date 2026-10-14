@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues live in GitHub Issues for `kareblak/ticketmaster`, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues live in Linear, team Ticketmaster, via the `linear-server` MCP; code and PRs stay on GitHub. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

@@ -1,54 +1,56 @@
-# Issue tracker: GitHub
+# Issue tracker: Linear
 
-Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
+Issues and specs for this repo live in Linear, team **Ticketmaster** (key `<KEY>`, so issues read `<KEY>-12`).
+Use the `linear-server` MCP tools (`https://mcp.linear.app/mcp`, user scope; authenticate once with `/mcp`).
+Code, branches and pull requests stay on GitHub (`kareblak/ticketmaster`); only tracking moved.
+
+Issues created before the move are GitHub issues in `kareblak/ticketmaster`; each one that moved was closed with a link
+to its Linear copy.
 
 ## Conventions
 
-- **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
-- **Read an issue**: `gh issue view <number> --comments`, filtering comments by `jq` and also fetching labels.
-- **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'` with appropriate `--label` and `--state` filters.
-- **Comment on an issue**: `gh issue comment <number> --body "..."`
-- **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
-- **Close**: `gh issue close <number> --comment "..."`
+- **Create an issue**: `save_issue` with `team: "Ticketmaster"`, `title`, `description` (Markdown), and `labels` by name.
+- **Read an issue**: `get_issue` with `id: "<KEY>-12"` and `includeRelations: true`; comments with `list_comments` and `issueId`.
+- **List issues**: `list_issues` with `team: "Ticketmaster"`, filtered by `state`, `label`, `assignee` or `parentId`.
+- **Comment on an issue**: `save_comment` with `issueId` and `body`.
+- **Apply / remove labels**: `save_issue` with `id` and `addLabels` / `removeLabels`. Never pass `labels` on an update:
+  it replaces the whole set.
+- **Close**: `save_issue` with `id` and a `state` of type completed (`Done`); not planned is a `state` of type canceled
+  (`Canceled`), after a comment saying why.
 
-Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
+Labels are workspace labels, so they mean the same in every team.
 
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
 
-When set to `yes`, PRs run through the same labels and states as issues, using the `gh pr` equivalents:
-
-- **Read a PR**: `gh pr view <number> --comments` and `gh pr diff <number>` for the diff.
-- **List external PRs for triage**: `gh pr list --state open --json number,title,body,labels,author,authorAssociation,comments` then keep only `authorAssociation` of `CONTRIBUTOR`, `FIRST_TIME_CONTRIBUTOR`, or `NONE` (drop `OWNER`/`MEMBER`/`COLLABORATOR`).
-- **Comment / label / close**: `gh pr comment`, `gh pr edit --add-label`/`--remove-label`, `gh pr close`.
-
-GitHub shares one number space across issues and PRs, so a bare `#42` may be either: resolve with `gh pr view 42` and fall back to `gh issue view 42`.
+A pull request closes its Linear issue when its branch name or title carries the issue key (`<KEY>-12`); use the
+issue's `gitBranchName` (from `get_issue`) as the branch name.
 
 ## When a skill says "publish to the issue tracker"
 
-Create a GitHub issue.
+Create a Linear issue in team Ticketmaster with `save_issue`.
 
 ## When a skill says "fetch the relevant ticket"
 
-Run `gh issue view <number> --comments`.
+Call `get_issue` with `includeRelations: true`, then `list_comments` for its comments.
 
 ## Wayfinding operations
 
-<!-- Written by `ticketmaster setup`, which replaces this section; the ticketmaster board reads it. -->
+Used by `/wayfinder`. The **map** is a single issue with **child** issues as tickets.
 
-Used by `/wayfinder`; the ticketmaster board reads the same encodings. The **map** is a single issue with
-**child** issues as tickets. Link tickets only as the bullets below say: blocking is always the tracker's
-native link, never a `Blocked by:` body line. The keywords `Part of` and `## Parent` and the `out-of-scope` label are
-always English, even when the rest of the issue is written in another language.
-
-- **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
-- **Child → map**: a GitHub **sub-issue** of the map, nothing in the body: `gh api --method POST repos/<owner>/<repo>/issues/<map>/sub_issues -F sub_issue_id=<child-db-id>`. Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`).
-- **Spec → map**: once the map is resolved, its destination becomes a spec (`/to-spec`): an issue with no `wayfinder:` label whose first line is `Part of #<map>`. The board shows it, and its implementation tickets, beside the map's decision tickets.
-- **Implementation ticket → spec**: each ticket from `/to-tickets` is a GitHub **sub-issue** of the spec, `gh api --method POST repos/<owner>/<repo>/issues/<spec>/sub_issues -F sub_issue_id=<ticket-db-id>`; its `## Parent` section names `#<spec>`, and it has no `wayfinder:` label, so the board starts it with the implement skill.
-- **Blocking**: GitHub's **native issue dependencies**: `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`. A ticket is unblocked when every blocker is closed.
-- **Database ids**: the `<…-db-id>` values above are numeric database ids (`gh api repos/<owner>/<repo>/issues/<n> --jq .id`), _not_ the `#number` or `node_id`.
-- **Out of scope**: label it `out-of-scope`, say why, and close it as not planned: `gh issue edit <n> --add-label out-of-scope`, then `gh issue close <n> --reason "not planned" --comment "<why>"`.
-- **Frontier query**: the map's open sub-issues, in order (`gh api repos/<owner>/<repo>/issues/<map>/sub_issues`), minus any with an open blocker (`issue_dependencies_summary.blocked_by > 0`) or an assignee; first in map order wins.
-- **Claim**: `gh issue edit <n> --add-assignee @me`, the session's first write.
-- **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
+- **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `save_issue` with
+  `team: "Ticketmaster"`, `labels: ["wayfinder:map"]`.
+- **Child ticket**: a Linear **sub-issue** of the map (`save_issue` with `parentId: "<map id>"`), nothing in the body.
+  Labels: `wayfinder:<type>` (`research`/`prototype`/`grilling`/`task`). Once claimed, the ticket is assigned to the
+  driving dev.
+- **Blocking**: Linear's **native blocking relation**, the canonical, UI-visible representation: `save_issue` on the
+  child with `blockedBy: ["<blocker id>"]` (it appends; `removeBlockedBy` removes). A ticket is unblocked when every
+  blocker is in a completed or canceled state.
+- **Frontier query**: `list_issues` with `parentId: "<map id>"`, keep the open ones (state type not completed or
+  canceled) without an assignee, then drop any whose `get_issue` (`includeRelations: true`) shows an open blocker.
+  First in map order (sub-issue sort order, then issue number) wins.
+- **Claim**: `save_issue` with `id` and `assignee: "me"`, the session's first write.
+- **Resolve**: `save_comment` with the answer, then `save_issue` with `state: "Done"`, then append a context pointer
+  (gist + link) to the map's Decisions-so-far with `save_issue` and a `patch` on the map's description.
+- **Out of scope**: comment why, set `state: "Canceled"`, and add one line to the map's Out of scope section.
