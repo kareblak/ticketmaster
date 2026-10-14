@@ -117,9 +117,10 @@ def test_start_refusal_names_blockers_label_and_other_claimant():
 
 
 def test_start_refusal_lets_the_claimant_and_unknown_viewers_start():
-    assert ticket().start_refusal("me") is None
-    assert ticket(assignees=("Me", "bob")).start_refusal("me") is None
-    assert ticket(assignees=("bob",)).start_refusal(None) is None
+    on_map = dict(map_number=9, map_url="u9")
+    assert ticket(**on_map).start_refusal("me") is None
+    assert ticket(assignees=("Me", "bob"), **on_map).start_refusal("me") is None
+    assert ticket(assignees=("bob",), **on_map).start_refusal(None) is None
 
 
 MAP = ("wayfinder:map",)
@@ -193,19 +194,17 @@ def test_a_closed_ticket_labelled_out_of_scope_is_out_of_scope():
     assert not ticket(labels=("out-of-scope",)).is_out_of_scope  # still open: not ruled out yet
 
 
-def test_triage_hold_names_the_first_held_label():
-    holds = {"needs-info": "waits on more information", "human": "needs a human"}
-    assert ticket(labels=("bug", "Needs-Info")).triage_hold(holds) == "Needs-Info"
-    assert ticket(labels=("human",)).triage_hold(holds) == "human"
-    assert ticket(labels=("ready-for-human",)).triage_hold(holds) is None
-    assert ticket().triage_hold({}) is None
+def test_start_refusal_names_a_ticket_that_is_not_wayfinder_work_last():
+    assert ticket().start_refusal("me") == "#1 is not wayfinder work: the board only starts /wayfinder"
+    assert ticket(open_blockers=1).start_refusal("me") == "#1 is blocked by 1 open issue"
+    assert ticket(labels=("wayfinder:map",)).start_refusal("me") is None
+    assert ticket(map_number=9, map_url="u9").start_refusal("me") is None
+    assert ticket(labels=("wayfinder:task",)).start_refusal("me") is None  # map not found: warned elsewhere
 
 
-def test_start_refusal_names_a_triage_hold_with_its_reason():
-    holds = {"needs-info": "waits on more information"}
-    assert ticket(labels=("Needs-Info",)).start_refusal("me", holds) == \
-        "#1 is labelled Needs-Info: waits on more information; not started"
-    assert ticket(labels=("needs-info",)).start_refusal("me") is None
+def test_triage_labels_never_hold_a_start():
+    for label in ("needs-info", "ready-for-human"):
+        assert ticket(labels=(label,), map_number=9, map_url="u9").start_refusal("me") is None
 
 
 def child(number, **kw):

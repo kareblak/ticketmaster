@@ -36,7 +36,36 @@ def test_cli_accepts_bare_parent_and_explicit_command():
     from ticketmaster.cli import parse_args
 
     assert (parse_args(["680"]).command, parse_args(["680"]).parent) == ("open", 680)
-    args = parse_args(["adopt", "#12", "--label", "x"])
-    assert (args.command, args.parent, args.label) == ("adopt", 12, "x")
-    assert parse_args(["snapshot", "https://github.com/o/r/issues/9"]).parent == 9
+    assert (parse_args(["open", "#12"]).command, parse_args(["open", "#12"]).parent) == ("open", 12)
+    assert parse_args(["https://github.com/o/r/issues/9"]).parent == 9
+    assert parse_args(["--repo", "o/r", "7"]).parent == 7
     assert parse_args([]).command == "open"
+
+
+@pytest.mark.parametrize("command", ["snapshot", "adopt", "setup", "install-skill", "upgrade"])
+def test_removed_commands_get_argparses_invalid_choice_error(command, capsys, monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    from ticketmaster.cli import parse_args
+
+    with pytest.raises(SystemExit) as exit:
+        parse_args([command])
+    assert exit.value.code == 2
+    assert f"invalid choice: '{command}'" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", [["--label", "x"], ["--done-days", "3"], ["--limit", "10"]])
+def test_removed_flags_are_unknown_arguments(flag, capsys, monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    from ticketmaster.cli import parse_args
+
+    with pytest.raises(SystemExit) as exit:
+        parse_args(flag)
+    assert exit.value.code == 2
+    assert f"unrecognized arguments: {flag[0]}" in capsys.readouterr().err
+
+
+def test_version_is_0_3_0(capsys):
+    from ticketmaster.cli import main
+
+    assert main(["--version"]) == 0
+    assert capsys.readouterr().out.strip() == "ticketmaster 0.3.0"

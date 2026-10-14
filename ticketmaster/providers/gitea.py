@@ -22,7 +22,7 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-from ..model import WONTFIX_LABEL, Ticket, parse_time
+from ..model import Ticket, parse_time
 from . import (IssueStates, NotFound, ProviderError, Query, RateLimited, blocker_ref, map_family, resolve_maps,
                tracker_error, with_body_blockers)
 
@@ -96,13 +96,6 @@ class GiteaProvider:
         found = self._issue_or_none(number)
         return to_ticket(found, None, []) if found else None
 
-    def close(self, number: int) -> None:
-        """Gitea has no close reason, so the `wontfix` label marks it not planned; labelled first, so a
-        refused label leaves the issue open."""
-        path = f"/repos/{self.repo}/issues/{number}"
-        self._request("POST", f"{path}/labels", body={"labels": [WONTFIX_LABEL]})
-        self._request("PATCH", path, body={"state": "closed"})
-
     def _open_blockers(self, number: int) -> tuple[str, ...] | None:
         try:
             deps = self._get(f"/repos/{self.repo}/issues/{number}/dependencies")
@@ -136,14 +129,8 @@ class GiteaProvider:
         return items[:limit]
 
     def _get(self, path: str, params: dict | None = None):
-        return self._request("GET", path, params)
-
-    def _request(self, method: str, path: str, params: dict | None = None, body: dict | None = None):
         url = self.base + path + ("?" + urllib.parse.urlencode(params) if params else "")
-        data = None if body is None else json.dumps(body).encode()
-        request = urllib.request.Request(url, data=data, headers={"Accept": "application/json"}, method=method)
-        if data is not None:
-            request.add_header("Content-Type", "application/json")
+        request = urllib.request.Request(url, headers={"Accept": "application/json"})
         if self.token:
             request.add_header("Authorization", f"token {self.token}")
         try:

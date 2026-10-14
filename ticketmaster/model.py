@@ -22,14 +22,14 @@ COLUMN_ORDER = [Column.BLOCKED, Column.READY, Column.IN_PROGRESS, Column.REVIEW,
 # `review:security` (GitHub/Gitea) and `review::security` (GitLab scoped labels).
 REVIEW_LABEL = re.compile(r"^review::?(?P<kind>.+)$", re.IGNORECASE)
 BLOCKED_LABEL = "blocked"
-# Marks an issue closed from the board as not planned; GitLab and Gitea have no close reason, so it is the marker.
+# Marks an issue closed as not planned; GitLab and Gitea have no close reason, so it is the marker.
 WONTFIX_LABEL = "wontfix"
 WAYFINDER_TYPES = ("research", "prototype", "grilling", "task")
 # `wayfinder:<kind>` (GitHub/Gitea) and `wayfinder::<kind>` (GitLab scoped labels).
 WAYFINDER_LABEL = re.compile(r"^wayfinder::?(?P<kind>[^:].*)$", re.IGNORECASE)
 # The child→map rule for trackers without a native link: the body's first line is `Part of #<map>`.
 PART_OF = re.compile(r"^Part of #(?P<map>\d+)\.?$")
-OUT_OF_SCOPE_LABEL = "out-of-scope"  # pinned by `ticketmaster setup`, always English
+OUT_OF_SCOPE_LABEL = "out-of-scope"  # wayfinder's out-of-scope label, always English
 # HITL: worked with a human; AFK: the agent alone. A task says which in its body.
 TYPE_MODES = {"grilling": "HITL", "prototype": "HITL", "research": "AFK"}
 _MODE_WORD = re.compile(r"\b(HITL|AFK)\b")  # the acronyms, not "afk" in prose
@@ -84,11 +84,8 @@ class Ticket:
         labels = {label.lower() for label in self.labels}
         return WONTFIX_LABEL in labels or (self.not_planned and OUT_OF_SCOPE_LABEL not in labels)
 
-    def start_refusal(self, viewer: str | None, holds: dict[str, str] | None = None) -> str | None:
-        """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart.
-
-        `holds` maps the triage labels that keep a ticket from an AFK start to why, see triage.hold_labels.
-        """
+    def start_refusal(self, viewer: str | None) -> str | None:
+        """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart."""
         if self.blocked_by:
             return f"#{self.number} is blocked by {', '.join(self.blocked_by)}"
         if self.open_blockers:
@@ -97,10 +94,18 @@ class Ticket:
             return f"#{self.number} has the '{BLOCKED_LABEL}' label"
         if viewer and self.assignees and viewer.lower() not in (a.lower() for a in self.assignees):
             return f"#{self.number} is claimed by {', '.join('@' + a for a in self.assignees)}"
-        if hold := self.triage_hold(holds or {}):
-            reason = next(why for label, why in holds.items() if label.lower() == hold.lower())
-            return f"#{self.number} is labelled {hold}: {reason}; not started"
+        if not (self.is_wayfinder_work or self.map_missing):  # a typed ticket without its map is warned about apart
+            return self.not_wayfinder_work
         return None
+
+    @property
+    def not_wayfinder_work(self) -> str:
+        return f"#{self.number} is not wayfinder work: the board only starts /wayfinder"
+
+    @property
+    def is_wayfinder_work(self) -> bool:
+        """A map, or a ticket on one: the only work the board starts, always with /wayfinder."""
+        return self.is_wayfinder_map or self.is_wayfinder_ticket or self.map_url is not None
 
     @property
     def is_wayfinder_map(self) -> bool:
@@ -145,11 +150,6 @@ class Ticket:
     def is_out_of_scope(self) -> bool:
         """Closed as ruled out of scope, rather than resolved."""
         return not self.is_open and any(label.lower() == OUT_OF_SCOPE_LABEL for label in self.labels)
-
-    def triage_hold(self, holds: dict[str, str]) -> str | None:
-        """This ticket's first label among `holds` (label → reason, see triage.hold_labels), or None."""
-        wanted = {label.lower() for label in holds}
-        return next((label for label in self.labels if label.lower() in wanted), None)
 
     @property
     def summary(self) -> str:

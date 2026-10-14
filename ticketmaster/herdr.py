@@ -2,8 +2,8 @@
 
 Starting a ticket always creates a new git worktree (`herdr worktree create`) with Claude started in it
 as a named herdr agent. A ticket's sessions are found again through its worktrees (`issue-<n>`, from
-herdr or `claude -w`, and `review-<n>`), so the board can show each agent's state, jump to it,
-resume a dead one with `claude --continue`, and remove the worktree once the ticket is done.
+herdr or `claude -w`), so the board can show each agent's state, jump to it, and resume a dead one with
+`claude --continue`. The board never removes or adopts a worktree.
 """
 
 from __future__ import annotations
@@ -23,8 +23,8 @@ from pathlib import Path
 BOARD_LABEL = "ticketmaster"
 BOARD_ENV = "TICKETMASTER_BOARD"  # set on the `open` a board pane runs, so it knows it is the board
 BOARD_RATIO = 0.7  # share the caller keeps; leaves the board ~1/3, i.e. single-column mode
-# `issue-12`, `worktree-issue-12` (claude -w), `issue-12-2` (a second start), `review-12`.
-WORKTREE_NAME = re.compile(r"^(?:worktree-)?(?P<kind>issue|review)-(?P<number>\d+)(?:-\d+)?$")
+# `issue-12`, `worktree-issue-12` (claude -w), `issue-12-2` (a second start).
+WORKTREE_NAME = re.compile(r"^(?:worktree-)?issue-(?P<number>\d+)(?:-\d+)?$")
 
 
 class HerdrError(RuntimeError):
@@ -54,7 +54,6 @@ class Session:
     """A worktree belonging to a ticket, with its herdr workspace and agent when they are open."""
 
     number: int
-    kind: str  # "issue" or "review"
     path: str
     branch: str | None = None
     workspace: str | None = None
@@ -82,10 +81,10 @@ def belongs(pane: dict, cwd: Path, session: str | None) -> bool:
     return any(d and Path(d).resolve().is_relative_to(root) for d in (pane.get("cwd"), pane.get("foreground_cwd")))
 
 
-def ticket_number(worktree: dict) -> tuple[str, int] | None:
+def ticket_number(worktree: dict) -> int | None:
     for name in (Path(worktree["path"]).name, worktree.get("branch") or ""):
         if match := WORKTREE_NAME.match(name):
-            return match["kind"], int(match["number"])
+            return int(match["number"])
     return None
 
 
@@ -172,12 +171,11 @@ class Herdr:
                 status_by_workspace[workspace] = status  # the one needing attention wins
         found: dict[int, list[Session]] = {}
         for wt in self.worktrees(cwd):
-            if (named := ticket_number(wt)) is None:
+            if (number := ticket_number(wt)) is None:
                 continue
-            kind, number = named
             workspace = wt.get("open_workspace_id")
             found.setdefault(number, []).append(Session(
-                number, kind, wt["path"], wt.get("branch"), workspace, status_by_workspace.get(workspace) if workspace else None,
+                number, wt["path"], wt.get("branch"), workspace, status_by_workspace.get(workspace) if workspace else None,
             ))
         return found
 
@@ -207,14 +205,6 @@ class Herdr:
         note = self.start_claude(pane, Path(session.path).name, claude, ["--continue"])
         return f"resumed {Path(session.path).name}{note}"
 
-    def remove(self, cwd: Path, session: Session, label: str) -> None:
-        """Closes the workspace and removes the checkout. herdr refuses when it has uncommitted changes."""
-        workspace = session.workspace
-        if workspace is None:
-            pane = self.call("worktree", "open", "--cwd", str(cwd), "--path", session.path, "--label", label, "--no-focus")["root_pane"]
-            workspace = pane.get("workspace_id") or pane["pane_id"].split(":")[0]
-        self.call("worktree", "remove", "--workspace", workspace)
-
     def start_claude(self, pane: str, name: str, claude: str, claude_args: list[str]) -> str:
         """Starts Claude as the herdr agent `name`. Returns a short state note for the status line."""
         if Path(claude).name != "claude":
@@ -232,20 +222,6 @@ class Herdr:
             raise
         return f" as agent {unique}"
 
-    # --- adopting older `claude -w` worktrees ---------------------------------------------------
-
-    def adopt(self, cwd: Path, labels: Mapping[str, str]) -> list[str]:
-        """Opens a workspace for every `.claude/worktrees/*` checkout that has none. Returns their labels."""
-        opened = []
-        for wt in self.worktrees(cwd):
-            path = Path(wt["path"])
-            if wt.get("open_workspace_id") or path.parent.name != "worktrees" or path.parent.parent.name != ".claude":
-                continue
-            label = labels.get(path.name, path.name)
-            self.call("worktree", "open", "--cwd", str(cwd), "--path", str(path), "--label", label, "--no-focus")
-            opened.append(label)
-        return opened
-
 
 def repo_root(cwd: Path) -> Path:
     result = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True)
@@ -255,24 +231,6 @@ def repo_root(cwd: Path) -> Path:
 def local_branches(cwd: Path) -> list[str]:
     result = subprocess.run(["git", "branch", "--format=%(refname:short)"], cwd=cwd, capture_output=True, text=True)
     return result.stdout.split() if result.returncode == 0 else []
-
-
-def unsaved_work(path: str) -> str | None:
-    """Why a checkout would lose work if removed: uncommitted changes or commits on no remote. None when safe."""
-    def git(*args: str) -> subprocess.CompletedProcess:
-        return subprocess.run(["git", *args], cwd=path, capture_output=True, text=True)
-
-    status = git("status", "--porcelain")
-    if status.returncode != 0:
-        return "not a git checkout"
-    if status.stdout.strip():
-        return "uncommitted changes"
-    unpushed = git("rev-list", "--count", "HEAD", "--not", "--remotes")
-    if unpushed.returncode != 0:
-        return "cannot compare with remotes"
-    if int(unpushed.stdout.strip() or 0):
-        return "unpushed commits"
-    return None
 
 
 def error_code(stderr: str) -> str | None:
