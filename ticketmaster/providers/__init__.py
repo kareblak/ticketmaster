@@ -1,4 +1,4 @@
-"""Issue-tracker providers. Each one turns a board query into provider-neutral Tickets, and can close an issue as not planned."""
+"""Issue-tracker providers. Each one turns a board query into provider-neutral Tickets; none writes to the tracker."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from http import HTTPStatus
 from typing import Literal, Protocol
 
 from ..model import Ticket, parse_blockers, part_of, wayfinder_kinds
-from ..wayfinding import TRACKER_NAMES
+
+TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo"}
 
 
 class ProviderError(RuntimeError):
@@ -109,10 +110,6 @@ class Provider(Protocol):
     repo: str
 
     def fetch(self, query: Query) -> list[Ticket]: ...
-
-    def close(self, number: int) -> None:
-        """Closes the issue as not planned with the `wontfix` label; plain write access is enough."""
-        ...
 
     def viewer(self) -> str | None:
         """Login of the user the CLI or token acts as."""
@@ -255,7 +252,7 @@ def blocker_ref(number: int, repo: str, own_repo: str) -> str:
     return f"#{number}" if not repo or repo.lower() == own_repo.lower() else f"{repo}#{number}"
 
 
-# How a map's spec and the spec's implementation tickets link back (`ticketmaster setup` pins them): the
+# How a map's spec and the spec's implementation tickets link back: the
 # spec's first line is `Part of #<map>`, an implementation ticket's `## Parent` section names the spec.
 _PARENT_SECTION = re.compile(r"^##\s*Parent\s*$(?P<text>.*?)(?=^#{1,2}\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
 _PARENT_REF = re.compile(r"(?<![\w&])#(?P<hash>\d+)\b|/issues/(?P<url>\d+)\b")

@@ -47,7 +47,8 @@ def worktrees(*entries):
 
 
 def ticket():
-    return Ticket(number=686, title="Attach a  deviation reason", url="https://gh/686", is_open=True)
+    return Ticket(number=686, title="Attach a  deviation reason", url="https://gh/686", is_open=True,
+                  labels=("wayfinder:map",))
 
 
 def bench(fake, **kw):
@@ -234,14 +235,14 @@ def test_start_creates_a_worktree_workspace_with_a_named_agent():
     assert message == "Started #686 in new worktree issue-686 as agent issue-686"
 
 
-def test_start_passes_the_configured_implement_command_to_claude():
+def test_start_passes_the_configured_wayfinder_command_to_claude():
     fake = FakeHerdr({
         ("worktree", "list"): worktrees(),
         ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
         ("agent", "list"): {"agents": []},
     })
-    bench(fake, implement_command="/implement").start(ticket())
-    assert fake.first("agent", "start")[-1].startswith("/implement https://")
+    bench(fake, wayfinder_command="/wayfinder").start(ticket())
+    assert fake.first("agent", "start")[-1] == "/wayfinder https://gh/686"
 
 
 def test_start_always_makes_a_new_worktree_even_when_one_exists(monkeypatch):
@@ -257,26 +258,13 @@ def test_start_always_makes_a_new_worktree_even_when_one_exists(monkeypatch):
     assert fake.first("worktree", "create")[5] == "issue-686-3"  # issue-686 and issue-686-2 are taken
 
 
-def test_review_gets_its_own_worktree():
+def test_a_taken_agent_name_gets_a_suffix():
     fake = FakeHerdr({
         ("worktree", "list"): worktrees(),
         ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
-        ("agent", "list"): {"agents": [{"name": "review-686"}]},
+        ("agent", "list"): {"agents": [{"name": "issue-686"}]},
     })
-    message = bench(fake).review(ticket())
-    assert fake.first("worktree", "create")[5] == "review-686"
-    assert fake.first("agent", "start")[2] == "review-686-2"  # agent name taken
-    assert message.startswith("Reviewing #686 in new worktree review-686")
-    assert fake.first("agent", "start")[-1].startswith("/mattpocock-skills:code-review Review the open pull request")
-
-
-def test_review_starts_the_configured_review_command():
-    fake = FakeHerdr({
-        ("worktree", "list"): worktrees(),
-        ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
-    })
-    bench(fake, review_command="/code-review").review(ticket())
-    assert fake.first("agent", "start")[-1].startswith("/code-review Review the open pull request for issue #686")
+    assert bench(fake).start(ticket()) == "Started #686 in new worktree issue-686 as agent issue-686-2"
 
 
 def test_startup_prompt_is_reported_not_failed():
@@ -311,6 +299,7 @@ def test_sessions_map_worktrees_to_tickets_with_agent_state():
             {"path": "/code/shiplog/.claude/worktrees/issue-713", "branch": "feat/713-reasons", "is_linked_worktree": True, "open_workspace_id": "wA"},
             {"path": "/h/worktrees/shiplog/issue-713-2", "branch": "issue-713-2", "is_linked_worktree": True},
             {"path": "/h/worktrees/shiplog/review-741", "branch": "review-741", "is_linked_worktree": True, "open_workspace_id": "wC"},
+            {"path": "/h/worktrees/shiplog/issue-742", "branch": "issue-742", "is_linked_worktree": True, "open_workspace_id": "wE"},
             {"path": "/code/shiplog-lease-647", "branch": "fix/lease", "is_linked_worktree": True},
         ),
         ("agent", "list"): {"agents": [
@@ -319,23 +308,23 @@ def test_sessions_map_worktrees_to_tickets_with_agent_state():
         ]},
     })
     found = Herdr(fake).sessions(REPO)
-    assert set(found) == {713, 741}
+    assert set(found) == {713, 742}  # review-<n> worktrees are no ticket's
     first, second = found[713]
     assert (first.workspace, first.status) == ("wA", "blocked")  # the agent needing you wins
-    assert (second.kind, second.workspace, second.status) == ("issue", None, None)
-    assert (found[741][0].kind, found[741][0].status) == ("review", None)  # open, but no agent
+    assert (second.path, second.workspace, second.status) == ("/h/worktrees/shiplog/issue-713-2", None, None)
+    assert (found[742][0].workspace, found[742][0].status) == ("wE", None)  # open, but no agent
 
 
 def test_go_to_focuses_a_live_session():
     fake = FakeHerdr({})
-    session = Session(713, "issue", "/w/issue-713", workspace="wA", status="working")
+    session = Session(713, "/w/issue-713", workspace="wA", status="working")
     assert bench(fake).go_to(ticket(), session) == "#686: focused wA"
     assert fake.calls == [["workspace", "focus", "wA"]]
 
 
 def test_go_to_reopens_a_closed_worktree_and_resumes_claude():
     fake = FakeHerdr({("worktree", "open"): {"root_pane": {"pane_id": "wD:p1"}}, ("agent", "list"): {"agents": []}})
-    bench(fake).go_to(ticket(), Session(686, "issue", "/w/issue-686"))
+    bench(fake).go_to(ticket(), Session(686, "/w/issue-686"))
     assert fake.first("worktree", "open")[4:6] == ["--path", "/w/issue-686"]
     start = fake.first("agent", "start")
     assert start[2] == "issue-686" and start[-2:] == ["--", "--continue"]
@@ -343,55 +332,11 @@ def test_go_to_reopens_a_closed_worktree_and_resumes_claude():
 
 def test_go_to_an_open_workspace_without_claude_resumes_in_a_new_tab():
     fake = FakeHerdr({("tab", "create"): {"root_pane": {"pane_id": "wA:p2"}}, ("agent", "list"): {"agents": []}})
-    bench(fake).go_to(ticket(), Session(686, "issue", "/w/issue-686", workspace="wA"))
+    bench(fake).go_to(ticket(), Session(686, "/w/issue-686", workspace="wA"))
     assert fake.first("tab", "create")[2:4] == ["--workspace", "wA"]
     assert ["workspace", "focus", "wA"] in fake.calls and fake.first("agent", "start")[-1] == "--continue"
 
 
-def test_remove_opens_a_closed_worktree_then_removes_it_without_force():
-    fake = FakeHerdr({("worktree", "open"): {"root_pane": {"pane_id": "wD:p1"}}})
-    message = bench(fake).remove(ticket(), [Session(686, "issue", "/w/issue-686"), Session(686, "review", "/w/review-686", workspace="wE")])
-    removes = [c for c in fake.calls if c[:2] == ["worktree", "remove"]]
-    assert removes == [["worktree", "remove", "--workspace", "wD"], ["worktree", "remove", "--workspace", "wE"]]
-    assert message == "Removed 2 worktree(s) of #686"
-
-
-def test_adopt_opens_only_unopened_claude_worktrees():
-    fake = FakeHerdr({("worktree", "list"): worktrees(
-        {"path": "/code/shiplog/.claude/worktrees/issue-692", "branch": "worktree-issue-692", "is_linked_worktree": True},
-        {"path": "/code/shiplog/.claude/worktrees/issue-693", "branch": "worktree-issue-693", "is_linked_worktree": True, "open_workspace_id": "w5"},
-        {"path": "/code/shiplog-lease-647", "branch": "fix/lease", "is_linked_worktree": True},
-    )})
-    assert Herdr(fake).adopt(REPO, {"issue-692": "#692 Fuel"}) == ["#692 Fuel"]
-    opens = [c for c in fake.calls if c[:2] == ["worktree", "open"]]
-    assert len(opens) == 1 and opens[0][5] == "/code/shiplog/.claude/worktrees/issue-692"
-
-
-def test_auto_remove_keeps_worktrees_with_unsaved_work():
-    fake = FakeHerdr({})
-    unsaved = {"/w/issue-686-2": "unpushed commits"}
-    sessions = [Session(686, "issue", "/w/issue-686", workspace="wA"), Session(686, "issue", "/w/issue-686-2", workspace="wB")]
-    message = bench(fake, check_unsaved=unsaved.get).auto_remove(ticket(), sessions)
-    assert [c for c in fake.calls if c[:2] == ["worktree", "remove"]] == [["worktree", "remove", "--workspace", "wA"]]
-    assert message == "#686 done: auto-removed issue-686; kept issue-686-2 (unpushed commits)"
-
-
-def git(cwd, *args):
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
-
-
-def test_unsaved_work_sees_uncommitted_and_unpushed_changes(tmp_path):
-    remote, clone = tmp_path / "remote.git", tmp_path / "clone"
-    git(tmp_path, "init", "--bare", "-q", str(remote))
-    git(tmp_path, "clone", "-q", str(remote), str(clone))
-    for key, value in (("user.name", "t"), ("user.email", "t@t"), ("commit.gpgsign", "false")):
-        git(clone, "config", key, value)
-    (clone / "a").write_text("1")
-    git(clone, "add", "a")
-    git(clone, "commit", "-qm", "a")
-    assert herdr.unsaved_work(str(clone)) == "unpushed commits"
-    git(clone, "push", "-q", "origin", "HEAD")
-    assert herdr.unsaved_work(str(clone)) is None
-    (clone / "a").write_text("2")
-    assert herdr.unsaved_work(str(clone)) == "uncommitted changes"
-    assert herdr.unsaved_work(str(tmp_path)) == "not a git checkout"
+def test_herdr_cannot_remove_or_adopt_worktrees():
+    assert not any(hasattr(Herdr, action) for action in ("remove", "adopt"))
+    assert not hasattr(herdr, "unsaved_work")

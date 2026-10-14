@@ -51,7 +51,7 @@ def load_config(cwd: Path) -> dict:
 
 
 def settings_path() -> Path:
-    """Per-user board settings changed from inside the board, e.g. auto-remove."""
+    """Per-user board settings changed from inside the board, e.g. the saved filters."""
     return Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "ticketmaster" / "settings.json"
 
 

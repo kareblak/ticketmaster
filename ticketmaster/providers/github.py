@@ -12,7 +12,7 @@ import json
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from ..model import WONTFIX_LABEL, Ticket, parse_time
+from ..model import Ticket, parse_time
 from . import (IssueStates, NotFound, ProviderError, Query, RateLimited, as_spec, blocker_ref, is_map, is_spec,
                names_parent, resolve_maps, run_cli, run_json, tracker_error, under_spec, with_body_blockers)
 
@@ -141,12 +141,6 @@ class GitHubProvider:
                 if node and node["number"] not in seen:
                     seen[node["number"]] = to_ticket(node, order=0, repo=self.repo)
         return list(seen.values())
-
-    def close(self, number: int) -> None:
-        """Labels first, so a missing `wontfix` label leaves the issue open rather than half done."""
-        repo = f"{self.host}/{self.repo}"
-        run_cli(["gh", "issue", "edit", str(number), "--repo", repo, "--add-label", WONTFIX_LABEL])
-        run_cli(["gh", "issue", "close", str(number), "--repo", repo, "--reason", "not planned"])
 
     def _sub_issues(self, query: Query) -> tuple[list[Ticket], Ticket]:
         """The parent's sub-issues in order; for a map, then its spec and the spec's implementation tickets.

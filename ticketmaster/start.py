@@ -1,33 +1,29 @@
-"""What the board's keys do in herdr: start a ticket in a new worktree, review it, go to its session, clean up."""
+"""What the board's keys do in herdr: start a ticket's /wayfinder session in a new worktree, or go to its session."""
 
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .herdr import Herdr, Session, unsaved_work
+from .herdr import Herdr, Session
 from .model import Ticket
 
 DEFAULT_WAYFINDER_COMMAND = "/mattpocock-skills:wayfinder"
-DEFAULT_IMPLEMENT_COMMAND = "/mattpocock-skills:implement"
-DEFAULT_REVIEW_COMMAND = "/mattpocock-skills:code-review"
 
 
 class MapNotFound(ValueError):
     """A `wayfinder:<type>` ticket belongs to wayfinder, but the board could not find its map."""
 
 
-def build_prompt(
-    ticket: Ticket,
-    wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND,
-    implement_command: str = DEFAULT_IMPLEMENT_COMMAND,
-) -> str:
-    """Wayfinder claims and resolves map tickets itself, and drives a ticket that has a map (the spec a map
-    led to, and its implementation tickets); anything else runs the implement skill with a brief.
+class NotWayfinderWork(ValueError):
+    """A ticket with no map: the board only ever starts /wayfinder, so it does not start this one."""
 
-    A typed wayfinder ticket never falls back to implement: without its map it raises MapNotFound.
+
+def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND) -> str:
+    """Wayfinder claims and resolves map tickets itself, and drives a ticket that has a map (the spec a map
+    led to, and its implementation tickets). Without a map there is nothing to start: a typed wayfinder
+    ticket raises MapNotFound, anything else NotWayfinderWork.
     """
     if ticket.is_wayfinder_map:
         return f"{wayfinder_command} {ticket.url}"
@@ -37,22 +33,7 @@ def build_prompt(
         raise MapNotFound(f"#{ticket.number} {ticket.map_warning}")
     if ticket.map_url:
         return f"{wayfinder_command} {ticket.map_url} {ticket.url}"
-    return (
-        f"{implement_command} {ticket.url}\n\n"
-        "1. Read the issue and its comments, then assign it to yourself before doing any work.\n"
-        "2. Implement it via the skill (it drives /tdd and /code-review and commits).\n"
-        "3. Push the branch and open a ready PR that closes the issue, with the body written via the pr skill."
-    )
-
-
-def review_prompt(ticket: Ticket, review_command: str = DEFAULT_REVIEW_COMMAND) -> str:
-    """The skill reviews from a fixed point against a spec: the PR's base branch and the issue."""
-    return (
-        f"{review_command} Review the open pull request for issue #{ticket.number}: {ticket.title}\n{ticket.url}\n\n"
-        "First find the PR that closes this issue and check out its branch in this worktree. "
-        f"Use the PR's base branch (e.g. origin/main) as the fixed point and {ticket.url} as the spec. "
-        "Report findings in this session only; do not push or comment on the PR without asking."
-    )
+    raise NotWayfinderWork(f"#{ticket.number} is not wayfinder work: the board only starts /wayfinder")
 
 
 def worktree_name(ticket: Ticket) -> str:
@@ -79,11 +60,8 @@ class Workbench:
 
     cwd: Path
     wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND
-    implement_command: str = DEFAULT_IMPLEMENT_COMMAND
-    review_command: str = DEFAULT_REVIEW_COMMAND
     claude: str = "claude"
     herdr: Herdr = field(default_factory=Herdr)
-    check_unsaved: Callable[[str], str | None] = unsaved_work  # why removing a checkout would lose work
 
     def sessions(self) -> dict[int, list[Session]]:
         return self.herdr.sessions(self.cwd)
@@ -91,41 +69,14 @@ class Workbench:
     def start(self, ticket: Ticket) -> str:
         where = self.herdr.start_in_new_worktree(
             self.cwd, worktree_name(ticket), session_label(ticket),
-            claude_args(ticket, build_prompt(ticket, self.wayfinder_command, self.implement_command)), self.claude,
+            claude_args(ticket, build_prompt(ticket, self.wayfinder_command)), self.claude,
         )
         return f"Started #{ticket.number} in {where}"
-
-    def review(self, ticket: Ticket) -> str:
-        where = self.herdr.start_in_new_worktree(
-            self.cwd, f"review-{ticket.number}", f"review {session_label(ticket)}",
-            claude_args(ticket, review_prompt(ticket, self.review_command)), self.claude,
-        )
-        return f"Reviewing #{ticket.number} in {where}"
 
     def go_to(self, ticket: Ticket, session: Session) -> str:
         return f"#{ticket.number}: " + self.herdr.go_to(self.cwd, session, session_label(ticket), self.claude)
 
-    def remove(self, ticket: Ticket, sessions: list[Session]) -> str:
-        for session in sessions:
-            self.herdr.remove(self.cwd, session, session_label(ticket))
-        return f"Removed {len(sessions)} worktree(s) of #{ticket.number}"
-
-    def auto_remove(self, ticket: Ticket, sessions: list[Session]) -> str:
-        """Removes the worktrees that hold no uncommitted or unpushed work; names the ones it keeps."""
-        kept = {s.path: reason for s in sessions if (reason := self.check_unsaved(s.path))}
-        safe = [s for s in sessions if s.path not in kept]
-        if safe:
-            self.remove(ticket, safe)
-        parts = [f"auto-removed {', '.join(Path(s.path).name for s in safe)}"] if safe else []
-        parts += [f"kept {Path(path).name} ({reason})" for path, reason in kept.items()]
-        return f"#{ticket.number} done: " + "; ".join(parts)
-
 
 def workbench_for(cwd: Path, config: dict) -> Workbench:
-    """`.ticketmaster.toml` can rename the skills the sessions start with."""
-    return Workbench(
-        cwd,
-        wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND),
-        implement_command=config.get("implement_command", DEFAULT_IMPLEMENT_COMMAND),
-        review_command=config.get("review_command", DEFAULT_REVIEW_COMMAND),
-    )
+    """`.ticketmaster.toml` can rename the wayfinder skill the sessions start with."""
+    return Workbench(cwd, wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND))

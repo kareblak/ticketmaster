@@ -1,28 +1,23 @@
 import json
 import asyncio
-from dataclasses import replace
 from datetime import datetime, timezone
-
-import pytest
+from pathlib import Path
 
 from ticketmaster.board import (BoardApp, Card, FilterPicker, HelpScreen, Pacer, PickerOption, passes_authors,
                                passes_labels, render_card, tag_style)
 from ticketmaster.herdr import Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
-from ticketmaster.upgrade import UPGRADE_NOTICE as NOTICE
 
 
 class FakeProvider:
     name = "fake"
     repo = "o/r"
 
-    def __init__(self, tickets, login="me", close_error=None):
+    def __init__(self, tickets, login="me"):
         self.tickets = tickets
         self.calls = 0
         self.login = login
-        self.closed = []
-        self.close_error = close_error
 
     def viewer(self):
         if isinstance(self.login, Exception):
@@ -35,17 +30,10 @@ class FakeProvider:
             raise self.tickets
         return self.tickets
 
-    def close(self, number):
-        """Like the trackers: closed now, as not planned, with the `wontfix` label."""
-        if self.close_error:
-            raise self.close_error
-        self.closed.append(number)
-        self.tickets = [replace(t, is_open=False, closed_at=datetime.now(timezone.utc), not_planned=True,
-                                labels=t.labels + ("wontfix",)) if t.number == number else t for t in self.tickets]
-
 
 TICKETS = [
-    Ticket(number=1, title="Ready one", url="u1", is_open=True, body="## Question\nWhat now?"),
+    # #1 is a spec on map #9, so s starts it with /wayfinder; plain issues are never started.
+    Ticket(number=1, title="Ready one", url="u1", is_open=True, body="## Question\nWhat now?", map_number=9, map_url="u9"),
     Ticket(number=2, title="Doing", url="u2", is_open=True, author="alice", assignees=("me",)),
     Ticket(number=3, title="Reviewing", url="u3", is_open=True, labels=("review:security", "review:ux")),
 ]
@@ -137,20 +125,8 @@ class FakeBench:
         self.calls.append(("start", ticket.number))
         return f"Started #{ticket.number}"
 
-    def review(self, ticket):
-        self.calls.append(("review", ticket.number))
-        return "ok"
-
     def go_to(self, ticket, session):
         self.calls.append(("go_to", ticket.number, session.path))
-        return "ok"
-
-    def remove(self, ticket, sessions):
-        self.calls.append(("remove", ticket.number, len(sessions)))
-        return "ok"
-
-    def auto_remove(self, ticket, sessions):
-        self.calls.append(("auto_remove", ticket.number, [x.path for x in sessions]))
         return "ok"
 
 
@@ -189,7 +165,7 @@ def test_start_ready_ticket_after_confirm():
 
 
 BLOCKED = Ticket(number=5, title="Waits", url="u5", is_open=True, blocked_by=("#1", "#9"), open_blockers=2)
-THEIRS = Ticket(number=6, title="Bob's", url="u6", is_open=True, assignees=("bob",))
+THEIRS = Ticket(number=6, title="Bob's", url="u6", is_open=True, assignees=("bob",), map_number=9, map_url="u9")
 
 
 def test_s_and_enter_refuse_a_blocked_ticket_naming_its_blockers():
@@ -273,23 +249,21 @@ def test_cancel_does_not_start():
     run(scenario())
 
 
-def test_enter_on_ready_card_without_session_asks_to_start_and_enter_confirms():
+def test_enter_on_a_card_without_session_never_starts_and_says_s_does():
     async def scenario():
         bench = FakeBench()
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             await pilot.press("down", "enter")
-            await pilot.pause()
-            assert is_confirm(app)
-            await pilot.press("enter")
             await loaded(app, pilot)
-            assert bench.calls == [("start", 1)]
+            assert not is_confirm(app) and bench.calls == []
+            assert notifications(app)[-1][0] == "#1 has no session here; s starts one"
 
     run(scenario())
 
 
-def test_double_click_opens_confirm():
+def test_double_click_acts_like_enter_and_never_starts():
     async def scenario():
         bench = FakeBench()
         app = bench_app(bench)
@@ -297,18 +271,30 @@ def test_double_click_opens_confirm():
             await loaded(app, pilot)
             card = app.query_one("#col-READY").query(Card).first()
             await pilot.click(card, times=2)
-            await pilot.pause()
-            assert is_confirm(app)
-            await pilot.click("#yes")
             await loaded(app, pilot)
-            assert bench.calls == [("start", 1)]
+            assert not is_confirm(app) and bench.calls == []
+            assert notifications(app)[-1][0] == "#1 has no session here; s starts one"
+
+    run(scenario())
+
+
+def test_s_refuses_a_plain_issue_because_the_board_only_starts_wayfinder():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, [Ticket(number=7, title="Plain", url="u7", is_open=True)])
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("down", "s")
+            await loaded(app, pilot)
+            assert not is_confirm(app) and bench.calls == []
+            assert notifications(app)[-1][0] == "#7 is not wayfinder work: the board only starts /wayfinder"
 
     run(scenario())
 
 
 def test_cards_show_agent_state_and_enter_goes_to_the_session():
     async def scenario():
-        bench = FakeBench({2: [Session(2, "issue", "/w/issue-2", workspace="w5", status="blocked")]})
+        bench = FakeBench({2: [Session(2, "/w/issue-2", workspace="w5", status="blocked")]})
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -327,7 +313,7 @@ def test_new_herdr_session_shows_up_on_refresh():
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
-            bench.current = {1: [Session(1, "issue", "/w/issue-1", workspace="w9", status="working")]}
+            bench.current = {1: [Session(1, "/w/issue-1", workspace="w9", status="working")]}
             await pilot.press("r")
             await loaded(app, pilot)
             assert "working" in str(app.query_one("#col-READY").query(Card).first().render())
@@ -335,52 +321,50 @@ def test_new_herdr_session_shows_up_on_refresh():
     run(scenario())
 
 
-def test_review_key_starts_a_review_worktree_only_in_review():
+REMOVED_KEYS = ("c", "x", "a", "backspace", "delete")
+
+
+def test_removed_keys_do_nothing_on_any_card(tmp_path):
+    settings = tmp_path / "settings.json"
+
     async def scenario():
-        bench = FakeBench()
-        app = bench_app(bench)
+        sessions = {n: [Session(n, f"/w/issue-{n}")] for n in (1, 2, 3, 4)}
+        bench = FakeBench(sessions)
+        provider = FakeProvider(TICKETS + [DONE])
+        app = BoardApp(provider, Query(), interval=60, workbench=bench, settings_path=settings)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
-            await pilot.press("down", "c")  # Ready card
-            await pilot.pause()
-            assert not is_confirm(app)
-            await pilot.press("right", "right", "c", "y")
-            await loaded(app, pilot)
-            assert bench.calls == [("review", 3)]
+            before = notifications(app)
+            for number in (1, 2, 3, 4):
+                card = next(c for c in app.query(Card) if c.ticket.number == number)
+                card.focus()
+                await pilot.pause()
+                for key in REMOVED_KEYS:
+                    await pilot.press(key)
+                    await loaded(app, pilot)
+                    assert not is_confirm(app)
+            assert bench.calls == [] and notifications(app) == before
+            assert not settings.exists() and len(app.query(Card)) == 4
 
     run(scenario())
 
 
-def test_enter_in_review_without_session_offers_a_review():
+def test_removed_keys_are_not_bound_shown_in_the_footer_or_in_help():
     async def scenario():
-        bench = FakeBench()
-        app = bench_app(bench)
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
-            await pilot.press("down", "right", "right", "enter", "y")
-            await loaded(app, pilot)
-            assert bench.calls == [("review", 3)]
-
-    run(scenario())
-
-
-def test_remove_only_for_done_tickets_with_worktrees():
-    async def scenario():
-        bench = FakeBench({4: [Session(4, "issue", "/w/issue-4")], 2: [Session(2, "issue", "/w/issue-2")]})
-        app = bench_app(bench, TICKETS + [DONE])
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("down", "right", "x")  # In progress
+            bound = {key.strip() for binding in BoardApp.BINDINGS for key in binding.key.split(",")}
+            assert bound.isdisjoint(REMOVED_KEYS)
+            footer = " ".join(str(w.render()) for w in app.query("FooterKey"))
+            for gone in ("Review", "Remove", "Auto-remove", "Close"):
+                assert gone not in footer
+            await pilot.press("question_mark")
             await pilot.pause()
-            assert not is_confirm(app)
-            await pilot.press("right", "right")
-            assert app.focused.ticket.number == 4
-            await pilot.press("x")
-            await pilot.pause()
-            assert is_confirm(app)
-            await pilot.press("y")
-            await loaded(app, pilot)
-            assert bench.calls == [("remove", 4, 1)]
+            text = app.screen.text.plain
+            for gone in ("review-<n>", "auto-remove", "close the issue", "ticketmaster upgrade", "ticketmaster setup",
+                         "needs-info", "implement skill", "/setup-matt-pocock-skills"):
+                assert gone not in text
 
     run(scenario())
 
@@ -452,59 +436,6 @@ def test_wide_board_can_be_forced_to_one_column():
     run(scenario())
 
 
-def test_auto_remove_cleans_done_tickets_whose_agent_is_not_busy_and_only_once(tmp_path):
-    settings = tmp_path / "settings.json"
-    settings.write_text('{"auto_remove": true}')
-
-    async def scenario():
-        bench = FakeBench({
-            4: [Session(4, "issue", "/w/issue-4", status="idle"), Session(4, "review", "/w/review-4", status="working")],
-            2: [Session(2, "issue", "/w/issue-2")],
-        })
-        app = BoardApp(FakeProvider(TICKETS + [DONE]), Query(), interval=60, workbench=bench, settings_path=settings)
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            assert bench.calls == [("auto_remove", 4, ["/w/issue-4"])]
-            bench.current = {4: [Session(4, "issue", "/w/issue-4", status="idle"), Session(4, "review", "/w/review-4", status="done")]}
-            await pilot.press("r")
-            await loaded(app, pilot)
-            assert bench.calls == [("auto_remove", 4, ["/w/issue-4"]), ("auto_remove", 4, ["/w/review-4"])]
-
-    run(scenario())
-
-
-def test_auto_remove_is_off_by_default():
-    async def scenario():
-        bench = FakeBench({4: [Session(4, "issue", "/w/issue-4")]})
-        app = bench_app(bench, TICKETS + [DONE])
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            assert bench.calls == []
-
-    run(scenario())
-
-
-def test_a_toggles_auto_remove_saves_it_and_cleans_up_right_away(tmp_path):
-    settings = tmp_path / "ticketmaster" / "settings.json"
-
-    async def scenario():
-        bench = FakeBench({4: [Session(4, "issue", "/w/issue-4")]})
-        app = BoardApp(FakeProvider(TICKETS + [DONE]), Query(), interval=60, workbench=bench, settings_path=settings)
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            assert bench.calls == [] and "auto-remove" not in str(app.query_one("#status").render())
-            await pilot.press("a")
-            await loaded(app, pilot)
-            assert bench.calls == [("auto_remove", 4, ["/w/issue-4"])]
-            assert "auto-remove on" in str(app.query_one("#status").render())
-            assert json.loads(settings.read_text()) == {"auto_remove": True}
-            await pilot.press("a")
-            await pilot.pause()
-            assert json.loads(settings.read_text()) == {"auto_remove": False}
-
-    run(scenario())
-
-
 def test_sec_is_an_alias_for_the_security_colour():
     assert tag_style("sec") == tag_style("security") == "white on red"
 
@@ -525,7 +456,7 @@ def test_help_lists_every_visible_binding_and_closes_without_quitting():
                         assert binding.description in text
                         assert app.get_key_display(binding) in text
                 assert "herdr agent issue-<n>" in text and "select authors" in text
-                assert "newer one is available: run `ticketmaster upgrade`" in text
+                assert "The board only reads" in text
                 await pilot.press(close)
                 await pilot.pause()
                 assert not isinstance(app.screen, HelpScreen) and app.is_running
@@ -760,34 +691,6 @@ def status_of(app):
     return str(app.query_one("#status").render())
 
 
-def test_status_warns_until_the_skills_setup_exists_and_rechecks_on_refresh(tmp_path):
-    async def scenario():
-        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, repo_root=tmp_path)
-        async with app.run_test(size=(200, 40)) as pilot:
-            await loaded(app, pilot)
-            assert "/setup-matt-pocock-skills" in status_of(app)
-            (tmp_path / "docs" / "agents").mkdir(parents=True)
-            (tmp_path / "docs" / "agents" / "issue-tracker.md").write_text("# Issue tracker\n")
-            await pilot.press("r")
-            await loaded(app, pilot)
-            assert "/setup-matt-pocock-skills" not in status_of(app)
-
-    run(scenario())
-
-
-def test_missing_doc_warning_also_names_ticketmaster_setup(tmp_path):
-    provider = FakeProvider(TICKETS)
-    provider.name = "github"
-
-    async def scenario():
-        app = BoardApp(provider, Query(), interval=60, repo_root=tmp_path)
-        async with app.run_test(size=(240, 40)) as pilot:
-            await loaded(app, pilot)
-            assert "/setup-matt-pocock-skills, then ticketmaster setup" in status_of(app)
-
-    run(scenario())
-
-
 def test_non_rate_limit_error_keeps_the_interval():
     async def scenario():
         clock = Clock()
@@ -893,75 +796,6 @@ def test_errors_without_a_status_notify_each_time_the_message_changes():
             await loaded(app, pilot)
             assert tracker_notices(app) == [("fake error\ngh: not logged in", "error"),
                                             ("fake error\n`gh` timed out", "error")]
-
-    run(scenario())
-
-
-def test_no_warning_when_the_skills_setup_exists(tmp_path):
-    (tmp_path / "docs" / "agents").mkdir(parents=True)
-    (tmp_path / "docs" / "agents" / "issue-tracker.md").write_text("# Issue tracker\n")
-
-    async def scenario():
-        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, repo_root=tmp_path)
-        async with app.run_test(size=(200, 40)) as pilot:
-            await loaded(app, pilot)
-            assert "setup-matt-pocock-skills" not in status_of(app)
-
-    run(scenario())
-
-
-def test_status_warns_when_the_wayfinding_rules_are_missing_or_out_of_date(tmp_path):
-    from ticketmaster.wayfinding import setup
-
-    doc = tmp_path / "docs" / "agents" / "issue-tracker.md"
-    doc.parent.mkdir(parents=True)
-    doc.write_text("# Issue tracker\n")
-    provider = FakeProvider(TICKETS)
-    provider.name = "github"
-
-    async def scenario():
-        app = BoardApp(provider, Query(), interval=60, repo_root=tmp_path)
-        async with app.run_test(size=(200, 40)) as pilot:
-            await loaded(app, pilot)
-            assert "run ticketmaster setup" in status_of(app) and "missing" in status_of(app)
-            setup(tmp_path, "github")
-            await pilot.press("r")
-            await loaded(app, pilot)
-            assert "ticketmaster setup" not in status_of(app)
-            doc.write_text(doc.read_text().replace("sub-issue", "task list"))
-            await pilot.press("r")
-            await loaded(app, pilot)
-            assert "run ticketmaster setup" in status_of(app) and "out of date" in status_of(app)
-
-    run(scenario())
-
-
-def test_sessions_still_start_while_the_setup_warning_shows(tmp_path):
-    async def scenario():
-        bench = FakeBench()
-        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, workbench=bench, repo_root=tmp_path)
-        async with app.run_test(size=(200, 40)) as pilot:
-            await loaded(app, pilot)
-            assert "/setup-matt-pocock-skills" in status_of(app)
-            await pilot.press("down", "s", "y")
-            await loaded(app, pilot)
-            await pilot.press("right", "right", "c", "y")
-            await loaded(app, pilot)
-            assert bench.calls == [("start", 1), ("review", 3)]
-
-    run(scenario())
-
-
-def test_help_mentions_the_skills_setup():
-    async def scenario():
-        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
-        async with app.run_test(size=(160, 50)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("question_mark")
-            await pilot.pause()
-            text = app.screen.text.plain
-            assert "/setup-matt-pocock-skills" in text and "docs/agents/issue-tracker.md" in text
-            assert "ticketmaster setup" in text
 
     run(scenario())
 
@@ -1103,91 +937,6 @@ def notifications(app):
     return [(n.message, n.severity) for n in app._notifications]
 
 
-def test_backspace_on_a_ready_card_asks_and_cancel_keeps_the_issue():
-    async def scenario():
-        provider = FakeProvider(TICKETS)
-        app = BoardApp(provider, Query(), interval=60)  # closing needs no herdr
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("down", "backspace")
-            await pilot.pause()
-            assert is_confirm(app)
-            assert app.screen.question == "Close #1 Ready one as not planned?"
-            assert "undone" not in app.screen.detail and "left behind" not in app.screen.detail
-            await pilot.press("n")
-            await loaded(app, pilot)
-            assert provider.closed == [] and not is_confirm(app)
-            await pilot.press("delete")
-            await pilot.pause()
-            assert is_confirm(app)
-            await pilot.press("escape")
-            await loaded(app, pilot)
-            assert provider.closed == [] and len(app.query(Card)) == 3
-
-    run(scenario())
-
-
-LABELLED_BLOCKED = Ticket(number=6, title="Waiting", url="u6", is_open=True, labels=("blocked",))
-
-
-def test_close_on_a_blocked_card_with_worktrees_lists_them_then_closes_and_keeps_it_off_done():
-    async def scenario():
-        provider = FakeProvider(TICKETS + [LABELLED_BLOCKED, DONE])
-        bench = FakeBench({6: [Session(6, "issue", "/w/issue-6"), Session(6, "review", "/w/review-6")]})
-        app = BoardApp(provider, Query(), interval=60, workbench=bench)
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("down")
-            assert app.focused.ticket.number == 6
-            await pilot.press("delete")
-            await pilot.pause()
-            assert is_confirm(app)
-            detail = app.screen.detail
-            assert "/w/issue-6" in detail and "/w/review-6" in detail and "not removed" in detail
-            await pilot.press("y")
-            await loaded(app, pilot)
-            await loaded(app, pilot)
-            assert provider.closed == [6] and bench.calls == []
-            assert 6 not in [c.ticket.number for c in app.query(Card)]
-            assert [c.ticket.number for c in app.query_one("#col-DONE").query(Card)] == [4]
-            assert ("Closed #6 Waiting as not planned", "information") in notifications(app)
-
-    run(scenario())
-
-
-def test_close_does_nothing_on_a_done_card():
-    async def scenario():
-        provider = FakeProvider(TICKETS + [DONE])
-        app = BoardApp(provider, Query(), interval=60)
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("down", "right", "right", "right")
-            assert app.focused.ticket.number == 4
-            before = len(app._notifications)
-            await pilot.press("delete", "backspace")
-            await pilot.pause()
-            assert not is_confirm(app) and provider.closed == []
-            assert len(app._notifications) == before
-
-    run(scenario())
-
-
-def test_close_is_refused_in_progress_and_review():
-    async def scenario():
-        provider = FakeProvider(TICKETS)
-        app = BoardApp(provider, Query(), interval=60)
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("down", "right", "delete")  # In progress
-            await pilot.pause()
-            assert not is_confirm(app)
-            await pilot.press("right", "backspace")  # Review
-            await pilot.pause()
-            assert not is_confirm(app) and provider.closed == []
-            warnings = [m for m, severity in notifications(app) if severity == "warning"]
-            assert len(warnings) == 2 and "#2" in warnings[0] and "#3" in warnings[1]
-
-    run(scenario())
 
 
 def test_typed_ticket_with_its_map_starts():
@@ -1202,49 +951,6 @@ def test_typed_ticket_with_its_map_starts():
             await pilot.press("down", "s", "y")
             await loaded(app, pilot)
             assert bench.calls == [("start", 5)]
-
-    run(scenario())
-
-
-def test_a_tracker_error_on_close_is_an_error_notification_and_the_card_stays():
-    async def scenario():
-        provider = FakeProvider(TICKETS, close_error=ProviderError("HTTP 403 Forbidden"))
-        app = BoardApp(provider, Query(), interval=60)
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("down", "delete", "y")
-            await loaded(app, pilot)
-            assert ("HTTP 403 Forbidden", "error") in [
-                (m.split(": ", 1)[-1], s) for m, s in notifications(app)]
-            assert 1 in [c.ticket.number for c in app.query(Card)]
-
-    run(scenario())
-
-
-def test_backspace_in_the_filter_input_edits_the_text_and_closes_nothing():
-    async def scenario():
-        provider = FakeProvider(TICKETS)
-        app = BoardApp(provider, Query(), interval=60)
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("down", "slash", *"ready", "backspace", "delete")
-            await pilot.pause()
-            assert not is_confirm(app) and provider.closed == []
-            assert app.query_one("#filter").value == "read"
-
-    run(scenario())
-
-
-def test_help_lists_the_close_binding():
-    async def scenario():
-        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
-        async with app.run_test(size=(160, 50)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("question_mark")
-            await pilot.pause()
-            text = app.screen.text.plain
-            assert "Close issue" in text and "Blocked and Ready only" in text
-            assert "delete" not in text.lower().replace("backspace delete", "")
 
     run(scenario())
 
@@ -1323,70 +1029,37 @@ def test_done_marks_out_of_scope_tickets_apart_from_resolved_decisions():
     run(scenario())
 
 
-def test_decision_tickets_never_show_in_review_and_c_does_not_review_them():
+def test_decision_tickets_never_show_in_review():
     with_pr = Ticket(number=11, title="Which store?", url="u11", is_open=True, has_open_change_request=True,
                      labels=("wayfinder:grilling", "review:ux"), **ON_MAP)
 
     async def scenario():
-        bench = FakeBench()
-        app = bench_app(bench, [with_pr])
+        app = bench_app(FakeBench(), [with_pr])
         async with app.run_test(size=(200, 40)) as pilot:
             await loaded(app, pilot)
             assert not list(app.query_one("#col-REVIEW").query(Card))
-            await pilot.press("down", "c")
-            await loaded(app, pilot)
-            assert not is_confirm(app) and bench.calls == []
-            assert any("#11" in m and "no PR to review" in m for m, _ in notifications(app))
 
     run(scenario())
 
 
-NEEDS_INFO = Ticket(number=31, title="Vague", url="u31", is_open=True, labels=("needs-info",))
-HUMAN = Ticket(number=32, title="Delicate", url="u32", is_open=True, labels=("bug", "human only"))
-
-
-def test_s_and_enter_refuse_a_needs_info_ticket_and_its_card_shows_the_label():
+def test_status_line_has_no_setup_drift_or_upgrade_warning():
     async def scenario():
-        bench = FakeBench()
-        app = bench_app(bench, [NEEDS_INFO])
-        async with app.run_test(size=(200, 40)) as pilot:
+        provider = FakeProvider(TICKETS)
+        provider.name = "github"
+        app = BoardApp(provider, Query(), interval=60)
+        async with app.run_test(size=(240, 40)) as pilot:
             await loaded(app, pilot)
-            assert [c.ticket.number for c in app.query_one("#col-READY").query(Card)] == [31]
-            assert "needs-info" in card_text(app, 31)
-            await pilot.press("down")
-            for key in ("s", "enter"):
-                await pilot.press(key)
-                await pilot.pause()
-                assert not is_confirm(app)
-            await loaded(app, pilot)
-            assert bench.calls == []
-            messages = [m for m, _ in notifications(app)]
-            assert messages.count("#31 is labelled needs-info: waits on more information; not started") == 2
+            status = status_of(app)
+            assert "⚠" not in status and "setup" not in status and "upgrade" not in status
 
     run(scenario())
 
 
-def test_triage_holds_use_the_repos_label_names(tmp_path):
-    doc = tmp_path / "docs" / "agents" / "triage-labels.md"
-    doc.parent.mkdir(parents=True)
-    doc.write_text("| `needs-info` | `waiting` | x |\n| `ready-for-human` | `human only` | y |\n")
+def test_no_code_reads_or_writes_the_issue_tracker_doc():
+    import ticketmaster
 
-    async def scenario():
-        bench = FakeBench()
-        app = BoardApp(FakeProvider([HUMAN, NEEDS_INFO]), Query(), interval=60, workbench=bench, repo_root=tmp_path)
-        async with app.run_test(size=(200, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("down", "s")  # #31: needs-info is not this repo's name for the role
-            await pilot.pause()
-            assert is_confirm(app)
-            await pilot.press("n", "down", "s")
-            await pilot.pause()
-            assert not is_confirm(app)
-            assert ("#32 is labelled human only: needs a human to implement it; not started", "warning") \
-                in notifications(app)
-            assert "⏸ human only" in card_text(app, 32) and "⏸" not in card_text(app, 31)
-
-    run(scenario())
+    root = Path(ticketmaster.__file__).parent
+    assert not [p for p in root.rglob("*.py") if "issue-tracker.md" in p.read_text()]
 
 
 def test_s_on_the_map_starts_its_first_frontier_ticket_on_that_tickets_card():
@@ -1427,7 +1100,7 @@ def test_two_quick_presses_on_the_map_start_two_different_frontier_tickets():
 
 def test_frontier_skips_tickets_that_already_have_a_session():
     async def scenario():
-        bench = FakeBench({5: [Session(5, "issue", "/w/issue-5")]})
+        bench = FakeBench({5: [Session(5, "/w/issue-5")]})
         app = bench_app(bench, MAP_BOARD)
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
@@ -1452,7 +1125,8 @@ def test_empty_frontier_says_so_and_starts_nothing():
             await loaded(app, pilot)
             assert bench.calls == []
             warnings = [m for m, severity in notifications(app) if severity == "warning"]
-            assert len(warnings) == 2 and all("#1" in m and "frontier" in m for m in warnings)
+            assert "#1" in warnings[0] and "frontier" in warnings[0]
+            assert warnings[1:] == ["#1 has no session here; s starts one"]  # Enter never starts
 
     run(scenario())
 
@@ -1502,46 +1176,6 @@ def test_map_order_lookup_failure_falls_back_to_board_order():
     run(scenario())
 
 
-def test_newer_version_shows_a_toast_and_stays_in_the_status_line_checked_once():
-    checks = []
-
-    def update_check():
-        checks.append(1)
-        return NOTICE
-
-    async def scenario():
-        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, update_check=update_check)
-        async with app.run_test(size=(200, 40)) as pilot:
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            assert [n.message for n in app._notifications] == [NOTICE]
-            for _ in range(3):
-                await pilot.press("r")
-                await app.workers.wait_for_complete()
-                await pilot.pause()
-            assert NOTICE in str(app.query_one("#status").render())
-            assert len(checks) == 1
-
-    run(scenario())
-
-
-def failing_check():
-    raise RuntimeError("boom")
-
-
-@pytest.mark.parametrize("update_check", [lambda: None, failing_check])
-def test_no_notice_when_the_check_finds_nothing_or_fails(update_check):
-    async def scenario():
-        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, update_check=update_check)
-        async with app.run_test(size=(200, 40)) as pilot:
-            await app.workers.wait_for_complete()
-            await pilot.pause()
-            assert list(app._notifications) == []
-            assert "upgrade" not in str(app.query_one("#status").render())
-
-    run(scenario())
-
-
 def blocked_card(**fields) -> str:
     return render_card(Ticket(number=5, title="Waits", url="u5", is_open=True, **fields), Column.BLOCKED).plain
 
@@ -1562,13 +1196,3 @@ def test_blocked_card_without_refs_keeps_the_count_and_a_label_only_card_shows_n
     assert "⛔" not in blocked_card(labels=("blocked",), open_blockers=0)
 
 
-def test_snapshot_lists_a_blocked_tickets_open_blockers(monkeypatch, capsys):
-    from ticketmaster import cli, config
-
-    tickets = [BLOCKED, Ticket(number=7, title="Free", url="u7", is_open=True),
-               Ticket(number=8, title="Counted", url="u8", is_open=True, open_blockers=1)]
-    monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(tickets))
-    assert cli.main(["snapshot"]) == 0
-    lines = capsys.readouterr().out.splitlines()
-    assert "  #5 Waits blocked by #1, #9" in lines
-    assert "  #7 Free" in lines and "  #8 Counted" in lines
