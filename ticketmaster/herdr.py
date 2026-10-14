@@ -22,6 +22,7 @@ from pathlib import Path
 
 BOARD_LABEL = "ticketmaster"
 BOARD_ENV = "TICKETMASTER_BOARD"  # set on the `open` a board pane runs, so it knows it is the board
+WRAPPER_ENV = "TICKETMASTER_WRAPPER"  # the plugin's bin/ticketmaster, exported by the wrapper itself
 BOARD_RATIO = 0.7  # share the caller keeps; leaves the board ~1/3, i.e. single-column mode
 # `issue-12`, `worktree-issue-12` (claude -w), `issue-12-2` (a second start).
 WORKTREE_NAME = re.compile(r"^(?:worktree-)?issue-(?P<number>\d+)(?:-\d+)?$")
@@ -43,9 +44,14 @@ def available(env: Mapping[str, str] | None = None) -> bool:
     return env.get("HERDR_ENV") == "1" and shutil.which("herdr") is not None
 
 
-def open_command(args: list[str]) -> str:
-    """`open` again, run in the board pane, where it finds itself and runs the board in place. Re-runs this
-    interpreter, so it works for pipx, editable and `python -m` installs alike."""
+def open_command(args: list[str], env: Mapping[str, str] | None = None) -> str:
+    """`open` again, run in the board pane, where it finds itself and runs the board in place. Under the plugin
+    it is the `bin/ticketmaster` wrapper by absolute path, with its data dir, since the pane has neither plugin
+    `bin/` on PATH nor the plugin's env. Otherwise it re-runs this interpreter (a dev venv, `python -m`)."""
+    env = os.environ if env is None else env
+    if wrapper := env.get(WRAPPER_ENV):
+        prefix = f"CLAUDE_PLUGIN_DATA={shlex.quote(env['CLAUDE_PLUGIN_DATA'])} " if env.get("CLAUDE_PLUGIN_DATA") else ""
+        return prefix + shlex.join([wrapper, "open", *args])
     return shlex.join([sys.executable, "-m", "ticketmaster", "open", *args])
 
 
