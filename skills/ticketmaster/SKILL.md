@@ -1,6 +1,6 @@
 ---
 name: ticketmaster
-description: Open a live, read-only kanban board of the current repo's wayfinder maps and tickets in a herdr pane beside this Claude session, from which a ticket starts /wayfinder in its own worktree. Works with GitHub, GitLab and Gitea/Forgejo. Use when the user wants to see or track wayfinder work, start a map's tickets, or log in to the tracker for the board.
+description: Open a live, read-only kanban board of the current repo's issues, or of one wayfinder map's tickets, in a herdr pane beside this Claude session, from which a wayfinder ticket starts /wayfinder in its own worktree. Works with GitHub, GitLab and Gitea/Forgejo. Use when the user wants to see or track wayfinder work, start a map's tickets, or log in to the tracker for the board.
 argument-hint: "[map] | login"
 ---
 
@@ -11,7 +11,8 @@ ticketmaster $ARGUMENTS
 ```
 
 - No arguments, or a map (`42`, `#42` or an issue URL): opens the board in a herdr pane next to this
-  session, labelled `ticketmaster`; running it again restarts the board there. A map narrows the board to it.
+  session, labelled `ticketmaster`; running it again restarts the board there. A map narrows the board to its
+  tickets.
 - `login`: logs in to the tracker for the board; relay what it prints.
 
 The first run, and the first after a plugin update, builds the plugin's venv, which takes a minute.

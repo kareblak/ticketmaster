@@ -24,7 +24,7 @@ esac
 FAKE_VENV_PYTHON = """#!/usr/bin/env bash
 echo "venv $*" >> "$FAKE_LOG"
 case "$2" in
-  pip) exit "${FAKE_PIP_EXIT:-0}" ;;
+  pip) sleep "${FAKE_PIP_SECONDS:-0}"; exit "${FAKE_PIP_EXIT:-0}" ;;
   ticketmaster) echo "ran $* wrapper=$TICKETMASTER_WRAPPER data=$CLAUDE_PLUGIN_DATA" ;;
 esac
 """
@@ -140,20 +140,53 @@ def test_a_python_older_than_3_11_is_refused_before_building(tmp_path):
     assert builds(plugin.calls()) == []
 
 
-@pytest.mark.parametrize("how", ["absolute", "relative", "path"])
-def test_the_cli_learns_the_wrappers_absolute_path_and_data_dir(tmp_path, how):
+@pytest.mark.parametrize("argv, on_path", [
+    (["{wrapper}"], False),
+    (["plugin/bin/ticketmaster"], False),
+    (["ticketmaster"], True),
+])
+def test_the_cli_learns_the_wrappers_absolute_path_and_data_dir(tmp_path, argv, on_path):
     plugin = Plugin(tmp_path)
-    if how == "path":
-        argv, cwd, extra = ["ticketmaster"], tmp_path, {"PATH": f"{plugin.wrapper.parent}:{plugin.env['PATH']}"}
-    else:
-        argv = [str(plugin.wrapper) if how == "absolute" else "plugin/bin/ticketmaster"]
-        cwd, extra = tmp_path, {}
-    done = subprocess.run(argv, cwd=cwd, env={**plugin.env, **extra}, capture_output=True, text=True)
+    path = f"{plugin.wrapper.parent}:{plugin.env['PATH']}" if on_path else plugin.env["PATH"]
+    argv = [a.format(wrapper=plugin.wrapper) for a in argv]
+    done = subprocess.run(argv, cwd=tmp_path, env={**plugin.env, "PATH": path}, capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
     assert f"wrapper={plugin.wrapper} data={plugin.data}" in done.stdout
+
+
+def test_two_first_runs_at_once_build_the_venv_once(tmp_path):
+    plugin = Plugin(tmp_path)
+    runs = [
+        subprocess.Popen([str(plugin.wrapper), "open"], env={**plugin.env, "FAKE_PIP_SECONDS": "1"},
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        for _ in range(2)
+    ]
+    outcomes = [(run.wait(timeout=30), run.stdout.read()) for run in runs]
+    assert [code for code, _ in outcomes] == [0, 0]
+    assert all(out.startswith("ran -m ticketmaster open") for _, out in outcomes)
+    assert len([c for c in builds(plugin.calls()) if c.startswith("python3 -m venv")]) == 1
+
+
+def test_an_unreadable_version_is_a_venv_failure(tmp_path):
+    plugin = Plugin(tmp_path)
+    (plugin.root / "ticketmaster" / "__init__.py").write_text("__version__: str = '0.3.0'\n")
+    done = plugin.run("open")
+    assert done.returncode == 3
+    assert "__version__" in done.stderr
 
 
 def test_the_plugin_manifest_carries_the_package_version():
     """`/plugin update` compares plugin.json's version, and the wrapper rebuilds on `__version__`: they move together."""
     manifest = json.loads((WRAPPER.parent.parent / ".claude-plugin" / "plugin.json").read_text())
     assert manifest["version"] == __version__
+
+
+@pytest.mark.parametrize("clone, data_dir", [(False, "ticketmaster-kareblak"), (True, "ticketmaster-inline")])
+def test_without_claude_plugin_data_the_venv_goes_in_claudes_data_dir_for_the_plugin(tmp_path, clone, data_dir):
+    """Claude exports CLAUDE_PLUGIN_DATA to hooks and MCP servers, not to Bash tool commands."""
+    plugin = Plugin(tmp_path, clone=clone)
+    del plugin.env["CLAUDE_PLUGIN_DATA"]
+    done = plugin.run(HOME=str(tmp_path / "home"))
+    data = tmp_path / "home" / ".claude" / "plugins" / "data" / data_dir
+    assert builds(plugin.calls())[0] == f"python3 -m venv {data / 'venv'}"
+    assert f"data={data}" in done.stdout
