@@ -124,11 +124,17 @@ def resolve_maps(tickets: list[Ticket], fetch_issue: IssueLookup, beside: tuple[
             if found:
                 ticket = with_map(ticket, found)
         elif ticket.map_url is None and ticket.wayfinder_type is None and not ticket.is_wayfinder_map:
-            spec = ticket.parent_number or parent_ref(ticket.body)
-            if found := spec_map(ticket.number) or (spec_map(spec) if spec not in (None, ticket.number) else None):
-                ticket = replace(ticket, map_number=found[0], map_url=found[1])
+            spec_number = ticket.parent_number or parent_ref(ticket.body)
+            in_spec = spec_map(spec_number) if spec_number not in (None, ticket.number) else None
+            if map_ref := spec_map(ticket.number) or in_spec:
+                ticket = on_map(ticket, *map_ref)
         resolved.append(ticket)
     return resolved
+
+
+def on_map(ticket: Ticket, number: int | None, url: str | None) -> Ticket:
+    """The map a ticket's session starts wayfinder on; its parent stays as it is."""
+    return replace(ticket, map_number=number, map_url=url)
 
 
 def with_map(ticket: Ticket, parent: Ticket) -> Ticket:
@@ -220,12 +226,12 @@ def is_spec(ticket: Ticket, map_number: int) -> bool:
 
 def as_spec(ticket: Ticket, map_ticket: Ticket) -> Ticket:
     """The map is the spec's parent, and the map its session starts wayfinder on."""
-    return replace(with_map(ticket, map_ticket), map_number=map_ticket.number, map_url=map_ticket.url)
+    return on_map(with_map(ticket, map_ticket), map_ticket.number, map_ticket.url)
 
 
 def under_spec(tickets: list[Ticket], spec: Ticket) -> list[Ticket]:
     """The spec is each ticket's parent; the spec's map is the one their sessions start wayfinder on."""
-    return [replace(with_map(t, spec), map_number=spec.map_number, map_url=spec.map_url) for t in tickets]
+    return [on_map(with_map(t, spec), spec.map_number, spec.map_url) for t in tickets]
 
 
 def map_family(tickets: list[Ticket], number: int, found: Ticket | None) -> list[Ticket]:

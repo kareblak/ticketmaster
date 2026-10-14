@@ -42,7 +42,7 @@ On the board, `Enter` goes to a ticket's herdr workspace (resuming Claude with `
 exited), or starts one when there is none; both refuse a blocked ticket, or one assigned to someone
 else, and say why. `s` always starts the ticket in a new worktree
 (`issue-<n>`, `issue-<n>-2`…) as herdr agent `issue-<n>`, with `/mattpocock-skills:wayfinder
-<map> <ticket>` for wayfinder tickets (never implement; one whose map can't be found only warns)
+<map> <ticket>` for wayfinder tickets (never implement; one whose map can't be found only warns),
 for the spec a map led to and the spec's implementation tickets (found through the spec on any
 board; they still land through a PR and can be reviewed with `c`),
 and, on a map's card (In progress, showing decided / open / blocked), for the map's first frontier ticket
