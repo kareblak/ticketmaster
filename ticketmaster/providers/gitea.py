@@ -2,9 +2,9 @@
 
 Token lookup order: GITEA_TOKEN / FORGEJO_TOKEN env vars, then the `tea` config login whose
 URL matches the repo host. Dependencies come from `/issues/{n}/dependencies` plus `Blocked by:`
-body lines; there are no sub-issues, so a parent board falls back to issues whose body mentions
-`#<parent>`, plus, for a map, the implementation tickets of its spec (`Part of #<map>`), which name
-the spec in their `## Parent` section. Open pull requests count as review when their body says `closes/fixes/resolves #<n>`.
+body lines. There are no sub-issues, so the board reads the repo's and its org's `wayfinder:` labels: the
+open maps, and each typed ticket whose body's first line is `Part of #<map>` for one of them. An open pull
+request closes an issue when its body says `closes/fixes/resolves #<n>`.
 """
 
 from __future__ import annotations
@@ -22,8 +22,8 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-from ..model import Ticket, parse_time
-from . import (IssueStates, NotFound, ProviderError, Query, RateLimited, blocker_ref, map_family, resolve_maps,
+from ..model import WAYFINDER_TYPES, Ticket, parse_time, part_of, wayfinder_kinds
+from . import (LIMIT, IssueStates, NotFound, ProviderError, Query, RateLimited, blocker_ref, resolve_maps,
                tracker_error, with_body_blockers)
 
 PAGE = 50
@@ -71,26 +71,45 @@ class GiteaProvider:
         return self._get("/user").get("login")
 
     def fetch(self, query: Query) -> list[Ticket]:
-        since = datetime.now(timezone.utc) - timedelta(days=query.done_days)
-        params = {"type": "issues"}
-        if query.label:
-            params["labels"] = query.label
-        open_issues = self._list(f"/repos/{self.repo}/issues", {**params, "state": "open"}, query.limit)
-        closed_params = {**params, "state": "closed", "since": since.isoformat()}
-        closed_issues = self._list(f"/repos/{self.repo}/issues", closed_params, query.limit)
-        raw = open_issues + closed_issues
-
+        """The open maps, the named map, and every typed ticket, open or closed, whose `Part of #<map>` names one."""
+        labels = self._wayfinder_labels()
         pulls = self._list(f"/repos/{self.repo}/pulls", {"state": "open"}, 200)
         pr_bodies = [f"{p.get('title', '')}\n{p.get('body') or ''}" for p in pulls]
-        tickets = [to_ticket(i, None, pr_bodies) for i in raw]
-        issue = functools.cache(self._issue)  # each chain issue off the board once per refresh
-        if query.parent is not None:
-            tickets = map_family(tickets, query.parent, issue(query.parent))
+
+        def issues(label: str, state: str) -> list[Ticket]:
+            params = {"type": "issues", "state": state, "labels": label}
+            return [to_ticket(i, None, pr_bodies) for i in self._list(f"/repos/{self.repo}/issues", params, LIMIT)]
+
+        maps = {t.number: t for label in labels["map"] for t in issues(label, "open") if t.is_wayfinder_map}
+        if query.named_map is not None and query.named_map not in maps:
+            found = self._issue_or_none(query.named_map)
+            named = to_ticket(found, None, pr_bodies) if found else None
+            maps |= {named.number: named} if named is not None and named.is_wayfinder_map else {}
+        children = {t.number: t for label in labels["ticket"] for t in issues(label, "all")
+                    if t.wayfinder_type is not None and part_of(t.body) in maps}
+        tickets = list(maps.values()) + [t for n, t in children.items() if n not in maps]
         open_numbers = [t.number for t in tickets if t.is_open]
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
         tickets = [with_native_blockers(t, blockers.get(t.number)) for t in tickets]
-        return with_body_blockers(resolve_maps(tickets, issue), self.states)
+        return with_body_blockers(resolve_maps(tickets, functools.cache(self._issue)), self.states)
+
+    def _wayfinder_labels(self) -> dict[str, list[str]]:
+        """The repo's and its org's label names for maps and for the four ticket types. Gitea drops a label filter
+        it does not know and then lists every issue, so only names that exist are asked for."""
+        names = [label["name"] for label in self._list(f"/repos/{self.repo}/labels", {}, LIMIT)]
+        try:
+            names += [label["name"] for label in self._list(f"/orgs/{self.repo.split('/')[0]}/labels", {}, LIMIT)]
+        except NotFound:
+            pass  # a user's repo has no org labels
+        found: dict[str, list[str]] = {"map": [], "ticket": []}
+        for name in dict.fromkeys(names):
+            kinds = wayfinder_kinds((name,))
+            if "map" in kinds:
+                found["map"].append(name)
+            elif any(kind in WAYFINDER_TYPES for kind in kinds):
+                found["ticket"].append(name)
+        return found
 
     def _issue(self, number: int) -> Ticket | None:
         found = self._issue_or_none(number)

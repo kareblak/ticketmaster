@@ -25,7 +25,7 @@ def test_github_node_to_ticket():
     assert t.blocked_by == ("#5",)
     assert (t.parent_number, t.parent_url, t.parent_labels) == (2, "https://x/2", ("wayfinder:map",))
     assert (t.number, t.is_open, t.open_blockers, t.has_open_change_request, t.order) == (7, True, 1, True, 3)
-    assert t.assignees == ("kareblak",) and t.review_tags == ["security"]
+    assert t.assignees == ("kareblak",) and t.labels == ("review:security",)
     assert t.author == "opener"
 
 
@@ -44,32 +44,83 @@ def test_github_merged_pr_alone_is_not_review():
     assert github.to_ticket(node, 0).has_open_change_request is False
 
 
-def test_github_sends_variables_as_json(monkeypatch):
-    calls = []
+def gh_issue(number, labels=(), body="", parent=None, state="OPEN"):
+    node = {"number": number, "title": f"t{number}", "url": f"https://gh/o/r/issues/{number}", "body": body,
+            "state": state, "assignees": {"nodes": []}, "labels": {"nodes": [{"name": n} for n in labels]},
+            "repository": {"nameWithOwner": "o/r"}}
+    if parent is not None:
+        node["parent"] = {"number": parent, "url": f"https://gh/o/r/issues/{parent}",
+                          "labels": {"nodes": [{"name": "wayfinder:map"}]}}
+    return node
+
+
+def page(nodes):
+    return {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}
+
+
+def github_board(monkeypatch, maps, subs=None, refs=None, named=None):
+    """Fakes `gh api graphql`: the map search, each issue's sub-issues and cross-references, a named issue."""
+    asked = []
 
     def fake_run_json(args, stdin=None):
-        calls.append((args, json.loads(stdin)))
-        return {"data": {"search": {"pageInfo": {"hasNextPage": False}, "nodes": []}}}
+        variables = json.loads(stdin)["variables"]
+        if "q" in variables:
+            asked.append(("search", variables["q"]))
+            return {"data": {"search": page(maps)}}
+        if "withSubs" in variables:
+            number = variables["number"]
+            asked.append(("children", number))
+            issue = {"url": f"https://gh/o/r/issues/{number}", "labels": {"nodes": []},
+                     "subIssues": page((subs or {}).get(number, [])),
+                     "timelineItems": page([{"source": s} for s in (refs or {}).get(number, [])])}
+            return {"data": {"repository": {"issue": issue}}}
+        asked.append(("issue", variables["number"]))
+        if named is None:
+            return {"errors": [{"type": "NOT_FOUND", "message": "Could not resolve"}]}
+        return {"data": {"repository": {"issue": named}}}
 
     monkeypatch.setattr(github, "run_json", fake_run_json)
-    github.GitHubProvider("o/r").fetch(github.Query(label="bug"))
-    queries = [body["variables"]["q"] for _, body in calls]
-    assert queries[0] == 'repo:o/r is:issue label:"bug" is:open'
-    assert queries[1].startswith('repo:o/r is:issue label:"bug" is:closed closed:>=')
+    return asked
 
 
-def test_github_default_scope_is_every_issue(monkeypatch):
-    calls = []
+def lanes(tickets, named_map=None):
+    from ticketmaster.model import build_board
 
-    def fake_run_json(args, stdin=None):
-        calls.append(json.loads(stdin)["variables"]["q"])
-        return {"data": {"search": {"pageInfo": {"hasNextPage": False}, "nodes": []}}}
+    return {lane.map.number: {c.name: [t.number for t in ts] for c, ts in lane.columns.items() if ts}
+            for lane in build_board(tickets, named_map).lanes}
 
-    monkeypatch.setattr(github, "run_json", fake_run_json)
-    github.GitHubProvider("o/r").fetch(github.Query())
-    assert calls[0] == "repo:o/r is:issue is:open"
-    assert calls[1].startswith("repo:o/r is:issue is:closed closed:>=") and len(calls) == 2
-    assert not any("assignee" in q for q in calls)
+
+def test_github_fetches_every_open_map_with_its_children_in_map_order(monkeypatch):
+    maps = [gh_issue(1, MAP_LABELS), gh_issue(20, MAP_LABELS)]
+    subs = {1: [gh_issue(5, ["wayfinder:grilling"], parent=1),
+                gh_issue(3, ["wayfinder:task"], parent=1, state="CLOSED")],
+            20: [gh_issue(21, ["wayfinder:research"], parent=20)]}
+    # #4 links to the map by its `Part of #1` line alone; #6 only mentions it, and #5 is a sub-issue already.
+    refs = {1: [gh_issue(4, ["wayfinder:task"], "Part of #1"), gh_issue(6, [], "see #1"),
+                gh_issue(5, ["wayfinder:grilling"], parent=1)]}
+    asked = github_board(monkeypatch, maps, subs, refs)
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'), ("children", 1), ("children", 20)]
+    assert [(t.number, t.order) for t in tickets] == [(1, 0), (20, 0), (5, 0), (3, 1), (4, 2), (21, 0)]
+    assert lanes(tickets) == {1: {"FRONTIER": [5, 4], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
+
+
+def test_github_adds_a_named_closed_map_with_its_children(monkeypatch):
+    closed_map = gh_issue(7, MAP_LABELS, state="CLOSED")
+    asked = github_board(monkeypatch, [], {7: [gh_issue(8, ["wayfinder:task"], parent=7)]}, named=closed_map)
+    tickets = github.GitHubProvider("o/r").fetch(Query(named_map=7))
+    assert [(t.number, t.is_open) for t in tickets] == [(7, False), (8, True)]
+    assert ("issue", 7) in asked
+
+
+def test_github_asks_for_a_named_map_only_when_it_is_not_open_and_drops_one_that_is_no_map(monkeypatch):
+    asked = github_board(monkeypatch, [gh_issue(1, MAP_LABELS)])
+    assert [t.number for t in github.GitHubProvider("o/r").fetch(Query(named_map=1))] == [1]
+    assert ("issue", 1) not in asked
+    github_board(monkeypatch, [], named=gh_issue(7, ["bug"], state="CLOSED"))
+    assert github.GitHubProvider("o/r").fetch(Query(named_map=7)) == []
+    github_board(monkeypatch, [])
+    assert github.GitHubProvider("o/r").fetch(Query(named_map=404)) == []
 
 
 def test_gitlab_node_to_ticket():
@@ -80,61 +131,133 @@ def test_gitlab_node_to_ticket():
     }
     t = gitlab.to_ticket(node)
     assert (t.number, t.is_open, t.open_blockers, t.has_open_change_request) == (12, True, 0, True)
-    assert t.review_tags == ["ux"] and t.author == "gl-user"
+    assert t.labels == ("review::ux",) and t.author == "gl-user"
 
 
-def test_gitlab_parent_falls_back_to_mentions(monkeypatch):
-    def node(iid, body):
-        return {"iid": str(iid), "title": "t", "webUrl": "u", "description": body, "state": "opened",
-                "closedAt": None, "assignees": {"nodes": []}, "labels": {"nodes": []},
-                "blockedByIssues": {"nodes": []}, "mergeRequestsCount": 0}
+def gl_issue(iid, labels, body="", state="opened"):
+    return {"iid": str(iid), "title": f"t{iid}", "webUrl": f"https://gl/g/p/-/issues/{iid}", "description": body,
+            "state": state, "closedAt": None, "assignees": {"nodes": []},
+            "labels": {"nodes": [{"title": n} for n in labels]}, "blockedByIssues": {"nodes": []},
+            "mergeRequestsCount": 0}
+
+
+def gitlab_board(monkeypatch, labels, issues, named=None):
+    """Fakes `glab api graphql`: the project's labels, issues by label (and state), a named issue."""
+    asked = []
 
     def fake_run_json(args, stdin=None):
-        variables = json.loads(stdin)["variables"]
-        if "iid" in variables:
-            issue = {"webUrl": "https://gl/1", "labels": {"nodes": [{"title": "wayfinder:map"}]}}
-            return {"data": {"project": {"issue": issue}}}
-        nodes = [node(1, "map"), node(2, "Part of #1"), node(3, "see #10")] if variables["state"] == "opened" else []
-        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
+        body = json.loads(stdin)
+        variables = body["variables"]
+        if "labels(first" in body["query"]:
+            return {"data": {"project": {"labels": page([{"title": title} for title in labels])}}}
+        if "named" in variables:
+            asked.append(("named", variables["named"]))
+            return {"data": {"project": {"issue": named}}}
+        asked.append((variables.get("state"), tuple(variables["labels"])))
+        nodes = [n for n in issues if variables["labels"][0] in [label["title"] for label in n["labels"]["nodes"]]
+                 and variables.get("state", n["state"]) == n["state"]]
+        return {"data": {"project": {"issues": page(nodes)}}}
 
     monkeypatch.setattr(gitlab, "run_json", fake_run_json)
-    tickets = gitlab.GitLabProvider("g/p").fetch(gitlab.Query(parent=1))
-    assert [t.number for t in tickets] == [2]
-    assert (tickets[0].parent_url, tickets[0].parent_labels) == ("https://gl/1", ("wayfinder:map",))
+    return asked
+
+
+GITLAB_LABELS = ["wayfinder::map", "wayfinder::grilling", "wayfinder::task", "bug", "wayfinder::epic"]
+GITLAB_ISSUES = [
+    gl_issue(1, ["wayfinder::map"]), gl_issue(20, ["wayfinder::map"]), gl_issue(30, ["wayfinder::map"], state="closed"),
+    gl_issue(5, ["wayfinder::grilling"], "Part of #1\n\nWhy"), gl_issue(3, ["wayfinder::task"], "Part of #1", "closed"),
+    gl_issue(21, ["wayfinder::task"], "Part of #20"), gl_issue(31, ["wayfinder::task"], "Part of #30"),
+    gl_issue(9, ["wayfinder::grilling"], "see #1"), gl_issue(40, ["bug"], "Part of #1"),
+]
+
+
+def test_gitlab_fetches_every_open_map_with_its_children_by_their_part_of_line(monkeypatch):
+    asked = gitlab_board(monkeypatch, GITLAB_LABELS, GITLAB_ISSUES)
+    tickets = gitlab.GitLabProvider("g/p").fetch(Query())
+    assert asked == [("opened", ("wayfinder::map",)), (None, ("wayfinder::grilling",)), (None, ("wayfinder::task",))]
+    assert [t.number for t in tickets] == [1, 20, 5, 3, 21]
+    assert (tickets[2].parent_number, tickets[2].parent_url) == (1, "https://gl/g/p/-/issues/1")
+    assert lanes(tickets) == {1: {"FRONTIER": [5], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
+
+
+def test_gitlab_adds_a_named_closed_map_with_its_children(monkeypatch):
+    asked = gitlab_board(monkeypatch, GITLAB_LABELS, GITLAB_ISSUES, named=GITLAB_ISSUES[2])
+    tickets = gitlab.GitLabProvider("g/p").fetch(Query(named_map=30))
+    assert ("named", "30") in asked
+    assert {30, 31} <= {t.number for t in tickets}
+    assert lanes(tickets, named_map=30)[30] == {}
 
 
 def test_gitea_issue_to_ticket_detects_closing_pr():
     issue = {"number": 4, "title": "T", "html_url": "https://gt/4", "body": "", "state": "open",
              "closed_at": None, "user": {"login": "gt-user"}, "assignees": None, "labels": [{"name": "review:perf"}]}
     t = gitea.to_ticket(issue, (), ["Refactor\nFixes #4"])
-    assert t.has_open_change_request and t.review_tags == ["perf"] and t.assignees == ()
+    assert t.has_open_change_request and t.labels == ("review:perf",) and t.assignees == ()
     assert t.author == "gt-user"
     assert gitea.to_ticket(issue, (), ["Fixes #40"]).has_open_change_request is False
 
 
-def test_gitea_fetch_default_scope_is_every_issue_with_blockers(monkeypatch):
-    issues_open = [
-        {"number": 1, "title": "mine", "html_url": "u", "state": "open", "assignees": [{"login": "me"}], "labels": []},
-        {"number": 2, "title": "free", "html_url": "u", "state": "open", "assignees": [], "labels": []},
-        {"number": 3, "title": "theirs", "html_url": "u", "state": "open", "assignees": [{"login": "bob"}], "labels": []},
-    ]
+def gt_issue(number, labels, body="", state="open", assignees=()):
+    return {"number": number, "title": f"t{number}", "html_url": f"https://gt/o/r/issues/{number}", "body": body,
+            "state": state, "assignees": [{"login": a} for a in assignees], "labels": [{"name": n} for n in labels]}
+
+
+def gitea_board(monkeypatch, repo_labels, org_labels, issues, dependencies=None):
+    """Fakes Gitea's REST API: repo and org labels, issues by label and state, dependencies and single issues."""
+    asked = []
 
     def fake_get(self, path, params=None):
-        if path == "/user":
-            return {"login": "me"}
-        if path.endswith("/issues"):
-            return issues_open if params["state"] == "open" else []
+        if path == "/repos/o/r/labels":
+            return [{"name": name} for name in repo_labels]
+        if path == "/orgs/o/labels":
+            if org_labels is None:
+                raise providers.NotFound("codeberg.org/orgs/o/labels: HTTP 404 Not Found")
+            return [{"name": name} for name in org_labels]
         if path.endswith("/pulls"):
             return []
-        if path.endswith("/2/dependencies"):
-            return [{"number": 1, "state": "open"}, {"number": 3, "state": "closed"}]
-        return []
+        if path == "/repos/o/r/issues":
+            asked.append((params["state"], params["labels"]))
+            return [i for i in issues if params["labels"] in [label["name"] for label in i["labels"]]
+                    and params["state"] in ("all", i["state"])]
+        if path.endswith("/dependencies"):
+            return (dependencies or {}).get(int(path.split("/")[-2]), [])
+        number = int(path.rsplit("/", 1)[-1])
+        asked.append(("issue", number))
+        found = next((i for i in issues if i["number"] == number), None)
+        if found is None:
+            raise providers.NotFound(f"codeberg.org{path}: HTTP 404 Not Found")
+        return found
 
     monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
-    provider = gitea.GiteaProvider("o/r", "codeberg.org", token="x")
-    tickets = {t.number: t for t in provider.fetch(gitea.Query())}
-    assert sorted(tickets) == [1, 2, 3]  # all open issues, whoever is assigned
-    assert tickets[2].open_blockers == 1 and tickets[1].open_blockers == 0
+    return asked
+
+
+GITEA_ISSUES = [
+    gt_issue(1, ["wayfinder:map"]), gt_issue(20, ["wayfinder:map"]), gt_issue(30, ["wayfinder:map"], state="closed"),
+    gt_issue(5, ["wayfinder:research"], "Part of #1"), gt_issue(3, ["wayfinder:task"], "Part of #1", "closed"),
+    gt_issue(2, ["wayfinder:task"], "Part of #1", assignees=("me",)), gt_issue(21, ["wayfinder:task"], "Part of #20"),
+    gt_issue(31, ["wayfinder:task"], "Part of #30"), gt_issue(9, ["wayfinder:research"], "see #1"),
+    gt_issue(40, ["bug"], "Part of #1"),
+]
+
+
+def test_gitea_fetches_every_open_map_with_its_children_by_their_part_of_line(monkeypatch):
+    # Gitea drops an unknown label filter and lists every issue, so only labels that exist are asked for.
+    asked = gitea_board(monkeypatch, ["wayfinder:map", "wayfinder:research", "bug"], ["wayfinder:task"], GITEA_ISSUES,
+                        dependencies={5: [{"number": 2, "state": "open", "repository": {"full_name": "o/r"}}]})
+    tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+    assert asked == [("open", "wayfinder:map"), ("all", "wayfinder:research"), ("all", "wayfinder:task")]
+    assert [t.number for t in tickets] == [1, 20, 5, 3, 2, 21]
+    assert lanes(tickets) == {1: {"BLOCKED": [5], "CLAIMED": [2], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
+
+
+def test_gitea_adds_a_named_closed_map_without_org_labels(monkeypatch):
+    asked = gitea_board(monkeypatch, ["wayfinder:map", "wayfinder:task"], None, GITEA_ISSUES)
+    tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query(named_map=30))
+    assert ("issue", 30) in asked and {30, 31} <= {t.number for t in tickets}
+    asked = gitea_board(monkeypatch, ["bug"], None, GITEA_ISSUES)
+    assert gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query()) == []
+    assert asked == []  # no wayfinder labels: no issue listed
 
 
 def test_tea_config_token_lookup():
@@ -196,15 +319,15 @@ def test_gitea_http_429_is_rate_limited(monkeypatch):
 
 
 def test_gitea_rate_limit_on_dependencies_is_not_swallowed(monkeypatch):
-    def fake_get(self, path, params=None):
+    gitea_board(monkeypatch, ["wayfinder:map"], None, [gt_issue(1, ["wayfinder:map"])])
+    fake_get = gitea.GiteaProvider._get
+
+    def limited(self, path, params=None):
         if path.endswith("/dependencies"):
             raise RateLimited("codeberg.org: HTTP 429 rate limit exceeded")
-        if path.endswith("/issues"):
-            return [{"number": 1, "title": "t", "html_url": "u", "state": "open", "labels": []}] \
-                if params["state"] == "open" else []
-        return []
+        return fake_get(self, path, params)
 
-    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", limited)
     with pytest.raises(RateLimited):
         gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
 
@@ -262,7 +385,7 @@ def test_issue_states_remembers_closed_and_missing_issues():
 def test_github_native_blockers_are_named_and_body_blockers_looked_up(monkeypatch):
     def node(number, body="", blocked_by=()):
         return {"number": number, "title": "t", "url": "u", "body": body, "state": "OPEN",
-                "assignees": {"nodes": []}, "labels": {"nodes": []},
+                "assignees": {"nodes": []}, "labels": {"nodes": [{"name": "wayfinder:map"}]},
                 "blockedBy": {"nodes": [{"number": n, "state": s, "repository": {"nameWithOwner": repo}}
                                         for n, s, repo in blocked_by]}}
 
@@ -273,8 +396,10 @@ def test_github_native_blockers_are_named_and_body_blockers_looked_up(monkeypatc
         calls.append(body)
         if "q" in body["variables"]:
             nodes = [node(7, "Blocked by: #8, #50, #51", [(8, "OPEN", "o/r"), (3, "OPEN", "x/y"), (9, "CLOSED", "o/r")])]
-            nodes = nodes if "is:open" in body["variables"]["q"] else []
-            return json.dumps({"data": {"search": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}})
+            return json.dumps({"data": {"search": page(nodes)}})
+        if "withSubs" in body["variables"]:
+            issue = {"url": "u", "labels": {"nodes": []}, "subIssues": page([]), "timelineItems": page([])}
+            return json.dumps({"data": {"repository": {"issue": issue}}})
         errors = [{"type": "NOT_FOUND", "message": "Could not resolve"}]
         return json.dumps({"data": {"repository": {"i50": {"state": "OPEN"}, "i51": None}}, "errors": errors})
 
@@ -299,18 +424,21 @@ def test_github_viewer(monkeypatch):
 
 def test_gitlab_native_and_body_blockers(monkeypatch):
     issue = {"iid": "12", "title": "T", "webUrl": "u", "description": "Blokkert av: #20", "state": "opened",
-             "closedAt": None, "assignees": {"nodes": []}, "labels": {"nodes": []}, "mergeRequestsCount": 0,
+             "closedAt": None, "assignees": {"nodes": []}, "labels": {"nodes": [{"title": "wayfinder::map"}]},
+             "mergeRequestsCount": 0,
              "blockedByIssues": {"nodes": [{"iid": "13", "state": "opened", "reference": "g/p#13"},
                                            {"iid": "14", "state": "closed", "reference": "g/p#14"},
                                            {"iid": "3", "state": "opened", "reference": "g/other#3"}]}}
 
     def fake_run_json(args, stdin=None):
-        variables = json.loads(stdin)["variables"]
+        body = json.loads(stdin)
+        variables = body["variables"]
+        if "labels(first" in body["query"]:
+            return {"data": {"project": {"labels": page([{"title": "wayfinder::map"}])}}}
         if "iids" in variables:
             assert variables["iids"] == ["20"]
             return {"data": {"project": {"issues": {"nodes": [{"iid": "20", "state": "opened"}]}}}}
-        nodes = [issue] if variables["state"] == "opened" else []
-        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
+        return {"data": {"project": {"issues": page([issue])}}}
 
     monkeypatch.setattr(gitlab, "run_json", fake_run_json)
     [t] = gitlab.GitLabProvider("g/p").fetch(Query())
@@ -324,8 +452,10 @@ def test_gitlab_viewer(monkeypatch):
 
 def test_gitea_native_and_body_blockers(monkeypatch):
     def fake_get(self, path, params=None):
+        if path.endswith("/labels"):
+            return [{"name": "wayfinder:map"}]
         if path.endswith("/issues"):
-            return [{"number": 1, "title": "t", "html_url": "u", "state": "open", "labels": [],
+            return [{"number": 1, "title": "t", "html_url": "u", "state": "open", "labels": [{"name": "wayfinder:map"}],
                      "body": "Blocked by: #5, #6"}] if params["state"] == "open" else []
         if path.endswith("/1/dependencies"):
             return [{"number": 2, "state": "open", "repository": {"full_name": "o/r"}},
@@ -424,119 +554,6 @@ def test_gitea_missing_map_issue_is_no_map_but_other_errors_surface(monkeypatch)
         provider._issue(8)
 
 
-def github_node(number, labels, body="", parent=None):
-    return {"number": number, "title": "t", "url": f"https://gh/{number}", "body": body, "state": "OPEN",
-            "assignees": {"nodes": []}, "labels": {"nodes": [{"name": n} for n in labels]}, "parent": parent}
-
-
-@pytest.mark.parametrize("query", [Query(), Query(label="wayfinder:task")])
-def test_github_whole_repo_and_label_boards_resolve_part_of_maps(monkeypatch, query):
-    def fake_run_json(args, stdin=None):
-        variables = json.loads(stdin)["variables"]
-        if "number" in variables:
-            assert variables["number"] == 5
-            issue = {"url": "https://gh/5", "labels": {"nodes": [{"name": "wayfinder:map"}]}}
-            return {"data": {"repository": {"issue": issue}}}
-        nodes = [github_node(2, ["wayfinder:task"], "Part of #5"),
-                 github_node(3, ["wayfinder:task"], parent={"number": 1, "url": "https://gh/1",
-                                                            "labels": {"nodes": [{"name": "wayfinder:map"}]}})]
-        nodes = nodes if "is:open" in variables["q"] else []
-        return {"data": {"search": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}
-
-    monkeypatch.setattr(github, "run_json", fake_run_json)
-    tickets = {t.number: t for t in github.GitHubProvider("o/r").fetch(query)}
-    assert (tickets[2].parent_url, tickets[2].is_wayfinder_ticket) == ("https://gh/5", True)
-    assert tickets[3].parent_url == "https://gh/1"
-
-
-def gitlab_node(iid, labels, body=""):
-    return {"iid": str(iid), "title": "t", "webUrl": f"https://gl/{iid}", "description": body, "state": "opened",
-            "closedAt": None, "assignees": {"nodes": []}, "labels": {"nodes": [{"title": n} for n in labels]},
-            "blockedByCount": 0, "mergeRequestsCount": 0}
-
-
-@pytest.mark.parametrize("query", [Query(), Query(label="wayfinder::grilling")])
-def test_gitlab_whole_repo_and_label_boards_resolve_part_of_maps(monkeypatch, query):
-    def fake_run_json(args, stdin=None):
-        variables = json.loads(stdin)["variables"]
-        if "iid" in variables:
-            if variables["iid"] != "5":
-                return {"data": {"project": {"issue": None}}}
-            issue = {"webUrl": "https://gl/5", "labels": {"nodes": [{"title": "wayfinder::map"}]}}
-            return {"data": {"project": {"issue": issue}}}
-        nodes = [gitlab_node(2, ["wayfinder::grilling"], "Part of #5\n\nWhy"),
-                 gitlab_node(3, ["wayfinder::grilling"], "Part of #6")]
-        nodes = nodes if variables["state"] == "opened" else []
-        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
-
-    monkeypatch.setattr(gitlab, "run_json", fake_run_json)
-    tickets = {t.number: t for t in gitlab.GitLabProvider("g/p").fetch(query)}
-    assert (tickets[2].parent_number, tickets[2].parent_url, tickets[2].is_wayfinder_ticket) == (5, "https://gl/5", True)
-    assert tickets[3].map_missing
-
-
-def gitea_issue(number, labels, body=""):
-    return {"number": number, "title": "t", "html_url": f"https://gt/{number}", "body": body, "state": "open",
-            "assignees": [], "labels": [{"name": n} for n in labels]}
-
-
-@pytest.mark.parametrize("query", [Query(), Query(label="wayfinder:research")])
-def test_gitea_whole_repo_and_label_boards_resolve_part_of_maps(monkeypatch, query):
-    def fake_get(self, path, params=None):
-        if path.endswith("/issues"):
-            return [gitea_issue(2, ["wayfinder:research"], "Part of #5")] if params["state"] == "open" else []
-        if path.endswith("/issues/5"):
-            return gitea_issue(5, ["wayfinder:map"])
-        return []
-
-    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
-    tickets = {t.number: t for t in gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(query)}
-    assert (tickets[2].parent_number, tickets[2].parent_url, tickets[2].is_wayfinder_ticket) == (5, "https://gt/5", True)
-
-
-def test_gitea_map_board_keeps_the_map_as_parent(monkeypatch):
-    def fake_get(self, path, params=None):
-        if path.endswith("/issues"):
-            return [gitea_issue(1, ["wayfinder:map"]), gitea_issue(2, ["wayfinder:task"], "Part of #1")] \
-                if params["state"] == "open" else []
-        if path.endswith("/issues/1"):
-            return gitea_issue(1, ["wayfinder:map"])
-        return []
-
-    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
-    tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query(parent=1))
-    assert [(t.number, t.parent_url, t.is_wayfinder_ticket) for t in tickets] == [(2, "https://gt/1", True)]
-
-
-def test_gitea_map_board_follows_a_part_of_line_naming_another_map(monkeypatch):
-    def fake_get(self, path, params=None):
-        if path.endswith("/issues"):
-            return [gitea_issue(2, ["wayfinder:task"], "Part of #7\n\nSee #1")] if params["state"] == "open" else []
-        if path.endswith("/issues/1"):
-            return gitea_issue(1, ["wayfinder:map"])
-        if path.endswith("/issues/7"):
-            return gitea_issue(7, ["wayfinder:map"])
-        return []
-
-    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
-    [ticket] = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query(parent=1))
-    assert (ticket.parent_number, ticket.parent_url) == (7, "https://gt/7")
-
-
-def test_gitlab_map_board_follows_a_part_of_line_naming_another_map(monkeypatch):
-    def fake_run_json(args, stdin=None):
-        variables = json.loads(stdin)["variables"]
-        if "iid" in variables:
-            issue = {"webUrl": f"https://gl/{variables['iid']}", "labels": {"nodes": [{"title": "wayfinder:map"}]}}
-            return {"data": {"project": {"issue": issue}}}
-        nodes = [gitlab_node(2, ["wayfinder:task"], "Part of #7\n\nSee #1")] if variables["state"] == "opened" else []
-        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
-
-    monkeypatch.setattr(gitlab, "run_json", fake_run_json)
-    [ticket] = gitlab.GitLabProvider("g/p").fetch(Query(parent=1))
-    assert (ticket.parent_number, ticket.parent_url) == (7, "https://gl/7")
-
-
 def test_github_not_planned_close_reason_is_read():
     node = {"number": 1, "title": "T", "url": "u", "state": "CLOSED", "stateReason": "NOT_PLANNED",
             "assignees": {"nodes": []}, "labels": {"nodes": []}}
@@ -615,7 +632,7 @@ FAMILY = {
 
 def assert_map_family(tickets, map_url, spec_url):
     by_number = {t.number: t for t in tickets}
-    assert {2, 3, 4, 5} <= set(by_number) and 7 not in by_number and 1 not in by_number
+    assert {1, 2, 3, 4, 5} <= set(by_number) and 7 not in by_number
     assert (by_number[3].parent_number, by_number[3].parent_url, by_number[3].parent_labels) == (1, map_url, ("wayfinder:map",))
     for n in (4, 5):
         assert (by_number[n].parent_number, by_number[n].parent_url) == (3, spec_url)
@@ -626,50 +643,6 @@ def assert_map_family(tickets, map_url, spec_url):
     for n in (3, 4, 5):
         assert (by_number[n].map_number, by_number[n].map_url) == (1, map_url)
     assert by_number[2].map_url is None
-
-
-def test_gitlab_map_board_includes_the_spec_and_its_implementation_tickets(monkeypatch):
-    def node(iid):
-        title, body, labels = FAMILY[iid]
-        return {"iid": str(iid), "title": title, "webUrl": f"https://gl/{iid}", "description": body,
-                "state": "opened", "closedAt": None, "assignees": {"nodes": []},
-                "labels": {"nodes": [{"title": label} for label in labels]},
-                "blockedByCount": 0, "mergeRequestsCount": 0}
-
-    def fake_run_json(args, stdin=None):
-        variables = json.loads(stdin)["variables"]
-        if "iid" in variables:
-            issue = node(int(variables["iid"]))
-            return {"data": {"project": {"issue": {"webUrl": issue["webUrl"], "labels": issue["labels"]}}}}
-        nodes = [node(n) for n in FAMILY] if variables["state"] == "opened" else []
-        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
-
-    monkeypatch.setattr(gitlab, "run_json", fake_run_json)
-    assert_map_family(gitlab.GitLabProvider("g/p").fetch(Query(parent=1)), "https://gl/1", "https://gl/3")
-
-
-def test_gitea_map_board_includes_the_spec_and_its_implementation_tickets(monkeypatch):
-    def issue(n):
-        title, body, labels = FAMILY[n]
-        return {"number": n, "title": title, "html_url": f"https://gt/{n}", "body": body, "state": "open",
-                "assignees": [], "labels": [{"name": label} for label in labels]}
-
-    dependencies = []
-
-    def fake_get(self, path, params=None):
-        if path.endswith("/issues"):
-            return [issue(n) for n in FAMILY] if params["state"] == "open" else []
-        if path.endswith("/dependencies"):
-            dependencies.append(int(path.split("/")[-2]))
-            return []
-        if "/issues/" in path:
-            return issue(int(path.rsplit("/", 1)[-1]))
-        return []
-
-    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
-    tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query(parent=1))
-    assert_map_family(tickets, "https://gt/1", "https://gt/3")
-    assert 7 not in dependencies and 1 not in dependencies  # blockers only for the board's tickets
 
 
 def family_node(n, parent=None, repo="o/r"):
@@ -687,6 +660,8 @@ def github_children(monkeypatch, sub_issues, references, labels_of=lambda n: FAM
     asked = []
 
     def fake_run_json(args, stdin=None):
+        if "q" in json.loads(stdin)["variables"]:
+            return {"data": {"search": page([family_node(1)])}}
         number = json.loads(stdin)["variables"]["number"]
         asked.append(number)
         issue = {"url": f"https://gh/{number}", "labels": {"nodes": [{"name": label} for label in labels_of(number)]},
@@ -699,24 +674,16 @@ def github_children(monkeypatch, sub_issues, references, labels_of=lambda n: FAM
     return asked
 
 
-def test_github_plain_parent_board_is_only_its_sub_issues(monkeypatch):
-    # The same family under an epic: no map, so no spec, and no query beyond the parent's own.
-    asked = github_children(monkeypatch, {1: [family_node(3, parent=1)]}, {1: [family_node(3)]},
-                            labels_of=lambda n: ("epic",))
-    tickets = github.GitHubProvider("o/r").fetch(Query(parent=1))
-    assert [t.number for t in tickets] == [3] and asked == [1]
-
-
-def test_github_map_board_includes_the_spec_and_its_implementation_tickets(monkeypatch):
+def test_github_reads_each_maps_spec_and_its_implementation_tickets(monkeypatch):
     # #2 is a native sub-issue of the map and #4 one of the spec; #3 and #5 link by body only,
     # so GitHub reports them as cross-references; #6 and #8 (another repo) mention without linking.
     sub_issues = {1: [family_node(2, parent=1)], 3: [family_node(4, parent=3)]}
     references = {1: [family_node(3), family_node(6), family_node(2, parent=1)],
                   3: [family_node(5), family_node(4, parent=3), {**family_node(5, repo="x/y"), "number": 8}]}
     asked = github_children(monkeypatch, sub_issues, references)
-    tickets = github.GitHubProvider("o/r").fetch(Query(parent=1))
+    tickets = github.GitHubProvider("o/r").fetch(Query())
     assert_map_family(tickets, "https://gh/1", "https://gh/3")
-    assert [t.number for t in tickets] == [2, 3, 4, 5]  # map order, then the spec, then its tickets
+    assert [t.number for t in tickets] == [1, 2, 3, 4, 5]  # the map, its order, then the spec, then its tickets
     assert sorted(asked) == [1, 3]  # the decision ticket is not a spec, so its children are not asked for
 
 
@@ -896,76 +863,3 @@ def test_resolve_maps_follows_ticket_to_spec_to_map_fetching_each_issue_once():
         assert resolved[n].map_url is None and not resolved[n].map_missing, n
     assert resolved[4].parent_number is None and resolved[5].parent_number == 3  # the parent stays as it was
     assert sorted(fetched) == [1, 3, 20, 21, 22, 404]  # each chain issue off the board fetched once
-
-
-@pytest.mark.parametrize("query", [Query(), Query(label="ready-for-agent")])
-def test_github_whole_repo_and_label_boards_find_the_map_through_the_spec(monkeypatch, query):
-    asked = []
-
-    def fake_run_json(args, stdin=None):
-        variables = json.loads(stdin)["variables"]
-        if "number" in variables:
-            asked.append(variables["number"])
-            issue = {3: {"url": "https://gh/3", "body": "Part of #1\n\n## Problem", "labels": {"nodes": []}},
-                     1: {"url": "https://gh/1", "body": "Notes", "labels": {"nodes": [{"name": "wayfinder:map"}]}}}
-            return {"data": {"repository": {"issue": issue[variables["number"]]}}}
-        spec = {"number": 3, "url": "https://gh/3", "labels": {"nodes": []}}
-        nodes = [github_node(4, ["ready-for-agent"], parent=spec),
-                 github_node(5, ["ready-for-agent"], "## Parent\n\n#3\n"),
-                 github_node(6, ["ready-for-agent"])]
-        nodes = nodes if "is:open" in variables["q"] else []
-        return {"data": {"search": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}
-
-    monkeypatch.setattr(github, "run_json", fake_run_json)
-    tickets = {t.number: t for t in github.GitHubProvider("o/r").fetch(query)}
-    assert [(tickets[n].map_number, tickets[n].map_url) for n in (4, 5)] == [(1, "https://gh/1")] * 2
-    assert tickets[4].parent_number == 3 and tickets[6].map_url is None
-    assert sorted(asked) == [1, 3]
-
-
-@pytest.mark.parametrize("query", [Query(), Query(label="ready-for-agent")])
-def test_gitlab_whole_repo_and_label_boards_find_the_map_through_the_spec(monkeypatch, query):
-    asked = []
-
-    def fake_run_json(args, stdin=None):
-        variables = json.loads(stdin)["variables"]
-        if "iid" in variables:
-            asked.append(variables["iid"])
-            issue = {"1": {"webUrl": "https://gl/1", "description": "Notes",
-                           "labels": {"nodes": [{"title": "wayfinder::map"}]}}}.get(variables["iid"])
-            return {"data": {"project": {"issue": issue}}}
-        nodes = [gitlab_node(3, ["ready-for-agent"], "Part of #1\n\n## Problem"),
-                 gitlab_node(4, ["ready-for-agent"], "## Parent\n\n#3\n"),
-                 gitlab_node(5, ["ready-for-agent"], "## Parent\n\nhttps://gl/g/p/-/issues/3\n"),
-                 gitlab_node(6, ["ready-for-agent"], "## Parent\n\n#9\n")]
-        nodes = nodes if variables["state"] == "opened" else []
-        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
-
-    monkeypatch.setattr(gitlab, "run_json", fake_run_json)
-    tickets = {t.number: t for t in gitlab.GitLabProvider("g/p").fetch(query)}
-    assert [(tickets[n].map_number, tickets[n].map_url) for n in (3, 4, 5)] == [(1, "https://gl/1")] * 3
-    assert tickets[6].map_url is None and not tickets[6].map_missing
-    assert sorted(asked) == ["1", "9"]
-
-
-@pytest.mark.parametrize("query", [Query(), Query(label="ready-for-agent")])
-def test_gitea_whole_repo_and_label_boards_find_the_map_through_the_spec(monkeypatch, query):
-    asked = []
-
-    def fake_get(self, path, params=None):
-        if path.endswith("/issues"):
-            return [gitea_issue(4, ["ready-for-agent"], "## Parent\n\n#3\n"),
-                    gitea_issue(5, ["ready-for-agent"], "## Parent\n\n#3\n")] if params["state"] == "open" else []
-        if path.endswith("/dependencies") or path.endswith("/pulls"):
-            return []
-        asked.append(path.rsplit("/", 1)[-1])
-        if path.endswith("/issues/3"):
-            return gitea_issue(3, [], "Part of #1\n\n## Problem")
-        if path.endswith("/issues/1"):
-            return gitea_issue(1, ["wayfinder:map"])
-        return []
-
-    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
-    tickets = {t.number: t for t in gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(query)}
-    assert [(tickets[n].map_number, tickets[n].map_url) for n in (4, 5)] == [(1, "https://gt/1")] * 2
-    assert sorted(asked) == ["1", "3"]

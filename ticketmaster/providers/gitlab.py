@@ -1,35 +1,50 @@
 """GitLab via `glab api graphql`: `blocks` links plus `Blocked by:` body lines, and closing merge requests.
 
-GitLab issues have no sub-issue list in the Issue API, so a parent board falls back to
-issues whose description mentions `#<parent>`, plus, for a map, the implementation tickets of its
-spec (`Part of #<map>`), which name the spec in their `## Parent` section.
+GitLab issues have no sub-issue list in the Issue API, so the board reads the project's `wayfinder:` labels
+(`wayfinder:map` or the scoped `wayfinder::map`, and the four ticket types): the open maps, and each typed
+ticket whose description's first line is `Part of #<map>` for one of them.
 """
 
 from __future__ import annotations
 
 import functools
 import json
-from datetime import datetime, timedelta, timezone
 
-from ..model import Ticket, parse_time
-from . import (IssueStates, ProviderError, Query, blocker_ref, map_family, resolve_maps, run_json,
-               tracker_error, with_body_blockers)
+from ..model import WAYFINDER_TYPES, Ticket, parse_time, part_of, wayfinder_kinds
+from . import LIMIT, IssueStates, ProviderError, Query, blocker_ref, resolve_maps, run_json, tracker_error, with_body_blockers
+
+ISSUE_FIELDS = """
+  iid title webUrl description state closedAt
+  author { username }
+  assignees { nodes { username } }
+  labels { nodes { title } }
+  blockedByIssues(first: 20) { nodes { iid state reference(full: true) } }
+  mergeRequestsCount
+"""
 
 ISSUES = """
-query($path: ID!, $state: IssuableState, $after: String, $closedAfter: Time,
-      $assignees: [String!], $wildcard: AssigneeWildcardId, $labels: [String]) {
+query($path: ID!, $state: IssuableState, $after: String, $labels: [String]) {
   project(fullPath: $path) {
-    issues(state: $state, after: $after, first: 100, closedAfter: $closedAfter,
-           assigneeUsernames: $assignees, assigneeWildcardId: $wildcard, labelName: $labels) {
+    issues(state: $state, after: $after, first: 100, labelName: $labels) {
       pageInfo { hasNextPage endCursor }
-      nodes {
-        iid title webUrl description state closedAt
-        author { username }
-        assignees { nodes { username } }
-        labels { nodes { title } }
-        blockedByIssues(first: 20) { nodes { iid state reference(full: true) } }
-        mergeRequestsCount
-      }
+      nodes { %s }
+    }
+  }
+}
+""" % ISSUE_FIELDS
+
+NAMED = """
+query($path: ID!, $named: String!) {
+  project(fullPath: $path) { issue(iid: $named) { %s } }
+}
+""" % ISSUE_FIELDS
+
+LABELS = """
+query($path: ID!, $after: String) {
+  project(fullPath: $path) {
+    labels(first: 100, after: $after, searchTerm: "wayfinder", includeAncestorGroups: true) {
+      pageInfo { hasNextPage endCursor }
+      nodes { title }
     }
   }
 }
@@ -73,22 +88,32 @@ class GitLabProvider:
         return states
 
     def fetch(self, query: Query) -> list[Ticket]:
-        closed_after = (datetime.now(timezone.utc) - timedelta(days=query.done_days)).isoformat()
-        labels = [query.label] if query.label else None
-        filters = [
-            {"state": "opened", "labels": labels},
-            {"state": "closed", "closedAfter": closed_after, "labels": labels},
-        ]
-        seen: dict[int, Ticket] = {}
-        for variables in filters:
-            for node in self._issues(variables, query.limit):
-                ticket = to_ticket(node, self.repo)
-                seen.setdefault(ticket.number, ticket)
-        tickets = list(seen.values())
-        issue = functools.cache(self._issue)  # each chain issue off the board once per refresh
-        if query.parent is not None:
-            tickets = map_family(tickets, query.parent, issue(query.parent))
-        return with_body_blockers(resolve_maps(tickets, issue), self.states)
+        """The open maps, the named map, and every typed ticket, open or closed, whose `Part of #<map>` names one."""
+        labels = self._wayfinder_labels()
+        maps = {t.number: t for label in labels["map"] for t in self._issues({"state": "opened", "labels": [label]})
+                if t.is_wayfinder_map}
+        if query.named_map is not None and query.named_map not in maps:
+            named = self._named(query.named_map)
+            maps |= {named.number: named} if named is not None and named.is_wayfinder_map else {}
+        children = {t.number: t for label in labels["ticket"] for t in self._issues({"labels": [label]})
+                    if t.wayfinder_type is not None and part_of(t.body) in maps}
+        tickets = list(maps.values()) + [t for n, t in children.items() if n not in maps]
+        return with_body_blockers(resolve_maps(tickets, functools.cache(self._issue)), self.states)
+
+    def _wayfinder_labels(self) -> dict[str, list[str]]:
+        """The project's (and its groups') label titles for maps and for the four ticket types."""
+        found: dict[str, list[str]] = {"map": [], "ticket": []}
+        for title in [node["title"] for node in self._pages(LABELS, {}, ["project", "labels"])]:
+            kinds = wayfinder_kinds((title,))
+            if "map" in kinds:
+                found["map"].append(title)
+            elif any(kind in WAYFINDER_TYPES for kind in kinds):
+                found["ticket"].append(title)
+        return found
+
+    def _named(self, iid: int) -> Ticket | None:
+        issue = (self._graphql(NAMED, {"path": self.repo, "named": str(iid)}).get("project") or {}).get("issue")
+        return to_ticket(issue, self.repo) if issue else None
 
     def _issue(self, iid: int) -> Ticket | None:
         issue = (self._graphql(PARENT, {"path": self.repo, "iid": str(iid)}).get("project") or {}).get("issue")
@@ -97,19 +122,23 @@ class GitLabProvider:
         return Ticket(number=iid, title="", url=issue["webUrl"], is_open=True, body=issue.get("description") or "",
                       labels=tuple(label["title"] for label in issue["labels"]["nodes"]))
 
-    def _issues(self, variables: dict, limit: int) -> list[dict]:
+    def _issues(self, variables: dict) -> list[Ticket]:
+        return [to_ticket(node, self.repo) for node in self._pages(ISSUES, variables, ["project", "issues"])]
+
+    def _pages(self, gql: str, variables: dict, path: list[str]) -> list[dict]:
         nodes: list[dict] = []
         after = None
-        while len(nodes) < limit:
-            data = self._graphql(ISSUES, {"path": self.repo, "after": after, **variables})
-            if data.get("project") is None:
+        while len(nodes) < LIMIT:
+            page = self._graphql(gql, {"path": self.repo, "after": after, **variables})
+            for key in path:
+                page = (page or {}).get(key)
+            if page is None:
                 raise ProviderError(f"GitLab project {self.repo} not found")
-            page = data["project"]["issues"]
             nodes += page["nodes"]
             if not page["pageInfo"]["hasNextPage"]:
                 break
             after = page["pageInfo"]["endCursor"]
-        return nodes[:limit]
+        return nodes[:LIMIT]
 
     def _graphql(self, gql: str, variables: dict) -> dict:
         body = {"query": gql, "variables": {k: v for k, v in variables.items() if v is not None}}

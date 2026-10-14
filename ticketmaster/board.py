@@ -1,11 +1,10 @@
-"""Live Textual kanban board."""
+"""Live Textual swimlane board: a lane per wayfinder map, its tickets in four columns."""
 
 from __future__ import annotations
 
 import math
 import time
 import webbrowser
-import zlib
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -21,30 +20,17 @@ from textual.widgets import Button, Footer, Input, Label, Static
 
 from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
-from .model import (COLUMN_ORDER, OUT_OF_SCOPE_LABEL, WONTFIX_LABEL, Board, Column, MapProgress, Ticket, build_board,
-                    frontier, map_progress)
+from .model import COLUMN_ORDER, Board, Column, Lane, Ticket, build_board, frontier
 from .providers import ErrorNotice, Provider, ProviderError, Query, RateLimited, error_notice
 
-TAG_COLORS = {
-    "security": "white on red",
-    "sec": "white on red",
-    "ux": "black on magenta",
-    "ui": "black on cyan",
-    "perf": "black on yellow",
-    "performance": "black on yellow",
-    "code": "white on blue",
-    "a11y": "black on green",
-    "docs": "black on white",
-}
 NARROW_WIDTH = 100  # below this the "auto" view shows one column at a time
-FALLBACK_COLORS = ["white on dark_green", "white on purple4", "black on orange3", "white on grey37", "black on gold3"]
 COLUMN_COLORS = {
     Column.BLOCKED: "red",
-    Column.READY: "green",
-    Column.IN_PROGRESS: "yellow",
-    Column.REVIEW: "magenta",
-    Column.DONE: "grey50",
+    Column.FRONTIER: "green",
+    Column.CLAIMED: "yellow",
+    Column.DECIDED: "grey50",
 }
+MAP_COLOR = "cyan"
 STATUS_STYLES = {  # herdr agent states
     "working": ("● working", "bold yellow"),
     "blocked": ("⚠ needs you", "bold red"),
@@ -59,12 +45,7 @@ LIMITED_TICKETS_EVERY = 60.0  # ticket fetches while the tracker rate-limits the
 LIMITED_SESSIONS_EVERY = 10.0  # herdr session refreshes meanwhile
 
 
-def tag_style(kind: str) -> str:
-    return TAG_COLORS.get(kind.lower()) or FALLBACK_COLORS[zlib.crc32(kind.lower().encode()) % len(FALLBACK_COLORS)]
-
-
-def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
-                progress: MapProgress | None = None) -> Text:
+def session_lines(sessions: list[Session], starting: bool) -> Text:
     text = Text()
     for session in sessions:
         label, style = STATUS_STYLES.get(session.status, STATUS_STYLES["unknown"])
@@ -72,41 +53,49 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         text.append(f"{Path(session.path).name}\n", style="dim")
     if starting and not sessions:
         text.append("▶ starting…\n", style="bold green")
+    return text
+
+
+def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
+                map_title: str = "", out_of_scope: bool = False) -> Text:
+    """A ticket: type · HITL/AFK, assignee, its open blockers and its map's title."""
+    text = session_lines(sessions, starting)
     text.append(f"#{ticket.number} ", style=f"bold {COLUMN_COLORS[column]}")
     text.append(ticket.title, style="bold")
     if ticket.summary:
         text.append("\n" + ticket.summary, style="dim")
-    if progress is not None:
-        text.append(f"\n◆ map: {progress.decided} decided · {progress.open} open · {progress.blocked} blocked",
-                    style="bold cyan")
     chips = Text()
-    if ticket.mode:
-        chips.append(f" {ticket.mode} ", style=MODE_STYLES[ticket.mode])
+    if ticket.wayfinder_type:
+        chips.append(ticket.wayfinder_type, style="bold")
+        if ticket.mode:
+            chips.append(" · ")
+            chips.append(f" {ticket.mode} ", style=MODE_STYLES[ticket.mode])
         chips.append(" ")
-    if ticket.is_out_of_scope:
+    if out_of_scope:
         chips.append(" out of scope ", style="black on grey50")
         chips.append(" ")
-    if ticket.map_missing:
-        chips.append(f"⚠ {ticket.map_warning}", style="bold yellow")
-        chips.append(" ")
-    for kind in [] if ticket.is_decision else ticket.review_tags:  # a decision never gets a review
-        chips.append(f" {kind} ", style=tag_style(kind))
-        chips.append(" ")
-    if column is Column.REVIEW and not ticket.review_tags and ticket.has_open_change_request:
-        chips.append(" PR open ", style="black on grey70")
-        chips.append(" ")
-    if column is Column.BLOCKED and (ticket.blocked_by or ticket.open_blockers):
+    if ticket.is_open and (ticket.blocked_by or ticket.open_blockers):
         chips.append(f"⛔ {' '.join(ticket.blocked_by) or ticket.open_blockers} ", style="red")
-    as_chips = {OUT_OF_SCOPE_LABEL} if ticket.is_out_of_scope else set()
-    for label in [label for label in ticket.other_labels if label.lower() not in as_chips][:3]:
-        chips.append(f"[{label}] ", style="grey62")
-    if ticket.author:
-        chips.append(f"by {ticket.author} ", style="grey62")
     if ticket.assignees:
-        chips.append(" ".join("@" + a for a in ticket.assignees), style="italic cyan")
+        chips.append(" ".join("@" + a for a in ticket.assignees) + " ", style="italic cyan")
+    if map_title:
+        chips.append(f"◆ {map_title}", style="grey62")
     if chips.plain:
         text.append("\n")
         text.append(chips)
+    return text
+
+
+def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False) -> Text:
+    """A lane's header: the map's title and its decided / open / blocked counts."""
+    text = session_lines(sessions, starting)
+    text.append(f"◆ #{lane.map.number} ", style=f"bold {MAP_COLOR}")
+    text.append(lane.map.title, style="bold")
+    if lane.collapsed:
+        text.append("  closed", style="grey50")
+    progress = lane.progress
+    text.append(f"\n{progress.decided} decided · {progress.open} open · {progress.blocked} blocked",
+                style=f"bold {MAP_COLOR}")
     return text
 
 
@@ -184,7 +173,9 @@ class Pacer:
 
 
 class Card(Static, can_focus=True):
-    # Bound on the card itself: otherwise the column's VerticalScroll handles up/down as scrolling.
+    """A ticket in a lane's column, or the map heading its lane (column None)."""
+
+    # Bound on the card itself: otherwise the lanes' VerticalScroll handles up/down as scrolling.
     BINDINGS = [
         Binding("up,k", "app.move(0,-1)", show=False),
         Binding("down,j", "app.move(0,1)", show=False),
@@ -192,9 +183,8 @@ class Card(Static, can_focus=True):
         Binding("right,l", "app.move(1,0)", show=False),
     ]
 
-    def __init__(self, ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
-                 progress: MapProgress | None = None):
-        super().__init__(render_card(ticket, column, sessions, starting, progress), classes="card")
+    def __init__(self, ticket: Ticket, column: Column | None, text: Text):
+        super().__init__(text, classes="card" if column is not None else "card map-card")
         self.ticket = ticket
         self.column = column
 
@@ -204,8 +194,12 @@ class Card(Static, can_focus=True):
             self.app.action_primary()
 
 
-class ColumnScroll(VerticalScroll, can_focus=False):
-    """Scrolls with the mouse wheel and follows the focused card, but never takes focus itself."""
+class Cell(Vertical):
+    """One column of one lane."""
+
+    def __init__(self, column: Column, cards: list[Card]):
+        super().__init__(*cards, classes="cell")
+        self.column = column
 
 
 class Workbench(Protocol):
@@ -391,27 +385,22 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
         row(keys_, width, description, "bold cyan")
     text.append("  Click selects a card, double-click acts like Enter.\n", style="dim")
 
+    heading("Lanes")
+    text.append("  Each open wayfinder map is a lane, headed by its map card: its decided (closed, not out\n"
+                "  of scope), open and blocked tickets. A closed map shows only when named\n"
+                f"  (ticketmaster <map>), as its header card alone.{'  ← this board' if query.named_map else ''}\n"
+                "  Issues that are not a map or a map's decision ticket are not shown.\n")
+
     heading("Columns (the first rule that matches)")
     for column, rule in [
-        (Column.DONE, f"closed in the last {query.done_days} days; older ones, and those closed as not planned\n"
-                      + " " * 15 + f"or labelled {WONTFIX_LABEL}, are hidden; an out-of-scope label marks one ruled\n"
-                      + " " * 15 + "out of scope rather than resolved, and keeps it on Done"),
-        (Column.REVIEW, "a review:<kind> label, or an open PR/MR that closes it; never a wayfinder\n"
-                        + " " * 15 + "ticket (research, prototype, grilling, task), which resolves with a comment"),
-        (Column.BLOCKED, "an open blocking issue (native or a 'Blocked by: #n' body line), or a 'blocked' label"),
-        (Column.IN_PROGRESS, "assigned to someone"),
-        (Column.READY, "everything else"),
+        (Column.DECIDED, "closed, of any age; canceled, or linked from the map's ## Out of scope\n"
+                         + " " * 12 + "section, marks it out of scope"),
+        (Column.BLOCKED, "an open blocking issue (native, or a 'Blocked by:' line or section)"),
+        (Column.CLAIMED, "assigned to someone"),
+        (Column.FRONTIER, "everything else; the first is the one /wayfinder <map> picks"),
     ]:
-        row(column.value, 11, rule, f"bold {COLUMN_COLORS[column]}")
-
-    heading("Scope")
-    current = "parent" if query.parent else "no filter"
-    for name, rule in [
-        ("no filter", f"every open issue, and every issue closed in the last {query.done_days} days"),
-        ("parent", "the sub-issues of one issue, e.g. a wayfinder map (ticketmaster 42),\n"
-                   + " " * 13 + "plus the spec linked to a map and the spec's implementation tickets"),
-    ]:
-        row(name, 9, rule + ("  ← this board" if name == current else ""))
+        row(column.value, 8, rule, f"bold {COLUMN_COLORS[column]}")
+    text.append("  Within a column: sub-issue order, then issue number.\n", style="dim")
 
     heading("Starting a session")
     text.append("  s asks first, then creates a git worktree workspace in herdr on branch issue-<n>\n"
@@ -420,17 +409,14 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  The card then lists the session: ● working, ⚠ needs you, ◌ idle, ✓ done or ○ no agent.\n"
                 "  The prompt depends on the ticket:\n")
     for kind, prompt in [
-        ("wayfinder map", "never started itself: its card (In progress) shows decided / open /\n"
-                          + " " * 22 + "blocked; s starts the map's first frontier ticket (open, unblocked,\n"
-                          + " " * 22 + "unclaimed, not started yet) on that ticket's own card and worktree"),
+        ("wayfinder map", "never started itself: s on the lane's header card starts the map's\n"
+                          + " " * 22 + "first frontier ticket (open, unblocked, unclaimed, not started yet)\n"
+                          + " " * 22 + "on that ticket's own card and worktree"),
         ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs: a\n"
                              + " " * 22 + "wayfinder:research/prototype/grilling/task ticket (or wayfinder::…),\n"
                              + " " * 22 + "on any board; its map is the native parent, else `Part of #<map>`\n"
                              + " " * 22 + "on the body's first line. Without a map it warns and won't start"),
-        ("spec or its ticket", "the wayfinder skill with the map's and the ticket's URLs: the spec a\n"
-                               + " " * 22 + "map led to (`Part of #<map>`) and its implementation tickets (sub-issue\n"
-                               + " " * 22 + "or `## Parent` naming the spec), on any board; they land through a PR"),
-        ("plain issue", "never started: it is not wayfinder work"),
+        ("closed ticket", "never started: it is decided"),
     ]:
         row(kind, 18, prompt)
     text.append("  A wayfinder ticket's card says who it needs: HITL (you at the keyboard) for grilling and\n"
@@ -439,7 +425,7 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
 
     heading("The board only reads")
     text.append("  It never writes to the tracker or the repo, and never removes a worktree. A session\n"
-                "  claims its ticket by assigning it, so the card moves to In progress on the next refresh.")
+                "  claims its ticket by assigning it, so the card moves to Claimed on the next refresh.")
     return text
 
 
@@ -469,11 +455,16 @@ class BoardApp(App):
     #status { height: auto; padding: 0 1; background: $panel; }
     #tabs { height: auto; padding: 0 1; display: none; }
     #tabs.visible { display: block; }
-    #columns { height: 1fr; }
-    .column { width: 1fr; border: round $panel-lighten-2; padding: 0 0; }
-    .column-title { height: 1; padding: 0 1; text-style: bold; }
+    #heads { height: 1; padding: 0 1; }  /* lines up with the cells inside each lane's border */
+    .head { width: 1fr; padding: 0 1; text-style: bold; }
+    #lanes { height: 1fr; }
+    .lane { height: auto; border: round $panel-lighten-2; }
+    .lane-row { height: auto; }
+    .cell { width: 1fr; height: auto; }
     .card { margin: 0 0 1 0; padding: 0 1; border-left: wide $panel-lighten-2; }
+    .map-card { border-left: wide $accent-darken-2; }
     .card:focus { background: $boost; border-left: wide $accent; }
+    #empty { padding: 1 2; color: $text-muted; }
     #filter { dock: bottom; display: none; }
     #filter.visible { display: block; }
     """
@@ -509,7 +500,8 @@ class BoardApp(App):
         super().__init__()
         self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
         self.single = False
-        self.column_index = COLUMN_ORDER.index(Column.READY)
+        self.column_index = COLUMN_ORDER.index(Column.FRONTIER)
+        self.grid: list[tuple[Card, list[list[Card]]]] = []  # per lane: its header and its cells' cards
         self.provider = provider
         self.workbench = workbench
         self.describe_start = describe_start or (lambda ticket: "")
@@ -536,17 +528,16 @@ class BoardApp(App):
         self.last_error: str | None = None
         self.notice: ErrorNotice | None = None  # the tracker error standing since the last good fetch
         self.last_ok: datetime | None = None
-        scope = f"parent #{query.parent}" if query.parent else "all issues"
-        self.sub_title = f"{provider.name}:{provider.repo} · {scope}"
+        named = f" + #{query.named_map}" if query.named_map is not None else ""
+        self.sub_title = f"{provider.name}:{provider.repo} · open maps{named}"
 
     def compose(self) -> ComposeResult:
         yield Static("loading…", id="status")
         yield Static(id="tabs")
-        with Horizontal(id="columns"):
+        with Horizontal(id="heads"):
             for column in COLUMN_ORDER:
-                with Vertical(classes="column", id=f"column-{column.name}"):
-                    yield Static(column.value, classes="column-title", id=f"title-{column.name}")
-                    yield ColumnScroll(id=f"col-{column.name}")
+                yield Static(column.value, classes="head", id=f"head-{column.name}")
+        yield VerticalScroll(id="lanes")
         yield Input(placeholder="filter: words match title, body, author, labels, assignees · esc clears", id="filter")
         yield Footer()
 
@@ -599,7 +590,7 @@ class BoardApp(App):
         try:
             if self.viewer is None:
                 self.viewer = self._viewer()
-            board = build_board(self.provider.fetch(self.board_query), done_days=self.board_query.done_days)
+            board = build_board(self.provider.fetch(self.board_query), self.board_query.named_map)
             self.call_from_thread(self._apply, board, None, sessions, herdr_error)
         except RateLimited as exc:
             explain = getattr(self.provider, "explain", None)  # GitHub can say which limit it was
@@ -630,7 +621,7 @@ class BoardApp(App):
             self._fetch_in_background(tickets)
         changed = False
         if board is not None:
-            changed = board.columns != self.board.columns or self.last_ok is None
+            changed = board.lanes != self.board.lanes or self.last_ok is None
             self.board = board
             self.last_ok = datetime.now()
         if sessions is not None and sessions != self.sessions:
@@ -644,39 +635,55 @@ class BoardApp(App):
             self._render_status()
 
     def _tickets(self) -> list[Ticket]:
-        return [ticket for tickets in self.board.columns.values() for ticket in tickets]
+        return self.board.tickets()
 
     def _board_labels(self) -> set[str]:
-        return {label for tickets in self.board.columns.values() for ticket in tickets for label in ticket.labels}
+        return {label for ticket in self._tickets() for label in ticket.labels}
 
     def _board_authors(self) -> set[str]:
-        return {ticket.author for tickets in self.board.columns.values() for ticket in tickets if ticket.author}
+        return {ticket.author for ticket in self._tickets() if ticket.author}
 
-    def _visible(self, column: Column) -> list[Ticket]:
+    def _visible(self, lane: Lane, column: Column) -> list[Ticket]:
         labels, authors = self._board_labels(), self._board_authors()
-        return [t for t in self.board.columns[column]
+        return [t for t in lane.columns[column]
                 if matches(t, self.needle) and passes_labels(t, self.filters["Labels"], labels)
                 and passes_authors(t, self.filters["Authors"], authors)]
 
     def _render_board(self) -> None:
-        focused_widget = self.query_one("#columns").screen.focused  # the board's, also under the filter picker
+        container = self.query_one("#lanes", VerticalScroll)
+        focused_widget = container.screen.focused  # the board's, also under the filter picker
         focused = focused_widget.ticket.number if isinstance(focused_widget, Card) else None
-        refocus: Card | None = None
-        everything = self._tickets()
+        container.remove_children()
+        self.grid, lanes = [], []
+        for lane in self.board.lanes:
+            header = Card(lane.map, None, render_map(lane, self.sessions.get(lane.map.number, []),
+                                                     lane.map.number in self.starting))
+            cells = [[Card(t, column, render_card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
+                                                  lane.map.title, t.number in lane.out_of_scope))
+                      for t in self._visible(lane, column)] for column in COLUMN_ORDER]
+            self.grid.append((header, cells))
+            if lane.collapsed:
+                lanes.append(Vertical(header, classes="lane"))
+                continue
+            row = [Cell(column, cards) for column, cards in zip(COLUMN_ORDER, cells)]
+            for cell in row:
+                cell.display = self._shown(cell.column)
+            lanes.append(Vertical(header, Horizontal(*row, classes="lane-row"), classes="lane"))
+        if not lanes and self.last_ok:
+            lanes.append(Static(f"No open wayfinder maps in {self.provider.repo}.", id="empty"))
+        container.mount_all(lanes)
         for column in COLUMN_ORDER:
-            tickets = self._visible(column)
-            title = self.query_one(f"#title-{column.name}", Static)
-            title.update(Text(f"{column.value} ({len(tickets)})", style=f"bold {COLUMN_COLORS[column]}"))
-            container = self.query_one(f"#col-{column.name}", VerticalScroll)
-            container.remove_children()
-            cards = [Card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
-                          map_progress(t, everything) if t.is_wayfinder_map else None) for t in tickets]
-            container.mount_all(cards)
-            refocus = refocus or next((c for c in cards if c.ticket.number == focused), None)
+            head = self.query_one(f"#head-{column.name}", Static)
+            head.update(Text(f"{column.value} ({self._visible_count(column)})", style=f"bold {COLUMN_COLORS[column]}"))
+        refocus = next((card for card in self._cards() if card.ticket.number == focused), None)
         if refocus is not None:
             self.call_after_refresh(refocus.focus, scroll_visible=False)
         self._render_status()
         self._render_tabs()
+
+    def _cards(self) -> list[Card]:
+        """Every card in board order: each lane's header, then its cells left to right."""
+        return [card for header, cells in self.grid for card in (header, *(c for cards in cells for c in cards))]
 
     def _tracker_error(self, error: ProviderError | None) -> None:
         """One notification per error episode: when an error appears, or turns into another; a good fetch ends it."""
@@ -690,7 +697,8 @@ class BoardApp(App):
         status = Text(self.sub_title, style="bold")
         if self.last_ok:
             status.append(" · ")
-            status.append(f"updated {self.last_ok:%H:%M:%S} · {self.board.total()} tickets")
+            maps, tickets = len(self.board.lanes), self.board.total() - len(self.board.lanes)
+            status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)} · {tickets} tickets")
             if not self.pacer.limited:
                 status.append(f" · every {self.interval:g}s")
         if self.pacer.limited:
@@ -715,13 +723,18 @@ class BoardApp(App):
 
     def _apply_view(self) -> None:
         single = self.view == "one" or (self.view == "auto" and self.size.width < NARROW_WIDTH)
-        if single and not self.single and isinstance(self.focused, Card):
+        if single and not self.single and isinstance(self.focused, Card) and self.focused.column is not None:
             self.column_index = COLUMN_ORDER.index(self.focused.column)  # keep the selection in view
         self.single = single
-        for i, column in enumerate(COLUMN_ORDER):
-            self.query_one(f"#column-{column.name}").display = not single or i == self.column_index
+        for column in COLUMN_ORDER:
+            self.query_one(f"#head-{column.name}").display = self._shown(column)
+        for cell in self.query(Cell):
+            cell.display = self._shown(cell.column)
         self.query_one("#tabs", Static).set_class(single, "visible")
         self._render_tabs()
+
+    def _shown(self, column: Column) -> bool:
+        return not self.single or column is COLUMN_ORDER[self.column_index]
 
     def _render_tabs(self) -> None:
         tabs = Text("‹ ", style="dim")
@@ -735,59 +748,72 @@ class BoardApp(App):
         self.query_one("#tabs", Static).update(tabs)
 
     def _visible_count(self, column: Column) -> int:
-        return len(self._visible(column))
+        return sum(len(self._visible(lane, column)) for lane in self.board.lanes)
 
     def action_toggle_view(self) -> None:
         self.view = "all" if self.single else "one"
         self._apply_view()
 
     def action_column(self, index: int) -> None:
+        """1–4: that column, its first card on the board selected."""
         self._show_column(index)
+        cards = [card for _, cells in self.grid for card in cells[self.column_index]]
+        if cards:
+            self._select(cards[0])
+        elif self.single and isinstance(self.focused, Card) and self.focused.column is not None:
+            self.set_focus(None)  # its card is hidden now
 
-    def _show_column(self, index: int, row: int = 0) -> None:
+    def _show_column(self, index: int) -> None:
         self.column_index = max(0, min(len(COLUMN_ORDER) - 1, index))
         self._apply_view()
-        cards = self._cards_by_column()[self.column_index]
-        if cards:
-            self._select(cards[min(row, len(cards) - 1)])
-        elif self.single:
-            self.set_focus(None)
 
-    def _cards_by_column(self) -> list[list[Card]]:
-        return [list(self.query_one(f"#col-{c.name}", VerticalScroll).query(Card)) for c in COLUMN_ORDER]
+    def _position(self, card: Card) -> tuple[int, int | None, int] | None:
+        """(lane, column index or None for the lane's header, row) of a card on the board."""
+        for lane, (header, cells) in enumerate(self.grid):
+            if card is header:
+                return lane, None, 0
+            for column, cards in enumerate(cells):
+                if card in cards:
+                    return lane, column, cards.index(card)
+        return None
 
     def action_move(self, dx: int, dy: int) -> None:
-        grid = self._cards_by_column()
-        if self.single:
-            current = grid[self.column_index]
-            focused = isinstance(self.focused, Card) and self.focused in current
-            row = current.index(self.focused) if focused else 0
-            if dx:
-                self._show_column(self.column_index + dx, row)
-            elif current:
-                self._select(current[max(0, min(len(current) - 1, row + dy)) if focused else 0])
+        """Up/down walk each lane's header and then its cards in the current column; left/right change column
+        within the lane."""
+        if not self.grid:
             return
-        if not any(grid):
+        focused = self.focused if isinstance(self.focused, Card) else None
+        position = self._position(focused) if focused is not None else None
+        if position is None:
+            self._select(self.grid[0][0])
             return
-        if not isinstance(self.focused, Card):
-            self._select(next(col for col in grid if col)[0])
-            return
-        col = next(i for i, cards in enumerate(grid) if self.focused in cards)
-        row = grid[col].index(self.focused)
+        lane, column, row = position
         if dy:
-            self._select(grid[col][max(0, min(len(grid[col]) - 1, row + dy))])
+            current = self.column_index if column is None else column
+            path = [card for header, cells in self.grid for card in (header, *cells[current])]
+            self._select(path[max(0, min(len(path) - 1, path.index(focused) + dy))])
             return
-        target = col + dx
-        while 0 <= target < len(grid) and not grid[target]:
+        header, cells = self.grid[lane]
+        if self.single:
+            self._show_column(self.column_index + dx)
+            cards = cells[self.column_index]
+            self._select(cards[min(row, len(cards) - 1)] if cards and column is not None else header)
+            return
+        target = (column if column is not None else (-1 if dx > 0 else len(cells))) + dx
+        while 0 <= target < len(cells) and not cells[target]:
             target += dx
-        if 0 <= target < len(grid):
-            self._select(grid[target][min(row, len(grid[target]) - 1)])
+        if 0 <= target < len(cells):
+            self._select(cells[target][min(row, len(cells[target]) - 1)])
 
     def _select(self, card: Card) -> None:
-        self.column_index = COLUMN_ORDER.index(card.column)
+        if card.column is not None:
+            self.column_index = COLUMN_ORDER.index(card.column)
         self._render_tabs()
         card.focus(scroll_visible=False)
-        card.scroll_visible(animate=False)
+        if card.column is None:  # a header shows its lane from the top, border included
+            self.query_one("#lanes", VerticalScroll).scroll_to_widget(card.parent, animate=False, top=True)
+        else:
+            card.scroll_visible(animate=False)
 
     def action_open(self) -> None:
         if isinstance(self.focused, Card):
@@ -833,18 +859,14 @@ class BoardApp(App):
         if card is None:
             return
         ticket = card.ticket
-        if card.column is Column.DONE:
-            self.notify(f"#{ticket.number} is done", severity="warning")
+        if not ticket.is_open:
+            self.notify(f"#{ticket.number} is closed", severity="warning")
             return
         if ticket.is_wayfinder_map:  # the map is worked through its next frontier ticket, on that ticket's card
             self._start_frontier(ticket)
             return
         if refusal := ticket.start_refusal(self.viewer):
             self.notify(refusal, severity="warning")
-            return
-        if ticket.map_missing:
-            self.notify(f"#{ticket.number} {ticket.map_warning}: link it to its map (sub-issue, or "
-                        "`Part of #<map>` as the body's first line)", severity="warning")
             return
         self._confirm_start(ticket)
 

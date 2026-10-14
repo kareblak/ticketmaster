@@ -1,7 +1,7 @@
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from ticketmaster.model import (Column, Ticket, build_board, classify, decisions_so_far, frontier, map_progress,
-                                parse_blockers, part_of, summarize)
+from ticketmaster.model import (Column, Ticket, build_board, classify, frontier, is_out_of_scope, map_progress,
+                                out_of_scope_refs, parse_blockers, part_of, summarize)
 
 NOW = datetime(2026, 10, 13, 12, tzinfo=timezone.utc)
 
@@ -11,68 +11,33 @@ def ticket(**kw):
     return Ticket(**{**base, **kw})
 
 
-def test_unassigned_unblocked_is_ready():
-    assert classify(ticket(), NOW, 7) is Column.READY
+def test_unassigned_unblocked_is_frontier():
+    assert classify(ticket()) is Column.FRONTIER
 
 
-def test_assigned_is_in_progress():
-    assert classify(ticket(assignees=("me",)), NOW, 7) is Column.IN_PROGRESS
+def test_assigned_is_claimed():
+    assert classify(ticket(assignees=("me",))) is Column.CLAIMED
 
 
 def test_open_blocker_wins_over_assignee():
-    assert classify(ticket(assignees=("me",), open_blockers=2), NOW, 7) is Column.BLOCKED
+    assert classify(ticket(assignees=("me",), open_blockers=2)) is Column.BLOCKED
 
 
-def test_blocked_label_counts_when_provider_has_no_dependencies():
-    assert classify(ticket(labels=("Blocked",), open_blockers=None), NOW, 7) is Column.BLOCKED
+def test_a_blocked_label_no_longer_blocks():
+    assert classify(ticket(labels=("Blocked",), open_blockers=None)) is Column.FRONTIER
 
 
-def test_review_labels_become_tags_in_one_review_column():
-    t = ticket(labels=("review:security", "review::ux", "bug"), open_blockers=1)
-    assert classify(t, NOW, 7) is Column.REVIEW
-    assert t.review_tags == ["security", "ux"]
-    assert t.other_labels == ["bug"]
+def test_every_closed_ticket_is_decided_whatever_its_labels_or_age():
+    old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    for closed in (ticket(is_open=False, closed_at=old), ticket(is_open=False, closed_at=None),
+                   ticket(is_open=False, labels=("wontfix",)), ticket(is_open=False, not_planned=True),
+                   ticket(is_open=False, open_blockers=1, assignees=("bob",))):
+        assert classify(closed) is Column.DECIDED
 
 
-def test_open_change_request_means_review():
-    assert classify(ticket(has_open_change_request=True), NOW, 7) is Column.REVIEW
-
-
-def test_recently_closed_is_done_and_old_closed_hidden():
-    assert classify(ticket(is_open=False, closed_at=NOW - timedelta(days=2)), NOW, 7) is Column.DONE
-    assert classify(ticket(is_open=False, closed_at=NOW - timedelta(days=8)), NOW, 7) is None
-    assert classify(ticket(is_open=False, closed_at=None), NOW, 7) is None
-
-
-def test_closed_wontfix_or_not_planned_is_hidden_from_done():
-    recent = NOW - timedelta(days=2)
-    assert classify(ticket(is_open=False, closed_at=recent, labels=("WontFix",)), NOW, 7) is None
-    assert classify(ticket(is_open=False, closed_at=recent, not_planned=True), NOW, 7) is None
-    assert classify(ticket(is_open=False, closed_at=recent, labels=("bug",)), NOW, 7) is Column.DONE
-
-
-def test_out_of_scope_closed_as_not_planned_stays_in_done():
-    recent = NOW - timedelta(days=2)
-    ruled_out = ticket(is_open=False, closed_at=recent, not_planned=True, labels=("out-of-scope",))
-    assert classify(ruled_out, NOW, 7) is Column.DONE
-    assert classify(ticket(is_open=False, closed_at=recent, labels=("out-of-scope", "wontfix")), NOW, 7) is None
-
-
-def test_an_open_wontfix_ticket_still_shows():
-    assert classify(ticket(labels=("wontfix",)), NOW, 7) is Column.READY
-
-
-def test_board_sorts_by_order_then_number_and_done_newest_first():
-    tickets = [
-        ticket(number=5, order=1),
-        ticket(number=9, order=0),
-        ticket(number=2, order=1),
-        ticket(number=3, is_open=False, closed_at=NOW - timedelta(days=3)),
-        ticket(number=4, is_open=False, closed_at=NOW - timedelta(days=1)),
-    ]
-    board = build_board(tickets, now=NOW)
-    assert [t.number for t in board.columns[Column.READY]] == [9, 2, 5]
-    assert [t.number for t in board.columns[Column.DONE]] == [4, 3]
+def test_review_labels_and_open_change_requests_change_nothing():
+    assert classify(ticket(labels=("review:security",))) is Column.FRONTIER
+    assert classify(ticket(has_open_change_request=True, assignees=("me",))) is Column.CLAIMED
 
 
 def test_summary_prefers_wayfinder_question_section():
@@ -109,10 +74,10 @@ def test_parse_blockers_ignores_none_mentions_and_other_repos():
     assert parse_blockers("") == ()
 
 
-def test_start_refusal_names_blockers_label_and_other_claimant():
+def test_start_refusal_names_blockers_and_other_claimant():
     assert ticket(blocked_by=("#3", "o/x#4"), open_blockers=2).start_refusal("me") == "#1 is blocked by #3, o/x#4"
     assert ticket(open_blockers=1).start_refusal("me") == "#1 is blocked by 1 open issue"
-    assert ticket(labels=("Blocked",)).start_refusal("me") == "#1 has the 'blocked' label"
+    assert ticket(labels=("Blocked",), map_number=9, map_url="u9").start_refusal("me") is None
     assert ticket(assignees=("bob", "eve")).start_refusal("me") == "#1 is claimed by @bob, @eve"
 
 
@@ -177,21 +142,10 @@ def test_a_task_is_hitl_or_afk_by_the_first_of_those_words_in_its_body():
     assert ticket(labels=task, body="the HITLER and AFKs").mode is None
 
 
-def test_wayfinder_tickets_are_decisions_and_never_in_review():
+def test_wayfinder_tickets_are_decisions():
     for labels in (("wayfinder:grilling",), ("wayfinder::task",)):
-        t = ticket(labels=(*labels, "review:ux"), has_open_change_request=True)
-        assert t.is_decision
-        assert classify(t, NOW, 7) is Column.READY
+        assert ticket(labels=labels).is_decision
     assert not ticket(labels=("wayfinder:epic",)).is_decision and not ticket(labels=MAP).is_decision
-    assert classify(ticket(labels=("wayfinder:epic",), has_open_change_request=True), NOW, 7) is Column.REVIEW
-
-
-def test_a_closed_ticket_labelled_out_of_scope_is_out_of_scope():
-    closed = dict(is_open=False, closed_at=NOW)
-    assert ticket(labels=("wayfinder:grilling", "out-of-scope"), **closed).is_out_of_scope
-    assert ticket(labels=("Out-of-Scope",), **closed).is_out_of_scope
-    assert not ticket(labels=("wayfinder:grilling",), **closed).is_out_of_scope
-    assert not ticket(labels=("out-of-scope",)).is_out_of_scope  # still open: not ruled out yet
 
 
 def test_start_refusal_names_a_ticket_that_is_not_wayfinder_work_last():
@@ -216,12 +170,6 @@ def child(number, **kw):
 MAP_TICKET = ticket(number=1, labels=MAP)
 
 
-def test_an_open_map_shows_as_in_progress_not_as_a_ready_ticket():
-    assert classify(MAP_TICKET, NOW, 7) is Column.IN_PROGRESS
-    assert classify(ticket(labels=("wayfinder::map",)), NOW, 7) is Column.IN_PROGRESS
-    assert classify(ticket(labels=MAP + ("review:ux",)), NOW, 7) is Column.REVIEW
-
-
 def test_frontier_is_the_maps_open_unblocked_unclaimed_tickets_in_map_order():
     tickets = [
         MAP_TICKET,
@@ -230,12 +178,12 @@ def test_frontier_is_the_maps_open_unblocked_unclaimed_tickets_in_map_order():
         child(3, open_blockers=1, blocked_by=("#2",)),
         child(4, assignees=("bob",)),
         child(5, order=1),
-        child(7, labels=("blocked",)),
+        child(7, labels=("wayfinder:grilling", "blocked")),  # a label does not block
         ticket(number=8, parent_number=1, parent_url="u1", parent_labels=MAP),  # the spec: no wayfinder type
         child(9, parent_number=10, parent_url="u10"),  # another map's
         child(11, order=1),
     ]
-    assert [t.number for t in frontier(MAP_TICKET, tickets)] == [5, 11, 6]
+    assert [t.number for t in frontier(MAP_TICKET, tickets)] == [7, 5, 11, 6]
 
 
 def test_frontier_skips_tickets_already_being_started():
@@ -248,18 +196,80 @@ def test_frontier_is_empty_without_open_children():
     assert frontier(MAP_TICKET, [MAP_TICKET, child(2, is_open=False)]) == []
 
 
-def test_decisions_so_far_counts_the_maps_decision_bullets():
-    body = ("## Notes\n- a note\n\n## Decisions so far\n\n- Store: Postgres ([#3](u3))\n* Auth: magic links #4\n"
-            "1. Cache: none\n  - nested detail\n\n## Fog\n- unknown\n")
-    assert decisions_so_far(body) == 3
-    assert decisions_so_far("## Decisions-so-far\n_none yet_\n") == 0
-    assert decisions_so_far("") == 0
+def test_map_progress_counts_decided_open_and_blocked_tickets():
+    map_ticket = ticket(number=1, labels=MAP, body="## Out of scope\n\n- #7 ruled out\n")
+    tickets = [map_ticket, child(2), child(3, open_blockers=1), child(4, assignees=("bob",)), child(5, is_open=False),
+               child(6, is_open=False, not_planned=True), child(7, is_open=False), child(8, is_open=False)]
+    assert map_progress(map_ticket, tickets) == (2, 3, 1)  # #6 canceled and #7 ruled out are no decisions
 
 
-def test_map_progress_counts_decisions_open_and_blocked_tickets():
-    map_ticket = ticket(number=1, labels=MAP, body="## Decisions so far\n- one\n- two\n")
-    tickets = [map_ticket, child(2), child(3, open_blockers=1), child(4, assignees=("bob",)), child(5, is_open=False)]
-    assert map_progress(map_ticket, tickets) == (2, 3, 1)
+def test_out_of_scope_refs_are_the_issues_the_maps_out_of_scope_section_links():
+    body = ("## Decisions so far\n- #2\n\n## Out of scope\n\n- Billing (#7)\n- [SSO](https://gh/o/r/issues/8)\n"
+            "- other/repo#9 and https://gh/x/y/issues/10\n\n## Fog\n- #11\n")
+    assert out_of_scope_refs(ticket(number=1, url="https://gh/o/r/issues/1", body=body)) == {7, 8}
+    gitlab = ticket(url="https://gl/g/p/-/issues/1", body="### Out-of-scope:\n* https://gl/g/p/-/issues/4\n")
+    assert out_of_scope_refs(gitlab) == {4}
+    assert out_of_scope_refs(ticket(body="")) == set()
+
+
+def test_a_closed_ticket_is_out_of_scope_when_canceled_or_linked_from_the_maps_section():
+    map_ticket = ticket(number=1, url="https://gh/o/r/issues/1", labels=MAP, body="## Out of scope\n- #3\n")
+    assert is_out_of_scope(child(2, is_open=False, not_planned=True), map_ticket)
+    assert is_out_of_scope(child(3, is_open=False), map_ticket)
+    assert not is_out_of_scope(child(4, is_open=False), map_ticket)
+    assert not is_out_of_scope(child(3), map_ticket)  # still open: not ruled out yet
+    assert not is_out_of_scope(child(5, is_open=False, labels=("wayfinder:grilling", "out-of-scope")), map_ticket)
+
+
+def lanes(board):
+    return {lane.map.number: {c: [t.number for t in ts] for c, ts in lane.columns.items() if ts} for lane in board.lanes}
+
+
+def test_each_open_map_is_a_lane_of_its_decision_tickets_in_the_four_columns():
+    other = ticket(number=20, labels=MAP)
+    tickets = [
+        other, MAP_TICKET,
+        child(2), child(3, open_blockers=1, assignees=("bob",)), child(4, assignees=("bob",)),
+        child(5, is_open=False), child(21, parent_number=20, parent_url="u20"),
+        ticket(number=30),  # not wayfinder work
+        ticket(number=31, map_number=1, map_url="u1"),  # a spec: not a decision ticket
+        ticket(number=32, labels=("wayfinder:task",)),  # its map not found
+    ]
+    board = build_board(tickets)
+    assert [lane.map.number for lane in board.lanes] == [1, 20]
+    assert lanes(board) == {
+        1: {Column.BLOCKED: [3], Column.FRONTIER: [2], Column.CLAIMED: [4], Column.DECIDED: [5]},
+        20: {Column.FRONTIER: [21]},
+    }
+    assert board.total() == 7
+
+
+def test_lane_columns_sort_by_sub_issue_order_then_number_and_decided_keeps_all():
+    old = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    tickets = [MAP_TICKET, child(5, order=1), child(9, order=0), child(2, order=1),
+               child(3, is_open=False, order=2, closed_at=old), child(4, is_open=False, order=1, closed_at=NOW)]
+    lane = build_board(tickets).lanes[0]
+    assert [t.number for t in lane.columns[Column.FRONTIER]] == [9, 2, 5]
+    assert [t.number for t in lane.columns[Column.DECIDED]] == [4, 3]
+    assert lane.columns[Column.FRONTIER] == frontier(MAP_TICKET, tickets)
+
+
+def test_a_closed_map_shows_only_when_named_and_then_as_its_header_alone():
+    closed_map = ticket(number=1, labels=MAP, is_open=False)
+    tickets = [closed_map, child(2), child(3, is_open=False)]
+    assert build_board(tickets).lanes == []
+    lane = build_board(tickets, named_map=1).lanes[0]
+    assert lane.map is closed_map and lane.collapsed
+    assert all(not cards for cards in lane.columns.values())
+    assert lane.progress == (1, 1, 0)
+    assert build_board(tickets, named_map=1).total() == 1
+
+
+def test_lanes_mark_out_of_scope_tickets():
+    map_ticket = ticket(number=1, labels=MAP, body="## Out of scope\n- #3\n")
+    lane = build_board([map_ticket, child(2, is_open=False, not_planned=True), child(3, is_open=False),
+                        child(4, is_open=False)]).lanes[0]
+    assert lane.out_of_scope == {2, 3}
 
 
 def test_frontier_follows_the_trackers_map_order_when_given():
@@ -267,8 +277,7 @@ def test_frontier_follows_the_trackers_map_order_when_given():
     assert [t.number for t in frontier(MAP_TICKET, tickets, order=[7, 5])] == [7, 5, 6]
 
 
-def test_a_ticket_with_a_map_is_no_decision_so_its_pr_puts_it_in_review():
+def test_a_ticket_with_a_map_is_no_decision():
     t = Ticket(number=4, title="Slice", url="u", is_open=True, has_open_change_request=True,
                parent_number=3, map_number=1, map_url="https://gh/1")
     assert not t.is_decision and not t.map_missing
-    assert classify(t, datetime.now(timezone.utc), 7) is Column.REVIEW

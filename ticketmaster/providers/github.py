@@ -1,20 +1,22 @@
 """GitHub via `gh api graphql`: native blockedBy plus `Blocked by:` body lines, sub-issues and closing PRs.
 
-A parent board is the parent's sub-issues and, for a map, the spec that links to it with a
-`Part of #<map>` line (a sub-issue or not) and the spec's implementation tickets: its sub-issues and
-the issues whose `## Parent` section names it. Body links show up as cross-references in the linked
-issue's timeline.
+The board is every open `wayfinder:map` and, per map, its sub-issues in order, the typed tickets that link to
+it only by a `Part of #<map>` line, the spec that links to it that way and the spec's implementation tickets:
+its sub-issues and the issues whose `## Parent` section names it. Body links show up as cross-references in
+the linked issue's timeline.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
-from ..model import Ticket, parse_time
-from . import (IssueStates, NotFound, ProviderError, Query, RateLimited, as_spec, blocker_ref, is_map, is_spec,
+from ..model import Ticket, parse_time, part_of
+from . import (LIMIT, IssueStates, NotFound, ProviderError, Query, RateLimited, as_spec, blocker_ref, is_spec,
                names_parent, resolve_maps, run_cli, run_json, tracker_error, under_spec, with_body_blockers)
+
+MAP_LABEL = "wayfinder:map"
 
 ISSUE_FIELDS = """
   number title url body state stateReason closedAt
@@ -54,6 +56,12 @@ query($owner: String!, $name: String!, $number: Int!, $subs: String, $refs: Stri
 }
 """ % (ISSUE_FIELDS, ISSUE_FIELDS)
 
+NAMED = """
+query($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) { issue(number: $number) { %s } }
+}
+""" % ISSUE_FIELDS
+
 ISSUE = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) { issue(number: $number) { url body labels(first: 30) { nodes { name } } } }
@@ -80,9 +88,17 @@ class GitHubProvider:
         self.states = IssueStates(self._issue_states)
 
     def fetch(self, query: Query) -> list[Ticket]:
-        """The sub-issue parent is the native child→map link; `Part of #<map>` is the fallback."""
-        tickets, parent = self._sub_issues(query) if query.parent is not None else (self._search(query), None)
-        return with_body_blockers(resolve_maps(tickets, self._issue, (parent,) if parent else ()), self.states)
+        """Every open map and its children; the sub-issue parent is the native child→map link, `Part of #<map>`
+        the fallback."""
+        q = f'repo:{self.repo} is:issue is:open label:"{MAP_LABEL}"'
+        maps = [to_ticket(node, order=0, repo=self.repo) for node in self._paginate(SEARCH, {"q": q}, ["search"], LIMIT)]
+        if query.named_map is not None and query.named_map not in {m.number for m in maps}:
+            named = self._named(query.named_map)
+            maps += [named] if named is not None and named.is_wayfinder_map else []
+        tickets = list(maps)
+        for map_ticket in maps:
+            tickets += self._map_family(map_ticket, {t.number for t in tickets})
+        return with_body_blockers(resolve_maps(tickets, self._issue), self.states)
 
     def map_order(self, number: int) -> list[int]:
         """The map's sub-issue numbers in the order set on GitHub; search results carry no such order."""
@@ -129,38 +145,25 @@ class GitHubProvider:
     def _args(self) -> list[str]:
         return ["gh", "api", "graphql", "--hostname", self.host, "-H", "Content-Type: application/json", "--input", "-"]
 
-    def _search(self, query: Query) -> list[Ticket]:
-        since = (datetime.now(timezone.utc) - timedelta(days=query.done_days)).date().isoformat()
-        base = f"repo:{self.repo} is:issue"
-        if query.label:
-            base += f' label:"{query.label}"'
-        searches = [f"{base} is:open", f"{base} is:closed closed:>={since}"]
-        seen: dict[int, Ticket] = {}
-        for q in searches:
-            for node in self._paginate(SEARCH, {"q": q}, ["search"], query.limit):
-                if node and node["number"] not in seen:
-                    seen[node["number"]] = to_ticket(node, order=0, repo=self.repo)
-        return list(seen.values())
-
-    def _sub_issues(self, query: Query) -> tuple[list[Ticket], Ticket]:
-        """The parent's sub-issues in order; for a map, then its spec and the spec's implementation tickets.
-        Also the parent itself, which is not on its own board."""
+    def _map_family(self, map_ticket: Ticket, taken: set[int]) -> list[Ticket]:
+        """The map's sub-issues in order, then the typed tickets and the spec linked by `Part of #<map>`, then the
+        spec's implementation tickets; `order` is that position."""
         tickets: list[Ticket] = []
+        number = map_ticket.number
 
-        def new(nodes: list[dict], links=lambda body: True) -> list[Ticket]:
-            taken = {query.parent} | {t.number for t in tickets}
-            return [to_ticket(node, order=0, repo=self.repo) for node in nodes if node["number"] not in taken and links(node.get("body"))]
+        def new(nodes: list[dict], links=lambda node: True) -> list[Ticket]:
+            seen = taken | {t.number for t in tickets}
+            return [to_ticket(node, order=0, repo=self.repo) for node in nodes if node["number"] not in seen and links(node)]
 
-        found, subs, refs = self._children(query.parent, query.limit)
+        _, subs, refs = self._children(number, LIMIT)
         tickets += new(subs)
-        if is_map(found):
-            tickets += [t for t in new(refs) if is_spec(t, query.parent)]
-            tickets = [as_spec(t, found) if is_spec(t, query.parent) else t for t in tickets]
-            for spec in [t for t in tickets if is_spec(t, query.parent)]:
-                _, subs, refs = self._children(spec.number, query.limit)
-                tickets += under_spec(new(subs), spec)
-                tickets += under_spec(new(refs, lambda body: names_parent(body, spec.number)), spec)
-        return [replace(t, order=index) for index, t in enumerate(tickets[: query.limit])], found
+        tickets += new(refs, lambda node: part_of(node.get("body") or "") == number)
+        tickets = [as_spec(t, map_ticket) if is_spec(t, number) else t for t in tickets]
+        for spec in [t for t in tickets if is_spec(t, number)]:
+            _, subs, refs = self._children(spec.number, LIMIT)
+            tickets += under_spec(new(subs), spec)
+            tickets += under_spec(new(refs, lambda node: names_parent(node.get("body"), spec.number)), spec)
+        return [replace(t, order=index) for index, t in enumerate(tickets[:LIMIT])]
 
     def _children(self, number: int, limit: int) -> tuple[Ticket, list[dict], list[dict]]:
         """The issue (its URL and labels), its sub-issues, and the issues of this repo referring to it."""
@@ -187,6 +190,16 @@ class GitHubProvider:
         labels = tuple(label["name"] for label in issue.get("labels", {}).get("nodes", []))
         parent = Ticket(number=number, title="", url=issue.get("url", ""), is_open=True, labels=labels)
         return parent, found["subIssues"][:limit], list(refs.values())[:limit]
+
+    def _named(self, number: int) -> Ticket | None:
+        """The issue the board was named with, or None when there is no such issue."""
+        owner, name = self.repo.split("/", 1)
+        try:
+            data = self._graphql(NAMED, {"owner": owner, "name": name, "number": number})
+        except NotFound:
+            return None
+        issue = (data.get("repository") or {}).get("issue")
+        return to_ticket(issue, order=0, repo=self.repo) if issue else None
 
     def _issue(self, number: int) -> Ticket | None:
         owner, name = self.repo.split("/", 1)
