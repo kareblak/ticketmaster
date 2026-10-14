@@ -84,43 +84,62 @@ def mentions_parent(body: str, parent: int) -> bool:
     return re.search(rf"(?<![\w&])#{parent}\b", body or "") is not None
 
 
-# A map issue's URL and labels, or None when there is no such issue.
-MapLookup = Callable[[int], tuple[str, tuple[str, ...]] | None]
+# An issue by number (its URL, labels and body), or None when there is no such issue.
+IssueLookup = Callable[[int], Ticket | None]
 
 
-def resolve_maps(tickets: list[Ticket], fetch_map: MapLookup) -> list[Ticket]:
-    """Typed wayfinder tickets without a native map parent take the map their body's `Part of #<map>` names.
+def resolve_maps(tickets: list[Ticket], fetch_issue: IssueLookup, beside: tuple[Ticket, ...] = ()) -> list[Ticket]:
+    """Finds each ticket's map. A typed wayfinder ticket without a native map parent takes the map its body's
+    `Part of #<map>` names; a spec (`Part of #<map>`, no `wayfinder:` label) takes that map, and so does a
+    ticket whose spec it is, by the GitHub sub-issue parent, else the `## Parent` section.
 
-    A map already on the board is used as is; any other is fetched once. A missing issue (fetch_map returns
-    None) leaves the ticket without a map, which the board warns about; any other tracker error surfaces.
+    An issue already on the board, or `beside` it (a parent board's parent), is used as is; any other is
+    fetched at most once. A missing issue (fetch_issue
+    returns None) ends the chain, so a typed ticket stays without a map, which the board warns about, and any
+    other ticket stays plain; any other tracker error surfaces.
     """
-    known = {t.number: (t.url, t.labels) for t in tickets}
+    known: dict[int, Ticket | None] = {t.number: t for t in (*beside, *tickets)}
 
-    def lookup(number: int):
+    def lookup(number: int) -> Ticket | None:
         if number not in known:
-            known[number] = fetch_map(number)
+            known[number] = fetch_issue(number)
         return known[number]
+
+    def spec_map(number: int) -> tuple[int, str] | None:
+        """The map issue #<number> leads to as a spec, or None when it is no spec of a map."""
+        spec = lookup(number)
+        if spec is None or wayfinder_kinds(spec.labels):
+            return None
+        if spec.map_number is not None and spec.map_url:
+            return spec.map_number, spec.map_url
+        map_number = part_of(spec.body)
+        found = lookup(map_number) if map_number not in (None, number) else None
+        return (map_number, found.url) if is_map(found) else None
 
     resolved = []
     for ticket in tickets:
-        number = part_of(ticket.body) if ticket.map_missing else None
-        found = lookup(number) if number is not None and number != ticket.number else None
-        if found:
-            ticket = with_map(ticket, number, found)
+        if ticket.map_missing:
+            number = part_of(ticket.body)
+            found = lookup(number) if number not in (None, ticket.number) else None
+            if found:
+                ticket = with_map(ticket, found)
+        elif ticket.map_url is None and ticket.wayfinder_type is None and not ticket.is_wayfinder_map:
+            spec = ticket.parent_number or parent_ref(ticket.body)
+            if found := spec_map(ticket.number) or (spec_map(spec) if spec not in (None, ticket.number) else None):
+                ticket = replace(ticket, map_number=found[0], map_url=found[1])
         resolved.append(ticket)
     return resolved
 
 
-def with_map(ticket: Ticket, number: int, found: tuple[str, tuple[str, ...]]) -> Ticket:
-    url, labels = found
-    return replace(ticket, parent_number=number, parent_url=url, parent_labels=labels)
+def with_map(ticket: Ticket, parent: Ticket) -> Ticket:
+    return replace(ticket, parent_number=parent.number, parent_url=parent.url, parent_labels=parent.labels)
 
 
-def on_map_board(tickets: list[Ticket], number: int, found: tuple[str, tuple[str, ...]] | None) -> list[Ticket]:
+def on_map_board(tickets: list[Ticket], found: Ticket | None) -> list[Ticket]:
     """A map board's map is each ticket's parent, unless its `Part of #<map>` line names another map."""
     if not found:
         return tickets
-    return [with_map(t, number, found) if part_of(t.body) in (None, number) else t for t in tickets]
+    return [with_map(t, found) if part_of(t.body) in (None, found.number) else t for t in tickets]
 
 
 class IssueStates:
@@ -171,6 +190,7 @@ def blocker_ref(number: int, repo: str, own_repo: str) -> str:
 # How a map's spec and the spec's implementation tickets link back (`ticketmaster setup` pins them): the
 # spec's first line is `Part of #<map>`, an implementation ticket's `## Parent` section names the spec.
 _PARENT_SECTION = re.compile(r"^##\s*Parent\s*$(?P<text>.*?)(?=^#{1,2}\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
+_PARENT_REF = re.compile(r"(?<![\w&])#(?P<hash>\d+)\b|/issues/(?P<url>\d+)\b")
 
 
 def names_parent(body: str, parent: int) -> bool:
@@ -182,8 +202,15 @@ def names_parent(body: str, parent: int) -> bool:
     return mentions_parent(text, parent) or re.search(rf"/issues/{parent}\b", text) is not None
 
 
-def is_map(found: tuple[str, tuple[str, ...]] | None) -> bool:
-    return bool(found) and "map" in wayfinder_kinds(found[1])
+def parent_ref(body: str) -> int | None:
+    """The issue the body's `## Parent` section names first, as `#<n>` or by its issue URL."""
+    match = _PARENT_SECTION.search(body or "")
+    ref = _PARENT_REF.search(match.group("text")) if match else None
+    return int(ref.group("hash") or ref.group("url")) if ref else None
+
+
+def is_map(found: Ticket | None) -> bool:
+    return found is not None and found.is_wayfinder_map
 
 
 def is_spec(ticket: Ticket, map_number: int) -> bool:
@@ -191,19 +218,26 @@ def is_spec(ticket: Ticket, map_number: int) -> bool:
     return part_of(ticket.body) == map_number and not wayfinder_kinds(ticket.labels)
 
 
+def as_spec(ticket: Ticket, map_ticket: Ticket) -> Ticket:
+    """The map is the spec's parent, and the map its session starts wayfinder on."""
+    return replace(with_map(ticket, map_ticket), map_number=map_ticket.number, map_url=map_ticket.url)
+
+
 def under_spec(tickets: list[Ticket], spec: Ticket) -> list[Ticket]:
-    return [with_map(t, spec.number, (spec.url, spec.labels)) for t in tickets]
+    """The spec is each ticket's parent; the spec's map is the one their sessions start wayfinder on."""
+    return [replace(with_map(t, spec), map_number=spec.map_number, map_url=spec.map_url) for t in tickets]
 
 
-def map_family(tickets: list[Ticket], number: int, found: tuple[str, tuple[str, ...]] | None) -> list[Ticket]:
+def map_family(tickets: list[Ticket], number: int, found: Ticket | None) -> list[Ticket]:
     """For trackers without sub-issues: the parent's children (they mention `#<parent>`) and, when the
-    parent is a map, the implementation tickets of its spec (`## Parent` names the spec), parented to it."""
+    parent is a map, the spec and its implementation tickets (`## Parent` names the spec), parented to it."""
     children = [t for t in tickets if t.number != number and mentions_parent(t.body, number)]
-    family = on_map_board(children, number, found)
+    family = on_map_board(children, found)
     if not is_map(found):
         return family
+    family = [as_spec(t, found) if is_spec(t, number) else t for t in family]
     taken = {number} | {t.number for t in children}
-    for spec in [t for t in children if is_spec(t, number)]:
+    for spec in [t for t in family if is_spec(t, number)]:
         linked = [t for t in tickets if t.number not in taken and names_parent(t.body, spec.number)]
         taken |= {t.number for t in linked}
         family += under_spec(linked, spec)

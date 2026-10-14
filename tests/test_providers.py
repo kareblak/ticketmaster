@@ -366,7 +366,8 @@ def test_resolve_maps_follows_part_of_to_a_map_in_the_board_or_fetched_once():
 
     def fetch_map(number):
         fetched.append(number)
-        return {9: ("https://x/9", MAP_LABELS), 8: ("https://x/8", ("epic",))}.get(number)
+        labels = {9: MAP_LABELS, 8: ("epic",)}.get(number)
+        return Ticket(number=number, title="", url=f"https://x/{number}", is_open=True, labels=labels) if labels else None
 
     tickets = [
         Ticket(number=1, title="map", url="https://x/1", is_open=True, labels=MAP_LABELS),
@@ -405,10 +406,10 @@ def test_github_missing_map_issue_is_no_map_but_other_errors_surface(monkeypatch
     answer = {}
     monkeypatch.setattr(github, "run_json", lambda args, stdin=None: answer)
     answer.update(errors=[{"type": "NOT_FOUND", "message": "Could not resolve to an Issue with the number of 9."}])
-    assert github.GitHubProvider("o/r")._map(9) is None
+    assert github.GitHubProvider("o/r")._issue(9) is None
     answer.update(errors=[{"type": "FORBIDDEN", "message": "Resource not accessible"}])
     with pytest.raises(ProviderError):
-        github.GitHubProvider("o/r")._map(9)
+        github.GitHubProvider("o/r")._issue(9)
 
 
 def test_gitea_missing_map_issue_is_no_map_but_other_errors_surface(monkeypatch):
@@ -417,9 +418,9 @@ def test_gitea_missing_map_issue_is_no_map_but_other_errors_surface(monkeypatch)
 
     monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
     provider = gitea.GiteaProvider("o/r", "codeberg.org", token="x")
-    assert provider._map(9) is None
+    assert provider._issue(9) is None
     with pytest.raises(ProviderError):
-        provider._map(8)
+        provider._issue(8)
 
 
 def github_node(number, labels, body="", parent=None):
@@ -658,6 +659,10 @@ def assert_map_family(tickets, map_url, spec_url):
         assert by_number[n].parent_labels == ("ready-for-agent",)
     assert by_number[2].is_wayfinder_ticket and not by_number[3].is_wayfinder_ticket
     assert not by_number[4].is_wayfinder_ticket
+    # The spec and its tickets start wayfinder on the map; the decision ticket finds it through its parent.
+    for n in (3, 4, 5):
+        assert (by_number[n].map_number, by_number[n].map_url) == (1, map_url)
+    assert by_number[2].map_url is None
 
 
 def test_gitlab_map_board_includes_the_spec_and_its_implementation_tickets(monkeypatch):
@@ -766,3 +771,121 @@ def test_github_map_order_is_the_maps_sub_issue_order(monkeypatch):
     monkeypatch.setattr(github, "run_json", fake_run_json)
     assert github.GitHubProvider("o/r").map_order(1) == [9, 4, 6]
     assert [c["number"] for c in calls] == [1, 1] and calls[1]["after"] == "c1"
+
+
+def test_parent_ref_is_the_first_issue_the_parent_section_names():
+    assert providers.parent_ref("## Parent\n\n#8, see also #9\n\n## What to build\n\n#7") == 8
+    assert providers.parent_ref("## Parent\n\nhttps://gl/g/p/-/issues/12\n") == 12
+    assert providers.parent_ref("Part of #8\n\n## Problem") is None
+    assert providers.parent_ref("## Parent\n\nnone yet\n") is None
+
+
+def issue(number, labels=(), body="", parent=None):
+    from ticketmaster.model import Ticket
+
+    return Ticket(number=number, title="", url=f"https://x/{number}", is_open=True, labels=tuple(labels), body=body,
+                  parent_number=parent)
+
+
+def test_resolve_maps_follows_ticket_to_spec_to_map_fetching_each_issue_once():
+    # Off the board: the map (#1), a spec (#3), an epic (#20), a spec of an epic (#21) and a spec of a typed ticket (#22).
+    off_board = {1: issue(1, MAP_LABELS), 3: issue(3, body="Part of #1\n\n## Problem"),
+                 20: issue(20, ("epic",)), 21: issue(21, body="Part of #20"),
+                 22: issue(22, ("wayfinder:task",), "Part of #1")}
+    fetched = []
+
+    def fetch_issue(number):
+        fetched.append(number)
+        return off_board.get(number)
+
+    tickets = [
+        issue(4, body="## Parent\n\n#3\n"),  # implementation ticket, spec off the board
+        issue(5, parent=3),  # GitHub sub-issue of the spec
+        issue(6, body="Part of #1\n\n## Problem"),  # a spec on the board
+        issue(7, body="## Parent\n\n#6\n"),  # its implementation ticket
+        issue(8, body="## Parent\n\n#21\n"),  # spec of an epic: no map
+        issue(9, body="## Parent\n\n#404\n"),  # spec gone
+        issue(10, body="## Parent\n\n#22\n"),  # parent is a typed ticket, not a spec
+        issue(11),  # plain
+        issue(12, body="## Parent\n\n#3\n", parent=6),  # the sub-issue parent wins over ## Parent
+    ]
+    resolved = {t.number: t for t in providers.resolve_maps(tickets, fetch_issue)}
+    for n in (4, 5, 6, 7, 12):
+        assert (resolved[n].map_number, resolved[n].map_url) == (1, "https://x/1"), n
+    for n in (8, 9, 10, 11):
+        assert resolved[n].map_url is None and not resolved[n].map_missing, n
+    assert resolved[4].parent_number is None and resolved[5].parent_number == 3  # the parent stays as it was
+    assert sorted(fetched) == [1, 3, 20, 21, 22, 404]  # each chain issue off the board fetched once
+
+
+@pytest.mark.parametrize("query", [Query(), Query(label="ready-for-agent")])
+def test_github_whole_repo_and_label_boards_find_the_map_through_the_spec(monkeypatch, query):
+    asked = []
+
+    def fake_run_json(args, stdin=None):
+        variables = json.loads(stdin)["variables"]
+        if "number" in variables:
+            asked.append(variables["number"])
+            issue = {3: {"url": "https://gh/3", "body": "Part of #1\n\n## Problem", "labels": {"nodes": []}},
+                     1: {"url": "https://gh/1", "body": "Notes", "labels": {"nodes": [{"name": "wayfinder:map"}]}}}
+            return {"data": {"repository": {"issue": issue[variables["number"]]}}}
+        spec = {"number": 3, "url": "https://gh/3", "labels": {"nodes": []}}
+        nodes = [github_node(4, ["ready-for-agent"], parent=spec),
+                 github_node(5, ["ready-for-agent"], "## Parent\n\n#3\n"),
+                 github_node(6, ["ready-for-agent"])]
+        nodes = nodes if "is:open" in variables["q"] else []
+        return {"data": {"search": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}
+
+    monkeypatch.setattr(github, "run_json", fake_run_json)
+    tickets = {t.number: t for t in github.GitHubProvider("o/r").fetch(query)}
+    assert [(tickets[n].map_number, tickets[n].map_url) for n in (4, 5)] == [(1, "https://gh/1")] * 2
+    assert tickets[4].parent_number == 3 and tickets[6].map_url is None
+    assert sorted(asked) == [1, 3]
+
+
+@pytest.mark.parametrize("query", [Query(), Query(label="ready-for-agent")])
+def test_gitlab_whole_repo_and_label_boards_find_the_map_through_the_spec(monkeypatch, query):
+    asked = []
+
+    def fake_run_json(args, stdin=None):
+        variables = json.loads(stdin)["variables"]
+        if "iid" in variables:
+            asked.append(variables["iid"])
+            issue = {"1": {"webUrl": "https://gl/1", "description": "Notes",
+                           "labels": {"nodes": [{"title": "wayfinder::map"}]}}}.get(variables["iid"])
+            return {"data": {"project": {"issue": issue}}}
+        nodes = [gitlab_node(3, ["ready-for-agent"], "Part of #1\n\n## Problem"),
+                 gitlab_node(4, ["ready-for-agent"], "## Parent\n\n#3\n"),
+                 gitlab_node(5, ["ready-for-agent"], "## Parent\n\nhttps://gl/g/p/-/issues/3\n"),
+                 gitlab_node(6, ["ready-for-agent"], "## Parent\n\n#9\n")]
+        nodes = nodes if variables["state"] == "opened" else []
+        return {"data": {"project": {"issues": {"pageInfo": {"hasNextPage": False}, "nodes": nodes}}}}
+
+    monkeypatch.setattr(gitlab, "run_json", fake_run_json)
+    tickets = {t.number: t for t in gitlab.GitLabProvider("g/p").fetch(query)}
+    assert [(tickets[n].map_number, tickets[n].map_url) for n in (3, 4, 5)] == [(1, "https://gl/1")] * 3
+    assert tickets[6].map_url is None and not tickets[6].map_missing
+    assert sorted(asked) == ["1", "9"]
+
+
+@pytest.mark.parametrize("query", [Query(), Query(label="ready-for-agent")])
+def test_gitea_whole_repo_and_label_boards_find_the_map_through_the_spec(monkeypatch, query):
+    asked = []
+
+    def fake_get(self, path, params=None):
+        if path.endswith("/issues"):
+            return [gitea_issue(4, ["ready-for-agent"], "## Parent\n\n#3\n"),
+                    gitea_issue(5, ["ready-for-agent"], "## Parent\n\n#3\n")] if params["state"] == "open" else []
+        if path.endswith("/dependencies") or path.endswith("/pulls"):
+            return []
+        asked.append(path.rsplit("/", 1)[-1])
+        if path.endswith("/issues/3"):
+            return gitea_issue(3, [], "Part of #1\n\n## Problem")
+        if path.endswith("/issues/1"):
+            return gitea_issue(1, ["wayfinder:map"])
+        return []
+
+    monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
+    tickets = {t.number: t for t in gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(query)}
+    assert [(tickets[n].map_number, tickets[n].map_url) for n in (4, 5)] == [(1, "https://gt/1")] * 2
+    assert sorted(asked) == ["1", "3"]

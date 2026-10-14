@@ -266,3 +266,10 @@ def test_map_progress_counts_decisions_open_and_blocked_tickets():
 def test_frontier_follows_the_trackers_map_order_when_given():
     tickets = [MAP_TICKET, child(5, order=1), child(6, order=2), child(7, order=3)]
     assert [t.number for t in frontier(MAP_TICKET, tickets, order=[7, 5])] == [7, 5, 6]
+
+
+def test_a_ticket_with_a_map_is_no_decision_so_its_pr_puts_it_in_review():
+    t = Ticket(number=4, title="Slice", url="u", is_open=True, has_open_change_request=True,
+               parent_number=3, map_number=1, map_url="https://gh/1")
+    assert not t.is_decision and not t.map_missing
+    assert classify(t, datetime.now(timezone.utc), 7) is Column.REVIEW

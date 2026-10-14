@@ -874,6 +874,19 @@ def test_help_mentions_the_skills_setup():
     run(scenario())
 
 
+def test_help_says_a_maps_spec_and_its_tickets_start_wayfinder():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            text = " ".join(app.screen.text.plain.split())
+            assert "spec or its ticket the wayfinder skill with the map's and the ticket's URLs" in text
+
+    run(scenario())
+
+
 AUTHORED = [
     Ticket(number=1, title="Login bug", url="u1", is_open=True, labels=("bug",), author="alice"),
     Ticket(number=2, title="Dark mode", url="u2", is_open=True, labels=("ux",), author="bob"),

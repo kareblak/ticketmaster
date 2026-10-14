@@ -29,10 +29,11 @@ native link, never a `Blocked by:` body line. %s
 ENGLISH = f"""The keywords `Part of` and `## Parent` and the `{OUT_OF_SCOPE_LABEL}` label are
 always English, even when the rest of the issue is written in another language."""
 
-SPEC = """- **Spec → map**: once the map is resolved, its destination becomes a spec (`/to-spec`): an issue with no `wayfinder:` label whose first line is `Part of #<map>`. The board shows it, and its implementation tickets, beside the map's decision tickets.
+SPEC = """- **Spec → map**: once the map is resolved, its destination becomes a spec (`/to-spec`): an issue with no `wayfinder:` label whose first line is `Part of #<map>`. The board shows it, and its implementation tickets, beside the map's decision tickets, and starts the spec and its implementation tickets with `/wayfinder <map> <ticket>`; they still land through a PR.
 """
 
-PARENT = "its `## Parent` section names `#<spec>`, and it has no `wayfinder:` label, so the board starts it with the implement skill"
+PARENT = ("its `## Parent` section names `#<spec>`, and it has no `wayfinder:` label, so the board starts it like the spec, "
+          "with wayfinder on the map")
 
 GITHUB = PREAMBLE % ENGLISH + f"""
 - **Map**: a single issue labelled `wayfinder:map`, holding the Notes / Decisions-so-far / Fog body. `gh issue create --label wayfinder:map`.
