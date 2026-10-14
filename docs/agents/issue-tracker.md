@@ -29,8 +29,8 @@ A pull request links to its Linear issue when its title starts with the issue ke
 `Closes TM-12`; merging it closes the issue. The branch is the issue's `gitBranchName` (from `get_issue`, e.g.
 `kaareblakstad/tm-12-short-title`), so the branch links it too. A worktree made with `EnterWorktree` starts on
 `worktree-<name>`, which Linear does not match: rename it before the first push with `git branch -m <gitBranchName>`.
-Once the PR is open, `get_issue` shows it under the issue's `attachments`; if it does not, the PR is not linked, and
-merging it will not close the issue.
+The link shows on the issue in Linear's UI, but not in the MCP's `attachments`, so do not judge it from there. Once the
+PR merges, `get_issue` must show the issue Done; if it does not, set `state: "Done"` with `save_issue`.
 
 ## When a skill says "publish to the issue tracker"
 
