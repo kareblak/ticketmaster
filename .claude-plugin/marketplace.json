@@ -1,0 +1,17 @@
+{
+  "name": "kareblak",
+  "owner": {
+    "name": "Kåre Blakstad",
+    "url": "https://github.com/kareblak"
+  },
+  "description": "Kåre Blakstad's Claude Code plugins.",
+  "plugins": [
+    {
+      "name": "ticketmaster",
+      "source": "./",
+      "description": "A live, read-only herdr board of wayfinder maps and tickets that jumps to and starts /wayfinder sessions.",
+      "category": "productivity",
+      "keywords": ["herdr", "wayfinder", "kanban", "issues", "worktrees"]
+    }
+  ]
+}

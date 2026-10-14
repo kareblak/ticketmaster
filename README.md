@@ -1,7 +1,7 @@
 # ticketmaster
 
 A live, read-only kanban board of issue-tracker work for [herdr](https://herdr.dev), packaged as a
-Claude Code skill. Run `/ticketmaster` in a Claude session inside herdr and the board opens in a
+Claude Code plugin. Run `/ticketmaster` in a Claude session inside herdr and the board opens in a
 pane beside it. `s` starts `/wayfinder` for a ticket in its own git worktree, opened as a herdr
 workspace with Claude running in it as a herdr agent, and each card shows what that agent is
 doing. It refreshes every 5 seconds. The board never writes to the tracker or the repo, and never
@@ -15,27 +15,38 @@ removes a worktree.
 
 ## Install
 
-Needs [herdr](https://herdr.dev), Python 3.11+, [pipx](https://pipx.pypa.io)
-(`brew install pipx`), Claude Code, and the CLI for your tracker (`gh`, `glab`, or a `tea` login
-for Gitea/Forgejo). On each machine:
+Needs [herdr](https://herdr.dev), Python 3.11+ as `python3`, Claude Code, and the CLI for your
+tracker (`gh`, `glab`, or a `tea` login for Gitea/Forgejo). In Claude Code:
 
-```bash
-pipx install git+https://github.com/kareblak/ticketmaster.git
-mkdir -p ~/.claude/skills/ticketmaster
-curl -fsSL https://raw.githubusercontent.com/kareblak/ticketmaster/main/ticketmaster/skill/SKILL.md \
-  -o ~/.claude/skills/ticketmaster/SKILL.md
+```
+/plugin marketplace add kareblak/ticketmaster
+/plugin install ticketmaster@kareblak
 ```
 
-The first command puts `ticketmaster` on your PATH (`~/.local/bin`). The others put the skill in
-`~/.claude/skills/ticketmaster/SKILL.md`, so `/ticketmaster` works in every Claude Code session
-started afterwards, in any repo. Nothing is installed per project: the board reads the repo it is
-started in. `ticketmaster --version` prints the version.
+This repo is the `kareblak` marketplace, and `ticketmaster` its plugin. The plugin brings the
+`/ticketmaster` skill (`/ticketmaster:ticketmaster` if another skill has the same name) and the
+`ticketmaster` command, which plugin `bin/` puts on PATH for Claude's Bash tool only. Nothing is
+installed per project: the board reads the repo it is started in.
 
-To upgrade, run the same commands again with `pipx install --force`. Uninstall with
-`pipx uninstall ticketmaster && rm -r ~/.claude/skills/ticketmaster`.
+The command is a wrapper, `bin/ticketmaster`. On its first run it builds a venv from the plugin's own
+source in the plugin's data dir (`~/.claude/plugins/data/ticketmaster-kareblak/venv`) with
+`python3 -m venv` and pip, which takes a minute; later runs reuse it, and a new version rebuilds it.
+The herdr board pane runs the wrapper by its absolute path, since plugin `bin/` is not on the pane's
+PATH. If the build fails, the wrapper says why and exits 3; fix it (usually an older `python3`) and run
+`/ticketmaster` again.
 
-For development, clone the repo and run `./install.sh`. It installs the clone as an editable
-pipx app (code changes apply without reinstalling) and links the skill to the clone.
+Update with `/plugin update ticketmaster`; there is no other update path. Uninstall with
+`/plugin uninstall ticketmaster`.
+
+For development, load your clone instead of the installed plugin:
+
+```bash
+claude --plugin-dir ~/code/ticketmaster
+```
+
+A clone (it has `.git`) is installed editable, in `~/.claude/plugins/data/ticketmaster-inline/venv`,
+so code changes apply on the next `/ticketmaster` without rebuilding. Changing `__version__` (and
+`version` in `.claude-plugin/plugin.json`, which must match) rebuilds it, e.g. after a dependency change.
 
 ## Usage
 
@@ -252,6 +263,9 @@ Forgejo say when a 429 lifts when the response's `Retry-After`, `X-RateLimit-Res
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
 .venv/bin/python -m pytest
+claude plugin validate .
 ```
 
-`tests/test_board.py` drives the Textual app headlessly with a fake provider.
+`tests/test_board.py` drives the Textual app headlessly with a fake provider, and
+`tests/test_wrapper.py` runs `bin/ticketmaster` against a fake `python3`. Try the plugin itself with
+`claude --plugin-dir .` (see [Install](#install)).

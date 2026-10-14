@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# The plugin's entry point. Runs the ticketmaster CLI from a venv in the plugin's data dir, built from this plugin's own
+# source on first run and rebuilt when the version, the source path or the install mode changes. A git clone loaded
+# with `claude --plugin-dir <clone>` is installed editable, so the working copy runs as edited.
+set -euo pipefail
+self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+root="$(dirname "$(dirname "$self")")"
+if [ -e "$root/.git" ]; then mode=editable id=ticketmaster-inline; else mode=copy id=ticketmaster-kareblak; fi
+# Claude exports CLAUDE_PLUGIN_DATA to hooks and MCP servers, not to Bash tool commands, so mostly this is Claude's
+# own data dir for the plugin, named the same way.
+data="${CLAUDE_PLUGIN_DATA:-$HOME/.claude/plugins/data/$id}"
+venv="$data/venv"
+lock="$data/venv.lock"
+
+fail() {
+  echo "ticketmaster: building the plugin venv in $venv failed: $1" >&2
+  exit 3
+}
+
+version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$root/ticketmaster/__init__.py")"
+[ -n "$version" ] || fail "no __version__ = \"x.y.z\" line in $root/ticketmaster/__init__.py"
+want="$version $mode $root"
+current() { [ "$(cat "$venv/.ticketmaster" 2>/dev/null)" = "$want" ]; }
+
+if ! current; then
+  # One build at a time: a second run waits for the first, then finds the venv current.
+  mkdir -p "$data"
+  locked=""
+  for _ in $(seq 600); do mkdir "$lock" 2>/dev/null && locked=1 && break; sleep 0.5; done
+  [ -n "$locked" ] || fail "another build has held $lock for 5 minutes; remove it if no build is running"
+  trap 'rmdir "$lock" 2>/dev/null' EXIT
+  if ! current; then
+    command -v python3 >/dev/null || fail "python3 not found; install Python 3.11 or newer"
+    python3 -c 'import sys; sys.exit(sys.version_info < (3, 11))' || fail "python3 is older than 3.11; install Python 3.11 or newer"
+    echo "ticketmaster: building its venv in $venv (first run or new version)" >&2
+    rm -rf "$venv"
+    python3 -m venv "$venv" >&2 || fail "python3 -m venv"
+    if [ "$mode" = editable ]; then source=(-e "$root"); else source=("$root"); fi
+    "$venv/bin/python" -m pip install --quiet --disable-pip-version-check "${source[@]}" >&2 || fail "pip install (see above)"
+    printf '%s\n' "$want" >"$venv/.ticketmaster"
+  fi
+  rmdir "$lock"
+  trap - EXIT
+fi
+
+# A herdr board pane does not have plugin bin/ on PATH or the plugin's env, so `open` launches it with these.
+export CLAUDE_PLUGIN_DATA="$data" TICKETMASTER_WRAPPER="$self"
+exec "$venv/bin/python" -m ticketmaster "$@"

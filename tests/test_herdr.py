@@ -90,6 +90,22 @@ def test_open_board_splits_and_labels_a_new_pane():
     assert run == ["pane", "run", "w1:p2", "TICKETMASTER_BOARD=1 tm open 680"]
 
 
+def test_the_board_pane_runs_the_plugin_wrapper_by_its_absolute_path():
+    """Plugin `bin/` is on PATH only for Claude's Bash tool, so the pane gets the wrapper's path and data dir."""
+    env = {"TICKETMASTER_WRAPPER": "/plugins/tm 0.3/bin/ticketmaster", "CLAUDE_PLUGIN_DATA": "/data/ticketmaster-kareblak"}
+    fake = FakeHerdr({("pane", "list"): {"panes": [pane("w1:p1")]}, ("pane", "split"): {"pane": {"pane_id": "w1:p2"}}})
+    Herdr(fake).open_board(REPO, herdr.open_command(["680", "--interval", "5"], env), caller="w1:p1")
+    assert fake.first("pane", "run") == [
+        "pane", "run", "w1:p2",
+        "TICKETMASTER_BOARD=1 CLAUDE_PLUGIN_DATA=/data/ticketmaster-kareblak '/plugins/tm 0.3/bin/ticketmaster' open 680 --interval 5",
+    ]
+
+
+def test_outside_the_plugin_the_board_pane_reruns_this_interpreter(monkeypatch):
+    monkeypatch.setattr(herdr.sys, "executable", "/venv/bin/python")
+    assert herdr.open_command(["680"], {}) == "/venv/bin/python -m ticketmaster open 680"
+
+
 def test_open_board_splits_off_the_env_pane_of_this_claude_session():
     fake = FakeHerdr({
         ("pane", "list"): {"panes": [pane("w1:p1", focused=True), pane("wN:p1", cwd="/elsewhere", session="me")]},
