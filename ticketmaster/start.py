@@ -33,7 +33,7 @@ def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMM
         raise MapNotFound(f"#{ticket.number} {ticket.map_warning}")
     if ticket.map_url:
         return f"{wayfinder_command} {ticket.map_url} {ticket.url}"
-    raise NotWayfinderWork(f"#{ticket.number} is not wayfinder work: the board only starts /wayfinder")
+    raise NotWayfinderWork(ticket.not_wayfinder_work)
 
 
 def worktree_name(ticket: Ticket) -> str:

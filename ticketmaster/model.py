@@ -29,7 +29,7 @@ WAYFINDER_TYPES = ("research", "prototype", "grilling", "task")
 WAYFINDER_LABEL = re.compile(r"^wayfinder::?(?P<kind>[^:].*)$", re.IGNORECASE)
 # The child→map rule for trackers without a native link: the body's first line is `Part of #<map>`.
 PART_OF = re.compile(r"^Part of #(?P<map>\d+)\.?$")
-OUT_OF_SCOPE_LABEL = "out-of-scope"  # always English
+OUT_OF_SCOPE_LABEL = "out-of-scope"  # wayfinder's out-of-scope label, always English
 # HITL: worked with a human; AFK: the agent alone. A task says which in its body.
 TYPE_MODES = {"grilling": "HITL", "prototype": "HITL", "research": "AFK"}
 _MODE_WORD = re.compile(r"\b(HITL|AFK)\b")  # the acronyms, not "afk" in prose
@@ -95,8 +95,12 @@ class Ticket:
         if viewer and self.assignees and viewer.lower() not in (a.lower() for a in self.assignees):
             return f"#{self.number} is claimed by {', '.join('@' + a for a in self.assignees)}"
         if not (self.is_wayfinder_work or self.map_missing):  # a typed ticket without its map is warned about apart
-            return f"#{self.number} is not wayfinder work: the board only starts /wayfinder"
+            return self.not_wayfinder_work
         return None
+
+    @property
+    def not_wayfinder_work(self) -> str:
+        return f"#{self.number} is not wayfinder work: the board only starts /wayfinder"
 
     @property
     def is_wayfinder_work(self) -> bool:
