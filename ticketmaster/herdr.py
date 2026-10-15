@@ -1,7 +1,8 @@
 """Herdr (herdr.dev): the board lives in a herdr pane, and every ticket session in a worktree workspace.
 
-Starting a ticket always creates a new git worktree (`herdr worktree create`) with Claude started in it
-as a named herdr agent. The board finds every session working a ticket, including ones it did not start:
+Starting a decision ticket always creates a new git worktree (`herdr worktree create`) with Claude started in
+it as a named herdr agent; an implementation ticket gets its own worktree once, reopened with `claude --continue`
+after that. The board finds every session working a ticket, including ones it did not start:
 a worktree named after the ticket (`issue-<n>`/`tm-<n>`, from herdr or `claude -w`), or an agent in the
 repo whose terminal title starts with the ticket's key. It shows each agent's state and jumps to it, but
 never starts or resumes Claude there, and never removes or adopts a worktree.
@@ -230,6 +231,35 @@ class Herdr:
         note = self.start_claude(result["root_pane"]["pane_id"], branch, claude, claude_args)
         return f"new worktree {branch}{note}"
 
+    def start_in_worktree(self, cwd: Path, name: str, branch: str, label: str, claude_args: list[str],
+                          continue_args: list[str], claude: str = "claude") -> str:
+        """Claude in the ticket's own worktree, never a `-2` copy: an existing one (by its name or branch) is
+        reopened with `continue_args`, else one is created on `branch` and gets `claude_args`. Neither takes
+        focus. A worktree whose branch is not its name gets the name as its directory, so it is still found."""
+        existing = next((w for w in self.worktrees(cwd)
+                         if Path(w["path"]).name in (name, f"worktree-{name}") or w.get("branch") == branch), None)
+        if existing is not None:
+            pane = self.idle_pane(existing.get("open_workspace_id")) or \
+                self.call("worktree", "open", "--cwd", str(cwd), "--path", existing["path"], "--label", label,
+                          "--no-focus")["root_pane"]["pane_id"]
+            note = self.start_claude(pane, name, claude, continue_args)
+            return f"worktree {Path(existing['path']).name} with claude --continue{note}"
+        place = [] if branch == name else ["--path", str(worktree_home(cwd) / name)]
+        result = self.call("worktree", "create", "--cwd", str(cwd), "--branch", branch, *place, "--label", label,
+                           "--no-focus")
+        note = self.start_claude(result["root_pane"]["pane_id"], name, claude, claude_args)
+        return f"new worktree {name}{note}"
+
+    def idle_pane(self, workspace: str | None) -> str | None:
+        """The first pane of a worktree's open workspace, where Claude is started; None when it has none open. An
+        agent that started there since the board last looked is a live session, which gets no second Claude."""
+        if workspace is None:
+            return None
+        if any(a.get("workspace_id") == workspace for a in self.call("agent", "list").get("agents", [])):
+            raise HerdrError("it has a live session now: press Enter")
+        panes = self.call("pane", "list").get("panes", [])
+        return next((p["pane_id"] for p in panes if pane_workspace(p) == workspace), None)
+
     def go_to(self, cwd: Path, session: Session, label: str) -> str:
         """Focuses a live session's agent; for a worktree without one, its herdr workspace, opened with a shell
         when none is open. It never starts or resumes Claude."""
@@ -264,6 +294,11 @@ class Herdr:
 def repo_root(cwd: Path) -> Path:
     result = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True)
     return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else cwd.resolve()
+
+
+def worktree_home(cwd: Path) -> Path:
+    """Where herdr puts a repo's worktrees by default: `~/.herdr/worktrees/<repo>/`."""
+    return Path.home() / ".herdr" / "worktrees" / repo_root(cwd).name
 
 
 def local_branches(cwd: Path) -> list[str]:

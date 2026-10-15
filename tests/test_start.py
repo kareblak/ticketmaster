@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from ticketmaster import start
+from ticketmaster.config import load_config
 from ticketmaster.model import Ticket
 from ticketmaster.start import MapNotFound, NotWayfinderWork, build_prompt, claude_args, workbench_for
 
@@ -30,14 +31,27 @@ def test_typed_ticket_without_a_map_is_never_started():
             build_prompt(t)
 
 
-def test_ticket_with_a_map_runs_wayfinder_on_that_map():
-    # The spec (its parent is the map) and a spec's implementation ticket (its parent is the spec).
-    spec = ticket(parent_number=680, parent_url="https://gh/680", parent_labels=MAP,
-                  map_number=680, map_url="https://gh/680")
-    slice_ = ticket(parent_number=690, parent_url="https://gh/690", map_number=680, map_url="https://gh/680")
-    for t in (spec, slice_):
-        assert build_prompt(t) == "/mattpocock-skills:wayfinder https://gh/680 https://gh/686"
-    assert build_prompt(slice_, "/wayfinder") == "/wayfinder https://gh/680 https://gh/686"
+SPEC = ticket(parent_number=680, parent_url="https://gh/680", parent_labels=MAP, body="Part of #680",
+              map_number=680, map_url="https://gh/680")
+SLICE = ticket(parent_number=690, parent_url="https://gh/690", map_number=680, map_url="https://gh/680")
+
+
+def test_a_spec_runs_wayfinder_on_its_map():
+    assert build_prompt(SPEC) == "/mattpocock-skills:wayfinder https://gh/680 https://gh/686"
+    assert build_prompt(SPEC, "/wayfinder") == "/wayfinder https://gh/680 https://gh/686"
+
+
+def test_an_implementation_ticket_runs_implement_on_the_ticket_alone():
+    assert build_prompt(SLICE) == "/mattpocock-skills:implement https://gh/686"
+    assert build_prompt(SLICE, "/wayfinder", "/implement") == "/implement https://gh/686"
+
+
+def test_linear_tickets_are_named_by_their_key_and_branch_on_gitbranchname():
+    linear = ticket(key="TM-26", branch_name="kb/tm-26-s-starts-implement")
+    assert (start.worktree_name(linear), start.branch_name(linear)) == ("tm-26", "kb/tm-26-s-starts-implement")
+    assert start.session_label(linear) == "TM-26 Attach a deviation reason"
+    assert (start.worktree_name(ticket()), start.branch_name(ticket())) == ("issue-686", "issue-686")
+    assert start.session_label(ticket()) == "#686 Attach a deviation reason"
 
 
 @pytest.mark.parametrize("t", [ticket(), ticket(parent_number=690, parent_url="https://gh/690"),
@@ -63,6 +77,13 @@ def test_claude_args_name_the_session_and_never_use_claude_w():
 
 def test_claude_args_are_single_line_because_herdr_rejects_newlines():
     assert claude_args(ticket(), "one\n\n  two\n")[2] == "one two"
+
+
+def test_workbench_reads_the_implement_command_from_ticketmaster_toml(tmp_path):
+    (tmp_path / ".git").mkdir()
+    assert workbench_for(tmp_path, load_config(tmp_path)).implement_command == "/mattpocock-skills:implement"
+    (tmp_path / ".ticketmaster.toml").write_text('implement_command = "/implement"\n')
+    assert workbench_for(tmp_path, load_config(tmp_path)).implement_command == "/implement"
 
 
 def test_workbench_reads_the_wayfinder_command_from_config():

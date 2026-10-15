@@ -7,7 +7,7 @@ import pytest
 from ticketmaster import herdr
 from ticketmaster.herdr import BoardOpened, Herdr, HerdrError, Session
 from ticketmaster.model import Ticket
-from ticketmaster.start import Workbench
+from ticketmaster.start import Workbench, session_label
 
 REPO = Path("/code/shiplog")
 
@@ -307,6 +307,85 @@ def test_custom_claude_binary_runs_as_a_plain_command():
     fake = FakeHerdr({("worktree", "list"): worktrees(), ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}}})
     bench(fake, claude="/opt/my-claude").start(ticket())
     assert fake.calls[-1][:3] == ["pane", "run", "w9:p1"] and fake.calls[-1][3].startswith("/opt/my-claude -n")
+
+
+def impl(**kw):
+    """An implementation ticket: on a map, untyped, not the map's spec."""
+    base = dict(number=686, title="Attach a  deviation reason", url="https://gh/686", is_open=True,
+                body="## Parent\n\n#680", map_number=679, map_url="https://gh/679")
+    return Ticket(**{**base, **kw})
+
+
+LINEAR = dict(key="TM-26", branch_name="kb/tm-26-start-implement")
+
+
+def implement_fake(*trees, answers=None):
+    return FakeHerdr({("worktree", "list"): worktrees(*trees), ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
+                      ("agent", "list"): {"agents": []}, **(answers or {})})
+
+
+def test_implement_starts_unfocused_in_a_new_key_named_worktree_with_the_exact_prompt():
+    fake = implement_fake()
+    message = bench(fake).start(impl())
+    assert fake.first("worktree", "create") == ["worktree", "create", "--cwd", "/code/shiplog", "--branch", "issue-686",
+                                                "--label", "#686 Attach a deviation reason", "--no-focus"]
+    start = fake.first("agent", "start")
+    assert start[2] == "issue-686"
+    assert start[start.index("--", 7) + 1:] == ["-n", "#686 Attach a deviation reason",
+                                               "/mattpocock-skills:implement https://gh/686"]
+    assert not any(verb == "focus" for _, verb in fake.verbs())
+    assert message == ("Started /mattpocock-skills:implement on #686 in new worktree issue-686 as agent issue-686, "
+                       "unfocused")
+
+
+def test_implement_on_linear_uses_the_key_and_branches_on_gitbranchname(monkeypatch):
+    monkeypatch.setattr(herdr.Path, "home", lambda: Path("/home/me"))
+    fake = implement_fake()
+    bench(fake, implement_command="/implement").start(impl(**LINEAR))
+    assert fake.first("worktree", "create") == [
+        "worktree", "create", "--cwd", "/code/shiplog", "--branch", "kb/tm-26-start-implement",
+        "--path", "/home/me/.herdr/worktrees/shiplog/tm-26", "--label", "TM-26 Attach a deviation reason", "--no-focus"]
+    start = fake.first("agent", "start")
+    assert start[2] == "tm-26" and start[-3:] == ["-n", "TM-26 Attach a deviation reason", "/implement https://gh/686"]
+
+
+@pytest.mark.parametrize("old,linear", [("issue-686", False), ("worktree-issue-686", False), ("tm-26", True),
+                                        ("elsewhere", True)])
+def test_implement_reopens_an_existing_worktree_with_claude_continue_and_makes_no_copy(old, linear):
+    existing = {"path": f"/code/wt/{old}", "branch": LINEAR["branch_name"] if linear else old, "is_linked_worktree": True}
+    fake = implement_fake(existing, answers={("worktree", "open"): {"root_pane": {"pane_id": "wD:p1"}}})
+    ticket = impl(**LINEAR) if linear else impl()
+    message = bench(fake).start(ticket)
+    assert ("worktree", "create") not in fake.verbs()
+    assert fake.first("worktree", "open") == ["worktree", "open", "--cwd", "/code/shiplog", "--path", f"/code/wt/{old}",
+                                              "--label", session_label(ticket), "--no-focus"]
+    start = fake.first("agent", "start")
+    assert start[6] == "wD:p1" and start[start.index("--", 7) + 1:] == ["-n", session_label(ticket), "--continue"]
+    assert f"worktree {old} with claude --continue" in message
+
+
+def test_implement_in_an_open_agentless_workspace_starts_claude_in_its_pane():
+    existing = {"path": "/code/wt/issue-686", "branch": "issue-686", "is_linked_worktree": True, "open_workspace_id": "wA"}
+    fake = implement_fake(existing, answers={("pane", "list"): {"panes": [pane("wB:p1"), pane("wA:p2"), pane("wA:p3")]}})
+    bench(fake).start(impl())
+    assert ("worktree", "open") not in fake.verbs() and ("worktree", "create") not in fake.verbs()
+    assert fake.first("agent", "start")[6] == "wA:p2"
+
+
+def test_implement_in_a_workspace_that_gained_an_agent_starts_no_second_claude():
+    existing = {"path": "/code/wt/issue-686", "branch": "issue-686", "is_linked_worktree": True, "open_workspace_id": "wA"}
+    fake = implement_fake(existing, answers={("agent", "list"): {"agents": [agent("wA:p2", "working")]}})
+    with pytest.raises(HerdrError, match="live session now: press Enter"):
+        bench(fake).start(impl())
+    assert ("agent", "start") not in fake.verbs()
+
+
+def test_implement_in_a_workspace_without_panes_reopens_the_worktree():
+    existing = {"path": "/code/wt/issue-686", "branch": "issue-686", "is_linked_worktree": True, "open_workspace_id": "wA"}
+    fake = implement_fake(existing, answers={("pane", "list"): {"panes": [pane("wB:p1")]},
+                                             ("worktree", "open"): {"root_pane": {"pane_id": "wD:p1"}}})
+    bench(fake).start(impl())
+    assert fake.first("agent", "start")[6] == "wD:p1"
 
 
 def tree(path, branch=None, workspace=None):

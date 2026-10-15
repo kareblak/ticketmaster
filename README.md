@@ -77,7 +77,7 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 | Key            | Column            | Effect                                                              |
 | -------------- | ----------------- | ------------------------------------------------------------------- |
 | `Enter` / double-click | any       | go to the card's most urgent session, else its worktree with a shell; with neither, the status line says so. It never starts or resumes Claude |
-| `s`            | all but Decided   | start `/wayfinder` for the ticket in a **new** worktree (always new; asks first); refused while it is blocked or assigned to someone else, and on a closed map |
+| `s`            | all but Decided   | start `/wayfinder` for the ticket in a **new** worktree (always new; asks first), or `/implement` on an `impl` card in its own worktree; refused while it is blocked or assigned to someone else, on a spec, and on a closed map |
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | filter, clear both filters, refresh now, quit                       |
 | `f`            | any               | filter picker: labels cycle include → exclude → off, authors on/off (see below; saved per repo) |
@@ -100,7 +100,16 @@ claude -n "#<n> <title>" "<prompt>"
 | ------------------------------------------------------------- | ---------------------------------------------- |
 | a map (`wayfinder:map`)                                       | never started itself; see below                |
 | has a `wayfinder:<type>` label (`research`, `prototype`, `grilling`, `task`; GitLab's `wayfinder::<type>` too) | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
+| an implementation ticket (`impl`)                             | `/mattpocock-skills:implement <ticket-url>`, see below |
+| a spec (`spec`)                                               | never started; `s` starts its implementation tickets |
 | closed (Decided, or a closed map)                             | never started                                  |
+
+`s` on an `impl` card starts `/implement` AFK: unfocused, with the status line naming it. Each ticket
+gets one worktree, never a `-2` copy: `issue-<n>` (`tm-<n>` on Linear, with the issue's `gitBranchName`
+as its branch), reopened with `claude --continue` when it already exists without an agent. `s`
+refuses a closed, blocked or someone else's card, one with a live session (press Enter), and one with
+an open PR that closes it. A card you claimed starts, even while its spec is open. The session owns
+review, push and PR; the board starts nothing else.
 
 `s` on a lane's map card starts the map's first **frontier** ticket: open, unblocked, unassigned, not already started
 from this board or holding a session, in map order (GitHub's sub-issue order, asked for when you
@@ -158,6 +167,7 @@ Settings in `.ticketmaster.toml`:
 
 ```toml
 wayfinder_command = "/wayfinder"          # if wayfinder is installed under another name
+implement_command = "/implement"          # default /mattpocock-skills:implement
 ```
 
 ## Lanes and columns

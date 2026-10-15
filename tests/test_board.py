@@ -8,6 +8,7 @@ from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, 
 from ticketmaster.herdr import Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
+from ticketmaster.start import build_prompt
 
 
 class FakeProvider:
@@ -1452,5 +1453,106 @@ def test_an_open_closing_pr_shows_as_a_badge_and_none_without_one():
             await loaded(app, pilot)
             assert "PR open" in chips_of(app, 51) and "PR open" in chips_of(app, 5)
             assert not any("PR open" in card_text(app, n) for n in (1, 2, 50, 52, 53, 9))
+
+    run(scenario())
+
+
+SPEC = spec_of(9, 50, assignees=("me",))
+SLICES = [impl_of(SPEC, 51), impl_of(SPEC, 52, is_open=False, closed_at=datetime.now(timezone.utc)),
+          impl_of(SPEC, 53, open_blockers=1, blocked_by=("#51",)), impl_of(SPEC, 54, assignees=("bob",)),
+          impl_of(SPEC, 55), impl_of(SPEC, 56, has_open_change_request=True), impl_of(SPEC, 57, assignees=("me",))]
+LIVE = {55: [Session(55, "/w/issue-55", "issue-55", "wA", "working", "wA:p1")]}
+
+
+def implement_app(bench):
+    return BoardApp(FakeProvider([MAP, SPEC, *SLICES]), Query(), interval=60, workbench=bench,
+                    describe_start=build_prompt)
+
+
+def test_s_on_an_open_unblocked_unclaimed_impl_card_starts_implement_unfocused():
+    async def scenario():
+        bench = FakeBench()
+        app = implement_app(bench)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 51)
+            await pilot.press("s")
+            await pilot.pause()
+            assert is_confirm(app)
+            assert app.screen.question == "Start /implement on #51 Slice 51 in a new worktree?"
+            assert app.screen.detail == "/mattpocock-skills:implement u51\nunfocused (AFK)"
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 51)]
+            assert notifications(app)[-1][0] == "Started #51"  # the workbench's own report
+
+    run(scenario())
+
+
+def test_s_on_an_impl_card_refuses_and_leaves_the_workbench_untouched():
+    async def scenario():
+        bench = FakeBench(LIVE)
+        app = implement_app(bench)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            for number in (52, 53, 54, 55, 56):
+                await select(app, pilot, number)
+                await pilot.press("s")
+                await pilot.pause()
+                assert not is_confirm(app)
+            assert bench.calls == []
+            assert [m for m, _ in notifications(app)][-5:] == [
+                "#52 is closed", "#53 is blocked by #51", "#54 is claimed by @bob",
+                "#55 has a live session: press Enter", "#56 has an open PR that closes it"]
+
+    run(scenario())
+
+
+def test_s_on_my_claimed_impl_card_starts_while_its_spec_is_open_and_reuses_an_agentless_worktree():
+    async def scenario():
+        bench = FakeBench({57: [Session(57, "/w/issue-57", "issue-57")]})
+        app = implement_app(bench)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 57)
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Start /implement on #57 Slice 57 in its worktree with claude --continue?"
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 57)]
+
+    run(scenario())
+
+
+def test_s_on_a_spec_card_still_refuses():
+    async def scenario():
+        bench = FakeBench()
+        app = implement_app(bench)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 50)
+            await pilot.press("s")
+            await pilot.pause()
+            assert not is_confirm(app) and bench.calls == []
+            assert notifications(app)[-1][0] == "#50 is a spec: s starts /implement on its implementation tickets"
+
+    run(scenario())
+
+
+def test_enter_on_an_impl_card_without_a_worktree_names_the_implement_start_or_the_refusal():
+    async def scenario():
+        bench = FakeBench()
+        app = implement_app(bench)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            for number in (51, 54):
+                await select(app, pilot, number)
+                await pilot.press("enter")
+                await pilot.pause()
+            assert bench.calls == []
+            assert [m for m, _ in notifications(app)][-2:] == [
+                "#51 has no session here; s starts /mattpocock-skills:implement u51",
+                "#54 has no session here; s refuses: #54 is claimed by @bob"]
 
     run(scenario())

@@ -55,30 +55,46 @@ class Ticket:
     # The map a spec, or a spec's implementation ticket, leads to; the parent stays the spec for those tickets.
     map_number: int | None = None
     map_url: str | None = None
+    # The tracker's own key (`TM-26` on Linear), and the branch it wants a ticket's work on (Linear's
+    # gitBranchName); None on trackers that key issues by number alone.
+    key: str | None = None
+    branch_name: str | None = None
 
     @property
     def is_blocked(self) -> bool:
         return bool(self.open_blockers)
 
+    @property
+    def ref(self) -> str:
+        """How the board names the ticket: its key, else `#<n>`."""
+        return self.key or f"#{self.number}"
+
     def start_refusal(self, viewer: str | None) -> str | None:
-        """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart."""
+        """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart. A live
+        session is the board's to check, since only herdr knows it."""
+        if not self.is_open:
+            return f"#{self.number} is closed"
+        if self.spec_kind == "spec":
+            return f"#{self.number} is a spec: s starts /implement on its implementation tickets"
         if self.blocked_by:
             return f"#{self.number} is blocked by {', '.join(self.blocked_by)}"
         if self.open_blockers:
             return f"#{self.number} is blocked by {self.open_blockers} open issue{'s' if self.open_blockers > 1 else ''}"
         if viewer and self.assignees and viewer.lower() not in (a.lower() for a in self.assignees):
             return f"#{self.number} is claimed by {', '.join('@' + a for a in self.assignees)}"
+        if self.spec_kind == "impl" and self.has_open_change_request:
+            return f"#{self.number} has an open PR that closes it"
         if not (self.is_wayfinder_work or self.map_missing):  # a typed ticket without its map is warned about apart
             return self.not_wayfinder_work
         return None
 
     @property
     def not_wayfinder_work(self) -> str:
-        return f"#{self.number} is not wayfinder work: the board only starts /wayfinder"
+        return f"#{self.number} is not wayfinder work: the board only starts work on a map"
 
     @property
     def is_wayfinder_work(self) -> bool:
-        """A map, or a ticket on one: the only work the board starts, always with /wayfinder."""
+        """A map, or a ticket on one: the only work the board starts: /wayfinder, or /implement on an impl card."""
         return self.is_wayfinder_map or self.is_wayfinder_ticket or self.map_url is not None
 
     @property
