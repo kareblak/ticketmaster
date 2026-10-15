@@ -17,9 +17,10 @@ from textual.binding import Binding
 from textual import events
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static
 
-from .config import load_settings, save_settings
+from .config import board_interval, load_settings, parse_interval, save_settings
 from .herdr import HerdrError, Session
 from .model import COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, Ticket, build_board, frontier
 from .providers import ErrorNotice, Provider, ProviderError, Query, RateLimited, error_notice
@@ -199,6 +200,15 @@ class Pacer:
         self.stuck = False  # slow until restart
         self.next_tickets = now
         self.next_sessions = now
+        self.last_tickets = self.last_sessions = now - interval  # when each fetch last started
+
+    def set_interval(self, interval: float) -> None:
+        """A new interval from the settings menu: the next fetches are due that long after the last ones started.
+        A rate-limit back-off stays: tickets keep its minute, sessions its 10s at least."""
+        self.interval = interval
+        if not self.limited:
+            self.next_tickets = self.last_tickets + interval
+        self.next_sessions = self.last_sessions + (max(LIMITED_SESSIONS_EVERY, interval) if self.limited else interval)
 
     def due(self, now: float) -> tuple[bool, bool]:
         """(tickets, sessions) to fetch now; a ticket fetch refreshes sessions too."""
@@ -206,7 +216,9 @@ class Pacer:
         return tickets, tickets or now >= self.next_sessions
 
     def started(self, now: float, tickets: bool) -> None:
+        self.last_sessions = now
         if tickets:
+            self.last_tickets = now
             self.next_tickets = now + (LIMITED_TICKETS_EVERY if self.limited else self.interval)
         self.next_sessions = now + (max(LIMITED_SESSIONS_EVERY, self.interval) if self.limited else self.interval)
 
@@ -419,6 +431,58 @@ class FilterPicker(ModalScreen[None]):
             option.set_mode(self._mode(option.section, option.value))
 
 
+class Setting(NamedTuple):
+    """One field of the settings menu: its key in the repo's settings, its label, its current value as text, and
+    `parse`, which turns the typed text into the value or raises ValueError saying what is wrong."""
+
+    key: str
+    label: str
+    value: str
+    parse: Callable[[str], object]
+
+
+class SettingsMenu(ModalScreen[dict | None]):
+    """The board's settings for this repo, an input per Setting. Enter checks every field and closes with their
+    values; an invalid one says why and keeps the menu open. Esc closes it changing nothing."""
+
+    DEFAULT_CSS = """
+    SettingsMenu { align: center middle; }
+    #settings { width: 60; max-width: 100%; height: auto; max-height: 100%; padding: 1 2; border: thick $accent; background: $surface; }
+    #settings-help { color: $text-muted; margin-bottom: 1; }
+    .setting-label { text-style: bold; }
+    #settings-error { height: auto; }
+    """
+    BINDINGS = [Binding("escape", "dismiss", "Close")]
+
+    def __init__(self, fields: list[Setting]):
+        super().__init__()
+        self.fields = fields
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="settings"):
+            yield Static("Enter applies and saves for this repo · Esc closes without changes", id="settings-help")
+            for field in self.fields:
+                yield Label(field.label, classes="setting-label")
+                yield Input(field.value, id=field.key)
+            yield Static(id="settings-error")
+
+    def on_mount(self) -> None:
+        self.query(Input).first().focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()  # the board's own Input.Submitted is its text filter
+        values = {}
+        for field in self.fields:
+            box = self.query_one(f"#{field.key}", Input)
+            try:
+                values[field.key] = field.parse(box.value)
+            except ValueError as exc:
+                self.query_one("#settings-error", Static).update(Text(f"{field.label}: {exc}", style="bold red"))
+                box.focus()
+                return
+        self.dismiss(values)
+
+
 KEY_DETAILS = {
     "primary": "go to the card's most urgent session, else its worktree with a shell, else say what s would do; "
                "never starts or resumes Claude",
@@ -428,6 +492,7 @@ KEY_DETAILS = {
     "open": "open the issue in the browser",
     "pick_filter": "narrow by type, HITL/AFK, assignee (me, unassigned, anyone), map and author; combines with /, "
                    "Esc on the board clears all, saved per repo",
+    "settings": "the refresh interval, applied at once and saved per repo",
 }
 
 
@@ -518,6 +583,12 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  to the most urgent one, else opens its worktree with a shell; it never starts Claude.\n"
                 "  A map card goes to the map's own session, never a ticket's.\n")
 
+    heading("Settings")
+    text.append("  c opens the settings menu: Enter applies the values at once and saves them per repo, Esc\n"
+                "  closes it unchanged. Refresh interval: --interval for this run, then the repo's saved\n"
+                "  interval, then the default (5 s, 30 s on Linear). Any positive number of seconds; a rate\n"
+                "  limit still slows the board down.\n")
+
     heading("The board only reads")
     text.append("  It never writes to the tracker or the repo, and never removes a worktree. A session\n"
                 "  claims its ticket by assigning it, so the card moves to Claimed on the next refresh.")
@@ -568,6 +639,7 @@ class BoardApp(App):
         Binding("r", "refresh", "Refresh"),
         Binding("slash", "filter", "Filter"),
         Binding("f", "pick_filter", "Filters"),
+        Binding("c", "settings", "Settings"),
         Binding("enter", "primary", "Go to session"),
         Binding("s", "start", "Start session"),
         Binding("o", "open", "Browser"),
@@ -585,7 +657,7 @@ class BoardApp(App):
         self,
         provider: Provider,
         query: Query,
-        interval: float = 5.0,
+        interval: float | None = None,
         workbench: Workbench | None = None,
         describe_start: Callable[[Ticket], str] | None = None,
         columns: str = "auto",
@@ -593,7 +665,8 @@ class BoardApp(App):
         clock: Callable[[], float] = time.monotonic,
         map_key: str | None = None,
     ):
-        """`query.named_map`, or `map_key` (a tracker key such as `TM-1`), presets the map filter for this run."""
+        """`query.named_map`, or `map_key` (a tracker key such as `TM-1`), presets the map filter for this run.
+        `interval` is `--interval`, which wins over the repo's saved interval for this run without replacing it."""
         super().__init__()
         self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
         self.single = False
@@ -608,15 +681,16 @@ class BoardApp(App):
         self.settings = load_settings(settings_path) if settings_path else {}
         self.herdr_error: str | None = None
         self.board_query = query
-        self.interval = interval
+        self.repo_key = f"{provider.name}:{provider.repo}"
+        self.interval = board_interval(interval, self._repo_settings(), provider.name)
         self.clock = clock
-        self.pacer = Pacer(interval, clock())
+        self.pacer = Pacer(self.interval, clock())
+        self.ticker: Timer | None = None
         self.fetching = False
         self.queued: bool | None = None  # a refresh asked for mid-fetch: whether it includes tickets
         self.board = Board()
         self.viewer: str | None = None  # the tracker login; asked for with each ticket fetch until known
         self.needle = ""
-        self.repo_key = f"{provider.name}:{provider.repo}"
         saved = self.settings.get("filters", {}).get(self.repo_key, {})
         self.filters = load_filters(saved if isinstance(saved, dict) else {})
         self.saved_maps = dict(self.filters[MAP])  # what the map section saves while the preset stands
@@ -645,7 +719,12 @@ class BoardApp(App):
     def on_mount(self) -> None:
         self._apply_view()
         self.tick()
-        self.set_interval(min(self.interval, 1.0), self.tick)  # 1s at most, for the back-off countdown
+        self._start_ticker()
+
+    def _start_ticker(self) -> None:
+        if self.ticker is not None:
+            self.ticker.stop()
+        self.ticker = self.set_interval(min(self.interval, 1.0), self.tick)  # 1s at most, for the back-off countdown
 
     def tick(self) -> None:
         """Fetches whatever the pacer says is due."""
@@ -1114,6 +1193,40 @@ class BoardApp(App):
                 save_settings(self.settings_path, self.settings)
             except OSError as exc:
                 self.notify(f"filter not saved: {exc}", severity="warning")
+
+    def action_settings(self) -> None:
+        fields = [Setting("interval", "Refresh interval (seconds)", f"{self.interval:g}", parse_interval)]
+        self.push_screen(SettingsMenu(fields), self._apply_settings)
+
+    def _apply_settings(self, values: dict | None) -> None:
+        """Applies the menu's values at once and saves the changed ones for this repo; Esc (None) changes nothing."""
+        if not values or values["interval"] == self.interval:
+            return
+        self.interval = values["interval"]
+        self.pacer.set_interval(self.interval)
+        self._start_ticker()
+        self._render_status()
+        seconds = self.interval
+        self._repo_settings(create=True)["interval"] = int(seconds) if seconds.is_integer() else seconds
+        if self.settings_path:
+            try:
+                save_settings(self.settings_path, self.settings)
+            except OSError as exc:
+                self.notify(f"settings not saved: {exc}", severity="warning")
+
+    def _repo_settings(self, create: bool = False) -> dict:
+        """This repo's entry under `repos` in settings.json; `create` makes it, replacing one that is no dict."""
+        repos = self.settings.get("repos")
+        if not isinstance(repos, dict):
+            if not create:
+                return {}
+            repos = self.settings["repos"] = {}
+        saved = repos.get(self.repo_key)
+        if not isinstance(saved, dict):
+            if not create:
+                return {}
+            saved = repos[self.repo_key] = {}
+        return saved
 
     def action_clear_filter(self) -> None:
         box = self.query_one("#filter", Input)

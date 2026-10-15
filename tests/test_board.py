@@ -3,8 +3,10 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, passes_filters,
-                               render_card)
+from textual.widgets import Input
+
+from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, SettingsMenu,
+                               passes_filters, render_card)
 from ticketmaster.herdr import HerdrError, Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
@@ -573,7 +575,7 @@ def test_new_herdr_session_shows_up_on_refresh():
     run(scenario())
 
 
-REMOVED_KEYS = ("c", "x", "a", "backspace", "delete")
+REMOVED_KEYS = ("x", "a", "backspace", "delete")  # c, once close, now opens the settings menu
 
 
 def test_removed_keys_do_nothing_on_any_card(tmp_path):
@@ -806,6 +808,27 @@ def test_pacer_other_errors_keep_the_interval():
     pacer.started(0, tickets=True)
     pacer.fetched(1, ok=False, rate_limited=False)
     assert not pacer.limited and pacer.due(5) == (True, True)
+
+
+def test_a_new_interval_reschedules_from_the_last_fetch():
+    pacer = Pacer(60, now=0)
+    pacer.started(0, tickets=True)
+    pacer.set_interval(5)
+    assert pacer.due(4) == (False, False) and pacer.due(5) == (True, True)
+    pacer.started(5, tickets=True)
+    pacer.set_interval(30)
+    assert pacer.due(34) == (False, False) and pacer.due(35) == (True, True)
+
+
+def test_a_new_interval_keeps_the_rate_limit_back_off():
+    pacer = Pacer(5, now=0)
+    pacer.started(0, tickets=True)
+    pacer.fetched(1, ok=False, rate_limited=True)
+    pacer.set_interval(1)
+    assert pacer.limited and pacer.wait(1) == 60
+    assert pacer.due(9) == (False, False) and pacer.due(10) == (False, True)  # sessions every 10s at least
+    pacer.set_interval(20)
+    assert pacer.due(19) == (False, False) and pacer.due(20) == (False, True)
 
 
 class Clock:
@@ -1860,3 +1883,158 @@ def test_a_named_map_is_never_saved(tmp_path):
     run(named())
     assert json.loads(settings.read_text())["filters"]["fake:o/r"]["maps"] == [9]
     run(plain())
+
+
+def settings_app(settings, interval=None, clock=None):
+    return BoardApp(FakeProvider(TICKETS), Query(), interval=interval, settings_path=settings, clock=clock or Clock())
+
+
+async def open_settings(pilot, app):
+    await pilot.press("c")
+    await pilot.pause()
+    assert isinstance(app.screen, SettingsMenu)
+
+
+async def enter_interval(pilot, app, text):
+    """Opens the settings menu, replaces the interval with `text` and presses Enter."""
+    await open_settings(pilot, app)
+    field = app.screen.query_one("#interval", Input)
+    assert app.screen.focused is field
+    field.value = text
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+def test_a_new_interval_applies_at_once_and_is_saved_for_the_repo(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"filters": {"fake:o/r": {"authors": ["alice"]}}, "repos": {"other:x/y": {"interval": 9}}}))
+
+    async def scenario():
+        clock = Clock()
+        app = settings_app(settings, clock=clock)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert app.provider.calls == 1 and "every 5s" in status_of(app)
+            await open_settings(pilot, app)
+            assert app.screen.query_one("#interval", Input).value == "5"
+            await pilot.press("escape")
+            await enter_interval(pilot, app, "30")
+            assert not isinstance(app.screen, SettingsMenu) and "every 30s" in status_of(app) and app.needle == ""
+            clock.now += 29
+            app.tick()
+            await loaded(app, pilot)
+            assert app.provider.calls == 1
+            clock.now += 1
+            app.tick()
+            await loaded(app, pilot)
+            assert app.provider.calls == 2
+            await enter_interval(pilot, app, "0.5")  # no floor
+            assert "every 0.5s" in status_of(app)
+            clock.now += 0.5
+            app.tick()
+            await loaded(app, pilot)
+            assert app.provider.calls == 3
+
+    run(scenario())
+    assert json.loads(settings.read_text()) == {
+        "filters": {"fake:o/r": {"authors": ["alice"]}},
+        "repos": {"other:x/y": {"interval": 9}, "fake:o/r": {"interval": 0.5}},
+    }
+
+
+def test_escape_closes_the_settings_menu_without_changing_anything(tmp_path):
+    settings = tmp_path / "settings.json"
+
+    async def scenario():
+        app = settings_app(settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await open_settings(pilot, app)
+            app.screen.query_one("#interval", Input).value = "99"
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, SettingsMenu) and app.is_running
+            assert app.interval == 5 and app.pacer.interval == 5 and "every 5s" in status_of(app)
+
+    run(scenario())
+    assert not settings.exists()
+
+
+def test_the_settings_menu_rejects_an_interval_that_is_no_positive_number(tmp_path):
+    settings = tmp_path / "settings.json"
+
+    async def scenario():
+        app = settings_app(settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await open_settings(pilot, app)
+            field = app.screen.query_one("#interval", Input)
+            for text, says in (("abc", "not a number"), ("0", "positive"), ("-2", "positive")):
+                field.value = text
+                await pilot.press("enter")
+                await pilot.pause()
+                assert isinstance(app.screen, SettingsMenu)
+                assert says in str(app.screen.query_one("#settings-error").render())
+            assert app.interval == 5 and "every 5s" in status_of(app)
+
+    run(scenario())
+    assert not settings.exists()
+
+
+def test_the_saved_interval_is_restored_and_interval_overrides_it_without_overwriting(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"repos": {"fake:o/r": {"interval": 42}}}))
+
+    async def scenario(flag, shown):
+        app = settings_app(settings, interval=flag)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert app.pacer.interval == shown and f"every {shown}s" in status_of(app)
+            await open_settings(pilot, app)
+            assert app.screen.query_one("#interval", Input).value == str(shown)
+
+    run(scenario(None, 42))
+    run(scenario(7, 7))
+    assert json.loads(settings.read_text()) == {"repos": {"fake:o/r": {"interval": 42}}}
+
+
+def test_an_interval_edited_under_the_flag_is_saved(tmp_path):
+    settings = tmp_path / "settings.json"
+
+    async def scenario():
+        app = settings_app(settings, interval=7)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await enter_interval(pilot, app, "12")
+            assert "every 12s" in status_of(app)
+
+    run(scenario())
+    assert json.loads(settings.read_text()) == {"repos": {"fake:o/r": {"interval": 12}}}
+
+
+def test_a_failed_settings_save_warns_and_still_applies(tmp_path):
+    (tmp_path / "blocker").write_text("")  # a file where the settings directory should be
+
+    async def scenario():
+        app = settings_app(tmp_path / "blocker" / "settings.json")
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await enter_interval(pilot, app, "9")
+            assert "every 9s" in status_of(app)
+            assert any(m.startswith("settings not saved") and s == "warning" for m, s in notifications(app))
+
+    run(scenario())
+
+
+def test_help_describes_the_settings_menu_and_the_interval_precedence():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            text = " ".join(app.screen.text.plain.split())
+            assert "Settings" in text and "saved per repo" in text
+            assert "--interval for this run, then the repo's saved interval, then the default" in text
+
+    run(scenario())

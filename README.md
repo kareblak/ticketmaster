@@ -86,7 +86,8 @@ whose tracker key it is, never issue number 1; a key no map carries shows an emp
 whose spec is still open stays on the board in full. Any other closed map shows only when you name it by
 number or URL, or on Linear by its team's key, as its header card alone.
 
-The board refreshes every 5 s, every 30 s on Linear; `--interval` sets another.
+The board refreshes every 5 s, every 30 s on Linear; `--interval` sets another for one run, and the
+[settings menu](#settings) (`c`) saves one per repo.
 
 The board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
 switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` sets the start).
@@ -100,6 +101,7 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | free-text filter, clear every filter, refresh now, quit             |
 | `f`            | any               | filter picker: type, HITL/AFK, assignee, map, author ([Filters](#filters); saved per repo) |
+| `c`            | any               | settings menu: refresh interval ([Settings](#settings); saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
 
 Arrows or `hjkl` move between cards: up and down walk each lane's map card and then its cards in the
@@ -180,6 +182,27 @@ The selection is saved per user and repo in `$XDG_CONFIG_HOME/ticketmaster/setti
 (`~/.config/…`) with every change and restored when the board reopens. A map named on the command
 line is never saved: while it stands, the map section keeps the selection saved before. A saved value
 that is no longer on the board is ignored until it comes back. There are no label or state filters.
+
+## Settings
+
+`c` opens the settings menu. `Enter` checks every field, applies the values at once and saves them
+per user and repo, under `repos` in the same `settings.json`:
+
+```json
+{"repos": {"github:owner/name": {"interval": 10}}}
+```
+
+`Esc` closes the menu without changing anything. A field that is not valid stays open with a message
+saying why, and a failed save shows a warning while the new value still applies to this run.
+
+| Setting          | Values                       | Effect                                                    |
+| ---------------- | ---------------------------- | --------------------------------------------------------- |
+| Refresh interval | any positive number of seconds, no floor | ticket and session fetches reschedule at once; the status line's `every Ns` shows it |
+
+The refresh interval is `--interval` for this run, then the repo's saved interval, then the
+default: 5 s, 30 s on Linear. `--interval` never overwrites the saved value; an interval changed in
+the menu is saved, also under `--interval`. A [rate limit](#providers) still slows the board on top
+of it.
 
 ## Wayfinding links
 
@@ -311,7 +334,7 @@ as; your own claimed tickets still start.
 Where a tracker has no dependency support, only body-listed blockers mark a ticket Blocked.
 
 GitHub's GraphQL budget is 5,000 points an hour. Every refresh makes one search for the maps and one
-query per open map (and per spec a map led to). Lengthen `--interval` if you run several boards at
+query per open map (and per spec a map led to). Lengthen the refresh interval if you run several boards at
 once or have many open maps.
 
 A Linear API key allows 2,500 requests an hour, shared by everything using its user's key, which is why
@@ -322,7 +345,7 @@ complexity cap per query.
 When the tracker rate-limits the board (GitHub's primary or secondary limit, an HTTP 429 from
 GitLab or Gitea/Forgejo, or Linear's HTTP 400 `RATELIMITED`), ticket fetches drop to once a minute and herdr session states to every
 10s; the status line shows `rate-limited · next fetch in 42s · secondary limit`, and `r` refreshes
-only the sessions. The first good fetch restores `--interval`, once: a second rate limit keeps the
+only the sessions. The first good fetch restores the refresh interval, once: a second rate limit keeps the
 board at once a minute until you restart it.
 
 Any tracker error while fetching (a rate limit, a 4xx such as `401 unauthorized`, a 5xx such as
