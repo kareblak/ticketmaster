@@ -80,6 +80,7 @@ DECISION = dict(parent_url="u9", parent_labels=("wayfinder:map",))  # with a way
 def test_start_refusal_names_a_closed_ticket_first():
     assert ticket(**DECISION, labels=("wayfinder:task",), is_open=False, open_blockers=1).start_refusal("me") \
         == "#1 is closed"
+    assert ticket(team_key="TM", is_open=False).start_refusal("me") == "TM-1 is closed"  # Linear's key
 
 
 def test_start_refusal_names_spec_and_impl_cards():

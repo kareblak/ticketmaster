@@ -81,7 +81,7 @@ class Workbench:
             where = self.herdr.start_in_new_worktree(self.cwd, worktree_name(ticket), label, args, self.claude, focus)
             message = f"Started {ticket.key} in {where}"
         else:
-            args = ["-n", label, "--continue"]
+            args = claude_args(ticket, "--continue")
             where = self.herdr.continue_in_worktree(self.cwd, worktree, worktree_name(ticket), label, args,
                                                     self.claude, focus)
             message = f"Continued {ticket.key} in {where}"

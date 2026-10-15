@@ -38,6 +38,7 @@ class FakeHerdr:
 
 @pytest.fixture(autouse=True)
 def no_git(monkeypatch):
+    monkeypatch.setattr(herdr, "local_branches", lambda cwd: [])
     monkeypatch.setattr(herdr, "repo_root", lambda cwd: cwd)
 
 
@@ -318,17 +319,49 @@ def test_an_agentless_worktree_is_reopened_and_claude_continues_there():
     assert message == "Continued #686 in worktree issue-686 as agent issue-686"
 
 
-def test_an_agentless_worktree_open_in_a_workspace_continues_in_its_pane():
-    fake = starting(**{"pane list": {"panes": [pane("wX:p1"), pane("wA:p2"), pane("wA:p3")]}})
+def test_a_leftover_branch_without_a_worktree_is_not_taken_over(monkeypatch):
+    monkeypatch.setattr(herdr, "local_branches", lambda cwd: ["main", "issue-686"])
+    fake = starting()
+    with pytest.raises(HerdrError, match="branch issue-686 exists without a worktree"):
+        bench(fake).start(ticket())
+    assert ("worktree", "create") not in fake.verbs()
+
+
+def at_shell(*idle):
+    """`pane process-info` for panes where only `idle` sit at their shell prompt."""
+    def answer(argv):
+        pane_id = argv[argv.index("--pane") + 1]
+        return {"process_info": {"shell_pid": 10, "foreground_process_group_id": 10 if pane_id in idle else 11}}
+    return answer
+
+
+def test_an_agentless_worktree_open_in_a_workspace_continues_in_its_pane_at_a_shell():
+    fake = starting(**{"pane list": {"panes": [pane("wX:p1"), pane("wA:p2"), pane("wA:p3")]},
+                       "pane process-info": at_shell("wX:p1", "wA:p3")})
     message = bench(fake).start(decision("research"), Session(686, "/w/issue-686", workspace="wA"))
     assert ("worktree", "open") not in fake.verbs() and ("workspace", "focus") not in fake.verbs()
-    assert fake.first("agent", "start")[6] == "wA:p2"
+    assert fake.first("agent", "start")[6] == "wA:p3"
     assert claude_argv(fake)[-1] == "--continue"
     assert message.endswith(", unfocused: research runs AFK")
 
 
+def test_a_busy_workspace_gets_a_new_pane_for_claude():
+    fake = starting(**{"pane list": {"panes": [pane("wA:p2")]}, "pane process-info": at_shell(),
+                       "pane split": {"pane": {"pane_id": "wA:p9"}}})
+    bench(fake).start(decision(), Session(686, "/w/issue-686", workspace="wA"))
+    assert fake.first("pane", "split") == ["pane", "split", "--pane", "wA:p2", "--direction", "right",
+                                           "--cwd", "/w/issue-686", "--no-focus"]
+    assert fake.first("agent", "start")[6] == "wA:p9"
+
+
+def test_a_stale_workspace_reopens_the_worktree():
+    fake = starting(**{"pane list": {"panes": [pane("wX:p1")]}, "worktree open": {"root_pane": {"pane_id": "wD:p1"}}})
+    bench(fake).start(decision(), Session(686, "/w/issue-686", workspace="wGone"))
+    assert fake.first("agent", "start")[6] == "wD:p1" and ("workspace", "focus") not in fake.verbs()
+
+
 def test_continuing_a_hitl_ticket_in_an_open_workspace_focuses_it():
-    fake = starting(**{"pane list": {"panes": [pane("wA:p2")]}})
+    fake = starting(**{"pane list": {"panes": [pane("wA:p2")]}, "pane process-info": at_shell("wA:p2")})
     bench(fake).start(decision(), Session(686, "/w/issue-686", workspace="wA"))
     assert ["workspace", "focus", "wA"] in fake.calls
 

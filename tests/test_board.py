@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, passes_authors,
                                passes_labels, render_card)
-from ticketmaster.herdr import Session
+from ticketmaster.herdr import HerdrError, Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
 
@@ -1407,6 +1407,68 @@ def test_s_on_my_claimed_ticket_with_only_an_agentless_worktree_continues_it():
             await pilot.press("y")
             await loaded(app, pilot)
             assert bench.calls == [("start", 2, "/w/issue-2")]
+
+    run(scenario())
+
+
+class FailingBench(FakeBench):
+    def start(self, ticket, worktree=None):
+        super().start(ticket, worktree)
+        raise HerdrError("agent_start_failed")
+
+
+def test_a_failed_start_frees_the_ticket_for_another_s():
+    async def scenario():
+        bench = FailingBench()
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s", "y")
+            await loaded(app, pilot)
+            assert notifications(app)[-1] == ("herdr: agent_start_failed", "error")
+            await pilot.press("s")
+            await pilot.pause()
+            assert is_confirm(app)
+
+    run(scenario())
+
+
+def test_s_stays_refused_while_the_new_worktree_waits_for_its_agent():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s", "y")
+            await loaded(app, pilot)
+            bench.current = {1: [Session(1, "/w/issue-1")]}  # herdr lists the worktree before Claude is ready
+            await pilot.press("r")
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s")
+            await loaded(app, pilot)
+            assert not is_confirm(app) and bench.calls == [("start", 1)]
+            assert notifications(app)[-1][0] == "#1 has a live session: press Enter to go to it"
+            bench.current = {1: [live(1, "/w/issue-1", "idle")]}
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert 1 not in app.starting
+
+    run(scenario())
+
+
+def test_s_continues_the_worktree_named_by_the_key_before_other_copies():
+    async def scenario():
+        bench = FakeBench({1: [Session(1, "/w/issue-1-2"), Session(1, "/w/worktree-issue-1"), Session(1, "/w/issue-1")]})
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s", "y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 1, "/w/issue-1")]
 
     run(scenario())
 

@@ -8,7 +8,7 @@ import webbrowser
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -203,6 +203,13 @@ class Cell(Vertical):
     def __init__(self, column: Column, cards: list[Card]):
         super().__init__(*cards, classes="cell")
         self.column = column
+
+
+class StartPlan(NamedTuple):
+    """The ticket s starts for a card, and how the confirm names it (`via` a map)."""
+
+    ticket: Ticket
+    via: str = ""
 
 
 class Workbench(Protocol):
@@ -408,8 +415,9 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
 
     heading("Starting a session")
     text.append("  s asks first, then creates a git worktree workspace in herdr on branch issue-<n> (tm-<n> on\n"
-                "  Linear), labelled '#<n> <title>', and starts Claude in it as herdr agent issue-<n> with\n"
-                "  `<wayfinder_command> <map-url> [<ticket-url>]` (wayfinder_command in .ticketmaster.toml).\n"
+                "  Linear), labelled '#<n> <title>' ('TM-<n> <title>'), and starts Claude in it as\n"
+                "  herdr agent issue-<n> with `<wayfinder_command> <map-url> [<ticket-url>]`\n"
+                "  (wayfinder_command in .ticketmaster.toml).\n"
                 "  When the ticket's worktree exists without an agent, it runs claude --continue there instead;\n"
                 "  it never makes a second worktree. What it starts depends on the card:\n")
     for kind, prompt in [
@@ -518,7 +526,7 @@ class BoardApp(App):
         self.provider = provider
         self.workbench = workbench
         self.describe_start = describe_start or (lambda ticket: "")
-        self.starting: set[int] = set()  # started from this board, until herdr lists a change in its sessions
+        self.starting: set[int] = set()  # started from this board, until herdr lists its agent or the start fails
         self.sessions: dict[int, list[Session]] = {}
         self.settings_path = settings_path  # None: settings live only as long as the board
         self.settings = load_settings(settings_path) if settings_path else {}
@@ -638,7 +646,7 @@ class BoardApp(App):
             self.board = board
             self.last_ok = datetime.now()
         if sessions is not None and sessions != self.sessions:
-            self.starting -= {n for n in self.starting if sessions.get(n) != self.sessions.get(n)}
+            self.starting -= {n for n in self.starting if any(s.status is not None for s in sessions.get(n, []))}
             self.sessions = sessions
             changed = True
         self.herdr_error = herdr_error
@@ -872,13 +880,13 @@ class BoardApp(App):
         plan = self._start_plan(ticket)
         if isinstance(plan, str):
             would = f"s refuses: {plan}"
-        elif plan[0] is not ticket:
-            would = f"s starts #{plan[0].number} {plan[0].title}, next on the map"
+        elif plan.ticket is not ticket:
+            would = f"s starts {plan.ticket.key} {plan.ticket.title}, next on the map"
         elif ticket.is_wayfinder_map:
             would = "s starts /wayfinder on the map, its frontier is empty"
         else:
             would = "s starts /wayfinder on it"
-        self.notify(f"#{ticket.number} has no session here; {would}", severity="warning")
+        self.notify(f"{ticket.key} has no session here; {would}", severity="warning")
 
     def action_start(self) -> None:
         """s: start /wayfinder on the card's ticket, or on a map's first frontier ticket, else on the map itself;
@@ -906,46 +914,54 @@ class BoardApp(App):
         if isinstance(plan, str):
             self.notify(plan, severity="warning")
         else:
-            self._confirm_start(*plan)
+            self._confirm_start(plan.ticket, plan.via)
 
-    def _start_plan(self, ticket: Ticket, order: list[int] | None = None) -> tuple[Ticket, str] | str:
-        """What s does on a card: (the ticket to start, how the confirm names it), or why it refuses. A map is
+    def _start_plan(self, ticket: Ticket, order: list[int] | None = None) -> StartPlan | str:
+        """What s does on a card, or why it refuses. A map is
         worked through its first frontier ticket without a live session, else, with an empty frontier, itself."""
         if ticket.is_wayfinder_map and ticket.is_open:
             taken = {n for n in self.sessions if self._live(n)} | self.starting
             if ready := frontier(ticket, self._tickets(), taken, order):
-                return ready[0], f" (next on map #{ticket.number})"
-            via = f" (map #{ticket.number}'s frontier is empty)"
+                return StartPlan(ready[0], f" (next on map {ticket.key})")
+            via = f" (map {ticket.key}'s frontier is empty)"
         else:
             via = ""
         if refusal := ticket.start_refusal(self.viewer):
             return refusal
         if self._live(ticket.number):
-            return f"#{ticket.number} has a live session: press Enter to go to it"
-        return ticket, via
+            return f"{ticket.key} has a live session: press Enter to go to it"
+        return StartPlan(ticket, via)
 
     def _live(self, number: int) -> bool:
         """An agent works the ticket, or this board is starting one."""
         return number in self.starting or any(s.status is not None for s in self.sessions.get(number, []))
 
     def _confirm_start(self, ticket: Ticket, via: str = "") -> None:
-        """Asks first; then starts Claude in a new worktree, or continues it in the ticket's agentless one."""
-        worktree = next(iter(self.sessions.get(ticket.number, [])), None)  # no live session: any is agentless
+        """Asks first; then starts Claude in a new worktree, or continues it in the ticket's agentless one, the
+        one named by its key (`issue-<n>`) first."""
+        worktrees = self.sessions.get(ticket.number, [])  # no live session: each is agentless
+        worktree = min(worktrees, key=lambda s: Path(s.path).name != ticket.slug, default=None)
+
+        def start() -> str:
+            try:
+                return self.workbench.start(ticket, worktree)
+            except HerdrError:
+                self.call_from_thread(self.starting.discard, ticket.number)
+                raise
 
         def confirmed(yes: bool | None) -> None:
             if yes:
                 self.starting.add(ticket.number)
                 self._render_board()
-                self._run(lambda: self.workbench.start(ticket, worktree))
+                self._run(start)
 
         if worktree is None:
-            question, detail, yes = f"Start #{ticket.number} {ticket.title}{via} in a new worktree?", \
-                self.describe_start(ticket), "Start"
+            self.push_screen(Confirm(f"Start {ticket.key} {ticket.title}{via} in a new worktree?",
+                                     self.describe_start(ticket), "Start"), confirmed)
         else:
-            name = Path(worktree.path).name
-            question, detail, yes = f"Continue #{ticket.number} {ticket.title}{via} in its worktree {name}?", \
-                f"claude --continue in {worktree.path}", "Continue"
-        self.push_screen(Confirm(question, detail, yes), confirmed)
+            self.push_screen(Confirm(f"Continue {ticket.key} {ticket.title}{via} in its worktree "
+                                     f"{Path(worktree.path).name}?", f"claude --continue in {worktree.path}",
+                                     "Continue"), confirmed)
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen(key_help(self), self.board_query))

@@ -75,13 +75,13 @@ class Ticket:
     def start_refusal(self, viewer: str | None) -> str | None:
         """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart."""
         if not self.is_open:
-            return f"#{self.number} is closed"
+            return f"{self.key} is closed"
         if self.blocked_by:
-            return f"#{self.number} is blocked by {', '.join(self.blocked_by)}"
+            return f"{self.key} is blocked by {', '.join(self.blocked_by)}"
         if self.open_blockers:
-            return f"#{self.number} is blocked by {self.open_blockers} open issue{'s' if self.open_blockers > 1 else ''}"
+            return f"{self.key} is blocked by {self.open_blockers} open issue{'s' if self.open_blockers > 1 else ''}"
         if viewer and self.assignees and viewer.lower() not in (a.lower() for a in self.assignees):
-            return f"#{self.number} is claimed by {', '.join('@' + a for a in self.assignees)}"
+            return f"{self.key} is claimed by {', '.join('@' + a for a in self.assignees)}"
         if not (self.is_wayfinder_work or self.map_missing):  # a typed ticket without its map is warned about apart
             return self.not_wayfinder_work
         if self.card_kind:
@@ -98,15 +98,15 @@ class Ticket:
     @property
     def not_startable(self) -> str:
         article = "an" if self.card_kind == "impl" else "a"
-        return f"#{self.number} is {article} {self.card_kind} card: s starts /wayfinder only on maps and decision tickets"
+        return f"{self.key} is {article} {self.card_kind} card: s starts /wayfinder only on maps and decision tickets"
 
     @property
     def not_wayfinder_work(self) -> str:
-        return f"#{self.number} is not wayfinder work: the board only starts /wayfinder"
+        return f"{self.key} is not wayfinder work: the board only starts /wayfinder"
 
     @property
     def is_wayfinder_work(self) -> bool:
-        """A map, or a ticket on one: the only work the board starts, always with /wayfinder."""
+        """A map, or a ticket on one: a decision ticket, or a spec or impl card, which s refuses."""
         return self.is_wayfinder_map or self.is_wayfinder_ticket or self.map_url is not None
 
     @property
