@@ -103,6 +103,18 @@ class Query:
     named_map: int | None = None
 
 
+@dataclass(frozen=True)
+class Quota:
+    """What a provider's last fetch cost in the tracker's rate-limit points, and what the tracker has left.
+
+    Only GitHub reports one; a provider without a `quota` reading is not paced.
+    """
+
+    cost: int  # the points the last fetch spent, summed over its calls
+    remaining: int | None  # the points left, as the latest call saw them
+    resets_at: datetime | None  # when the points refill
+
+
 # Children read per map, and maps per board; a tracker page beyond these is not asked for.
 LIMIT = 300
 # Issues read per `wayfinder:` label on trackers without sub-issues: the whole repo's, open and closed, before
