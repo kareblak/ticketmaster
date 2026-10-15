@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -26,7 +27,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--version", action="store_true", help="print the version")
     parser.add_argument("command", choices=COMMANDS)
     # Read as text and converted below, so an unknown flag's value never fails as a map before the flag is named.
-    parser.add_argument("map", nargs="?", help="a map issue to show, also when it is closed")
+    parser.add_argument("map", nargs="?", help="a map to filter the board to (42, #42, TM-1 or its URL), shown also when closed")
     parser.add_argument("--repo", help="owner/name (default: from the git remote)")
     parser.add_argument("--provider", choices=["github", "gitlab", "gitea", "forgejo"])
     parser.add_argument("--host", help="tracker host, for self-hosted instances")
@@ -38,18 +39,32 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.map is not None:
         if not is_issue(args.map):
-            parser.error(f"argument map: not an issue number or URL: {args.map!r}")
-        args.map = parse_number(args.map)
+            parser.error(f"argument map: not an issue number, key or URL: {args.map!r}")
+        args.map = parse_map(args.map)
     return args
 
 
-def parse_number(value: str) -> int:
-    return int(value.lstrip("#").rsplit("/", 1)[-1])
+_KEY = r"[A-Za-z][A-Za-z0-9]*-\d+"  # a tracker key, e.g. Linear's `TM-1`
+_KEY_OR_NUMBER = re.compile(rf"^(?P<key>{_KEY})$|^#?(?P<number>\d+)$")
+# An issue URL: Linear `/issue/TM-1/<slug>`, GitHub/Gitea `/issues/42`, GitLab `/-/issues/42`, else a URL ending
+# in the number (GitLab `/-/work_items/42`).
+_ISSUE_URL = re.compile(rf"/issue/(?P<key>{_KEY})(?:[/?#]|$)|/issues/(?P<number>\d+)(?:[/?#]|$)|/(?P<last>\d+)/?$")
+
+
+def parse_map(value: str) -> int | str:
+    """The map's number from `42`, `#42` or an issue URL, or its key (`TM-1`, upper-cased) from the key or a Linear
+    URL; ValueError for anything else. A key matches the map card with that tracker key, never issue number 1."""
+    match = _ISSUE_URL.search(value) if "://" in value else _KEY_OR_NUMBER.match(value)
+    if match is None:
+        raise ValueError(f"not an issue: {value!r}")
+    if match.group("key"):
+        return match.group("key").upper()
+    return int(match.group("number") or match.group("last"))
 
 
 def is_issue(value: str) -> bool:
     try:
-        parse_number(value)
+        parse_map(value)
     except ValueError:
         return False
     return True
@@ -104,12 +119,13 @@ def main(argv: list[str] | None = None) -> int:
     workbench = workbench_for(cwd, load_config(cwd))
     BoardApp(
         provider,
-        Query(named_map=args.map),
+        Query(named_map=args.map if isinstance(args.map, int) else None),  # a key is matched on the board alone
         interval=args.interval,
         workbench=workbench,
         describe_start=lambda ticket: workbench.prompt(ticket)
         + f"\nworktree: {worktree_name(ticket)}, in its own herdr workspace",
         columns=args.columns,
         settings_path=settings_path(),
+        map_key=args.map if isinstance(args.map, str) else None,
     ).run()
     return 0

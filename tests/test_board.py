@@ -3,8 +3,8 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, passes_authors,
-                               passes_labels, render_card)
+from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, passes_filters,
+                               render_card)
 from ticketmaster.herdr import Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
@@ -161,7 +161,7 @@ def test_a_closed_map_is_hidden_unless_named_and_then_shows_as_its_header_alone(
                 assert "open maps + #40" in status_of(app)
 
     run(scenario(Query(), [9]))
-    run(scenario(Query(named_map=40), [9, 40]))
+    run(scenario(Query(named_map=40), [40]))  # the map filter is preset to it; Esc shows the open maps too
 
 
 def test_ticket_cards_show_type_mode_assignee_blockers_and_the_maps_name():
@@ -373,6 +373,8 @@ def test_s_refuses_a_decided_ticket_and_a_closed_map():
                        workbench=bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
+            await pilot.press("escape")  # off the map preset: every open map and the named closed one
+            await pilot.pause()
             for number in (4, 40):
                 await select(app, pilot, number)
                 await pilot.press("s")
@@ -722,7 +724,7 @@ def test_help_lists_every_visible_binding_and_closes_without_quitting():
                     if binding.show:
                         assert binding.description in text
                         assert app.get_key_display(binding) in text
-                assert "herdr agent issue-<n>" in text and "select authors" in text
+                assert "herdr agent issue-<n>" in text and "assignee (me, unassigned, anyone)" in text
                 assert "The board only reads" in text
                 await pilot.press(close)
                 await pilot.pause()
@@ -749,128 +751,20 @@ def test_help_explains_lanes_and_the_four_column_rules():
     run(scenario())
 
 
-LABELLED = [
-    MAP,
-    on(9, 1, "Login bug", labels=("wayfinder:grilling", "bug")),
-    on(9, 2, "Dark mode", labels=("wayfinder:grilling", "ux", "wontfix")),
-    on(9, 3, "Crash on save", labels=("wayfinder:grilling", "bug", "wontfix")),
-    on(9, 4, "Docs"),
-]
-BOARD_LABELS = ["bug", "ux", "wayfinder:grilling", "wayfinder:map", "wontfix"]
-
-
-def test_passes_labels_includes_with_or_and_excludes_any():
-    known = {"bug", "ux", "wontfix"}
-    shown = lambda modes: [t.number for t in LABELLED[1:] if passes_labels(t, modes, known)]
-    assert shown({}) == [1, 2, 3, 4]
-    assert shown({"bug": "include", "ux": "include"}) == [1, 2, 3]
-    assert shown({"wontfix": "exclude"}) == [1, 4]
-    assert shown({"bug": "include", "wontfix": "exclude"}) == [1]
-    assert shown({"gone": "include", "wontfix": "exclude"}) == [1, 4]  # a saved label no longer on the board
-
-
 def shown_numbers(app):
     """The ticket cards on the board; map headers always show."""
     return sorted(c.ticket.number for c in app.query(Card) if c.column is not None)
 
 
-async def pick(pilot, app, label, times=1):
-    """Focuses `label` in the open picker and cycles it."""
-    option = next(o for o in app.screen.query(PickerOption) if o.value == label)
+async def pick(pilot, app, value, section=None, times=1):
+    """Focuses `value` (of `section`, when given) in the open picker and presses Enter on it."""
+    option = next(o for o in app.screen.query(PickerOption)
+                  if o.value == value and section in (None, o.section))
     option.focus()
     await pilot.pause()
     for _ in range(times):
         await pilot.press("enter")
     await pilot.pause()
-
-
-def test_f_picker_lists_board_labels_and_narrows_the_board_live(tmp_path):
-    async def scenario():
-        app = BoardApp(FakeProvider(LABELLED), Query(), interval=60, settings_path=tmp_path / "settings.json")
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("f")
-            await pilot.pause()
-            assert isinstance(app.screen, FilterPicker)
-            assert [o.value for o in app.screen.query(PickerOption) if o.section == "Labels"] == BOARD_LABELS
-            await pick(pilot, app, "bug")  # include
-            assert shown_numbers(app) == [1, 3]
-            await pick(pilot, app, "wontfix", times=2)  # exclude
-            assert shown_numbers(app) == [1]
-            assert "labels: +bug -wontfix" in str(app.query_one("#status").render())
-            await pick(pilot, app, "bug", times=2)  # exclude, then off
-            assert shown_numbers(app) == [1, 4]
-            await pilot.press("c")
-            await pilot.pause()
-            assert shown_numbers(app) == [1, 2, 3, 4] and app.filters["Labels"] == {}
-            await pilot.press("escape")
-            await pilot.pause()
-            assert not isinstance(app.screen, FilterPicker)
-
-    run(scenario())
-
-
-def test_label_filter_combines_with_text_filter_and_esc_clears_both(tmp_path):
-    async def scenario():
-        app = BoardApp(FakeProvider(LABELLED), Query(), interval=60, settings_path=tmp_path / "settings.json")
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("f")
-            await pilot.pause()
-            await pick(pilot, app, "bug")
-            await pilot.press("escape")
-            await pilot.pause()
-            await pilot.press("slash", *"crash", "enter")
-            await pilot.pause()
-            assert shown_numbers(app) == [3]
-            await pilot.press("escape")
-            await pilot.pause()
-            assert shown_numbers(app) == [1, 2, 3, 4]
-            assert "labels:" not in str(app.query_one("#status").render())
-
-    run(scenario())
-
-
-def test_label_filter_is_saved_per_repo_and_restored(tmp_path):
-    settings = tmp_path / "settings.json"
-    settings.write_text(json.dumps({"auto_remove": True, "filters": {"other:x/y": {"labels": {"ux": "include"}}}}))
-
-    async def choose():
-        app = BoardApp(FakeProvider(LABELLED), Query(), interval=60, settings_path=settings)
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("f")
-            await pilot.pause()
-            await pick(pilot, app, "wontfix", times=2)
-
-    async def reopen():
-        app = BoardApp(FakeProvider(LABELLED), Query(), interval=60, settings_path=settings)
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            assert shown_numbers(app) == [1, 4]
-            assert "labels: -wontfix" in str(app.query_one("#status").render())
-
-    run(choose())
-    assert json.loads(settings.read_text()) == {
-        "auto_remove": True,
-        "filters": {"other:x/y": {"labels": {"ux": "include"}}, "fake:o/r": {"labels": {"wontfix": "exclude"}, "authors": []}},
-    }
-    run(reopen())
-
-
-def test_clicking_a_picker_option_cycles_that_option(tmp_path):
-    async def scenario():
-        app = BoardApp(FakeProvider(LABELLED), Query(), interval=60, settings_path=tmp_path / "settings.json")
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("f")
-            await pilot.pause()
-            option = next(o for o in app.screen.query(PickerOption) if o.value == "ux")
-            await pilot.click(option)
-            await pilot.pause()
-            assert app.filters["Labels"] == {"ux": "include"} and shown_numbers(app) == [2]
-
-    run(scenario())
 
 
 def test_pacer_backs_off_to_a_minute_and_sessions_to_ten_seconds():
@@ -1086,105 +980,6 @@ def test_errors_without_a_status_notify_each_time_the_message_changes():
                                             ("fake error\n`gh` timed out", "error")]
 
     run(scenario())
-
-
-AUTHORED = [
-    MAP,
-    on(9, 1, "Login bug", labels=("wayfinder:grilling", "bug"), author="alice"),
-    on(9, 2, "Dark mode", labels=("wayfinder:grilling", "ux"), author="bob"),
-    on(9, 3, "Crash on save", labels=("wayfinder:grilling", "bug"), author="bob"),
-    on(9, 4, "Docs", author="carol"),
-    on(9, 5, "Imported"),
-]
-
-
-def test_passes_authors_matches_any_selected_author():
-    known = {"alice", "bob", "carol"}
-    shown = lambda selected: [t.number for t in AUTHORED[1:] if passes_authors(t, selected, known)]
-    assert shown({}) == [1, 2, 3, 4, 5]
-    assert shown({"bob": "include"}) == [2, 3]
-    assert shown({"alice": "include", "carol": "include"}) == [1, 4]
-    assert shown({"gone": "include"}) == [1, 2, 3, 4, 5]  # a saved author no longer on the board
-
-
-def test_picker_selects_authors_on_and_off_and_shows_them_in_the_status_line(tmp_path):
-    async def scenario():
-        app = BoardApp(FakeProvider(AUTHORED), Query(), interval=60, settings_path=tmp_path / "settings.json")
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("f")
-            await pilot.pause()
-            authors = [o.value for o in app.screen.query(PickerOption) if o.section == "Authors"]
-            assert authors == ["alice", "bob", "carol"]
-            await pick(pilot, app, "alice")
-            await pick(pilot, app, "carol")
-            assert shown_numbers(app) == [1, 4]
-            assert "authors: alice, carol" in str(app.query_one("#status").render())
-            await pick(pilot, app, "carol")  # second press deselects; authors have no exclude
-            assert shown_numbers(app) == [1] and app.filters["Authors"] == {"alice": "include"}
-            await pilot.press("c")
-            await pilot.pause()
-            assert shown_numbers(app) == [1, 2, 3, 4, 5] and app.filters["Authors"] == {}
-            assert "authors:" not in str(app.query_one("#status").render())
-
-    run(scenario())
-
-
-def test_author_filter_combines_with_label_and_text_filters_and_esc_clears_all(tmp_path):
-    async def scenario():
-        app = BoardApp(FakeProvider(AUTHORED), Query(), interval=60, settings_path=tmp_path / "settings.json")
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("f")
-            await pilot.pause()
-            await pick(pilot, app, "bob")
-            assert shown_numbers(app) == [2, 3]
-            await pick(pilot, app, "bug")
-            assert shown_numbers(app) == [3]
-            await pick(pilot, app, "bug")  # exclude
-            assert shown_numbers(app) == [2]
-            await pick(pilot, app, "bug")  # off
-            await pilot.press("escape")
-            await pilot.pause()
-            await pilot.press("slash", *"dark", "enter")
-            await pilot.pause()
-            assert shown_numbers(app) == [2]
-            await pilot.press("escape")
-            await pilot.pause()
-            assert shown_numbers(app) == [1, 2, 3, 4, 5] and app.filters["Authors"] == {}
-
-    run(scenario())
-
-
-def test_author_filter_is_saved_per_repo_and_restored(tmp_path):
-    settings = tmp_path / "settings.json"
-    settings.write_text(json.dumps({"filters": {"other:x/y": {"labels": {}, "authors": ["alice"]}}}))
-
-    async def choose():
-        app = BoardApp(FakeProvider(AUTHORED), Query(), interval=60, settings_path=settings)
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            await pilot.press("f")
-            await pilot.pause()
-            await pick(pilot, app, "carol")
-            await pick(pilot, app, "bob")
-            await pick(pilot, app, "ux")
-
-    async def reopen():
-        app = BoardApp(FakeProvider(AUTHORED), Query(), interval=60, settings_path=settings)
-        async with app.run_test(size=(160, 40)) as pilot:
-            await loaded(app, pilot)
-            assert shown_numbers(app) == [2]
-            assert "authors: bob, carol" in str(app.query_one("#status").render())
-
-    run(choose())
-    assert json.loads(settings.read_text()) == {
-        "filters": {
-            "other:x/y": {"labels": {}, "authors": ["alice"]},
-            "fake:o/r": {"labels": {"ux": "include"}, "authors": ["bob", "carol"]},
-        },
-    }
-    run(reopen())
 
 
 def notifications(app):
@@ -1556,3 +1351,304 @@ def test_enter_on_an_impl_card_without_a_worktree_names_the_implement_start_or_t
                 "#54 has no session here; s refuses: #54 is claimed by @bob"]
 
     run(scenario())
+
+
+FILTER_SPEC = spec_of(20, 30, author="dana")
+FILTERED = [
+    MAP,
+    on(9, 1, "Which store?", author="alice"),  # grilling · HITL, unassigned
+    on(9, 2, "Read the API", "research", author="bob", assignees=("me",)),  # AFK, mine
+    on(9, 3, "Sign up", "task", body="HITL: needs a card", author="bob", assignees=("carol",)),  # HITL, theirs
+    a_map(20, "Ship billing"),
+    on(20, 21, "Try a mock", "prototype", author="carol"),  # HITL
+    FILTER_SPEC,
+    impl_of(FILTER_SPEC, 31, author="dana", assignees=("ME",)),
+]
+
+
+def filters_app(tmp_path, query=Query(), tickets=FILTERED):
+    return BoardApp(FakeProvider(tickets), query, interval=60, settings_path=tmp_path / "settings.json")
+
+
+def picker_values(app, section):
+    return [o.value for o in app.screen.query(PickerOption) if o.section == section]
+
+
+def test_passes_filters_ors_within_a_section_ands_across_and_ignores_values_not_on_the_board():
+    known = {"Type": {"grilling", "research", "task", "prototype", "spec", "impl"}, "HITL/AFK": {"HITL", "AFK"},
+             "Author": {"alice", "bob", "carol", "dana"}}
+    cards = [t for t in FILTERED if not t.is_wayfinder_map]
+    shown = lambda filters, viewer="me": [t.number for t in cards if passes_filters(t, filters, known, viewer)]
+    chosen = lambda *values: dict.fromkeys(values, "include")
+    assert shown({}) == [1, 2, 3, 21, 30, 31]
+    assert shown({"Type": chosen("research", "impl")}) == [2, 31]
+    assert shown({"HITL/AFK": chosen("HITL")}) == [1, 3, 21]
+    assert shown({"HITL/AFK": chosen("HITL"), "Author": chosen("bob")}) == [3]
+    assert shown({"Assignee": chosen("me")}) == [2, 31]  # the login, in any case
+    assert shown({"Assignee": chosen("me")}, viewer=None) == []  # an unknown login is nobody
+    assert shown({"Assignee": chosen("unassigned")}) == [1, 21, 30]
+    assert shown({"Author": chosen("gone"), "Type": chosen("spec")}) == [30]  # a saved author no longer on the board
+
+
+def test_f_picker_offers_values_from_the_board_and_each_filter_narrows_it(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            assert isinstance(app.screen, FilterPicker)
+            assert picker_values(app, "Type") == ["research", "prototype", "grilling", "task", "spec", "impl"]
+            assert picker_values(app, "HITL/AFK") == ["HITL", "AFK"]
+            assert picker_values(app, "Assignee") == ["me", "unassigned", "anyone"]
+            assert picker_values(app, "Map") == ["9", "20"]
+            assert picker_values(app, "Author") == ["alice", "bob", "carol", "dana"]
+            assert not picker_values(app, "Labels")  # the old label filter is gone
+
+            await pick(pilot, app, "task")
+            await pick(pilot, app, "prototype")
+            assert shown_numbers(app) == [3, 21] and headers(app) == [9, 20]
+            await pick(pilot, app, "task")  # off again
+            assert shown_numbers(app) == [21] and headers(app) == [20]  # a lane with no match is hidden
+            assert "type: prototype" in status_of(app)
+            await pilot.press("c")
+            await pilot.pause()
+
+            await pick(pilot, app, "AFK")
+            assert shown_numbers(app) == [2] and headers(app) == [9]
+            await pilot.press("c")
+            await pilot.pause()
+
+            await pick(pilot, app, "me")
+            assert shown_numbers(app) == [2, 31] and "assignee: me" in status_of(app)
+            await pick(pilot, app, "unassigned")  # one choice at a time
+            assert shown_numbers(app) == [1, 21, 30] and app.filters["Assignee"] == {"unassigned": "include"}
+            await pick(pilot, app, "anyone")
+            assert shown_numbers(app) == [1, 2, 3, 21, 30, 31] and app.filters["Assignee"] == {}
+
+            await pick(pilot, app, "20")
+            assert headers(app) == [20] and shown_numbers(app) == [21, 30, 31] and "map: #20" in status_of(app)
+            await pick(pilot, app, "20")
+
+            await pick(pilot, app, "bob")
+            await pick(pilot, app, "dana")
+            assert shown_numbers(app) == [2, 3, 30, 31] and "author: bob, dana" in status_of(app)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not isinstance(app.screen, FilterPicker)
+            assert "Blocked (0)" in str(app.query_one("#head-BLOCKED").render())
+            assert "Frontier (1)" in str(app.query_one("#head-FRONTIER").render())  # #30, the spec
+            assert "Claimed (3)" in str(app.query_one("#head-CLAIMED").render())
+
+    run(scenario())
+
+
+def test_lane_headers_keep_the_maps_own_counts_under_a_filter(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            before = card_text(app, 9)
+            await pilot.press("f")
+            await pilot.pause()
+            await pick(pilot, app, "alice")
+            assert shown_numbers(app) == [1] and card_text(app, 9) == before
+            assert "0 decided · 3 open · 0 blocked" in before
+
+    run(scenario())
+
+
+def test_text_filter_combines_with_the_picker_and_esc_clears_every_filter(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            await pick(pilot, app, "HITL")
+            await pick(pilot, app, "9")
+            await pilot.press("escape")
+            await pilot.pause()
+            await pilot.press("slash", *"sign", "enter")
+            await pilot.pause()
+            assert shown_numbers(app) == [3] and "filter: sign" in status_of(app)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert shown_numbers(app) == [1, 2, 3, 21, 30, 31] and headers(app) == [9, 20]
+            assert not any(app.filters.values()) and app.needle == ""
+            for gone in ("filter:", "hitl/afk:", "map:"):
+                assert gone not in status_of(app)
+
+    run(scenario())
+
+
+def test_a_filter_that_matches_nothing_says_so(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("slash", *"nothing here", "enter")
+            await pilot.pause()
+            assert headers(app) == [] and "No cards match the filters" in str(app.query_one("#empty").render())
+
+    run(scenario())
+
+
+def test_filters_are_saved_per_repo_and_restored_on_the_next_open(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"auto_remove": True, "filters": {"other:x/y": {"authors": ["alice"]}}}))
+
+    async def choose():
+        app = BoardApp(FakeProvider(FILTERED), Query(), interval=60, settings_path=settings)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            for value in ("grilling", "task", "HITL", "unassigned", "9", "alice"):
+                await pick(pilot, app, value)
+
+    async def reopen():
+        app = BoardApp(FakeProvider(FILTERED), Query(), interval=60, settings_path=settings)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            assert shown_numbers(app) == [1] and headers(app) == [9]
+            assert "type: grilling, task" in status_of(app) and "assignee: unassigned" in status_of(app)
+
+    run(choose())
+    assert json.loads(settings.read_text()) == {
+        "auto_remove": True,
+        "filters": {
+            "other:x/y": {"authors": ["alice"]},
+            "fake:o/r": {"types": ["grilling", "task"], "modes": ["HITL"], "assignee": ["unassigned"], "maps": [9],
+                         "authors": ["alice"]},
+        },
+    }
+    run(reopen())
+
+
+def test_clicking_a_picker_option_selects_that_option(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            option = next(o for o in app.screen.query(PickerOption) if o.value == "carol")
+            await pilot.click(option)
+            await pilot.pause()
+            assert app.filters["Author"] == {"carol": "include"} and shown_numbers(app) == [21]
+
+    run(scenario())
+
+
+CLOSED_MAP = [*FILTERED, a_map(40, "Old effort", is_open=False), on(40, 41, is_open=False)]
+
+
+def test_a_named_map_presets_the_map_filter_and_clearing_it_shows_every_open_map(tmp_path):
+    async def scenario(named, expect):
+        app = filters_app(tmp_path, Query(named_map=named), CLOSED_MAP)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            assert headers(app) == [named] and shown_numbers(app) == expect
+            assert f"map: #{named}" in status_of(app)
+            await pilot.press("escape")
+            await pilot.pause()
+            assert headers(app) == ([9, 20, 40] if named == 40 else [9, 20])  # a named closed map stays
+            assert "map:" not in status_of(app)
+
+    run(scenario(20, [21, 30, 31]))
+    run(scenario(40, []))  # closed: its header card alone
+
+
+def test_a_named_closed_map_stays_under_a_card_filter(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path, Query(named_map=40), CLOSED_MAP)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("slash", *"sign", "enter")
+            await pilot.pause()
+            assert headers(app) == [40]
+
+    run(scenario())
+
+
+def test_saved_values_that_cannot_be_filters_are_dropped(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"filters": {"fake:o/r": {
+        "types": 3, "assignee": "me", "maps": ["abc", 9], "authors": ["bob"]}}}))
+
+    async def scenario():
+        app = BoardApp(FakeProvider(FILTERED), Query(), interval=60, settings_path=settings)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            assert app.filters["Type"] == {} and app.filters["Assignee"] == {} and app.filters["Map"] == {"9": "include"}
+            assert shown_numbers(app) == [2, 3]
+            await pilot.press("f")
+            await pilot.pause()
+            await pick(pilot, app, "me")  # saving no longer trips over the bad values
+
+    run(scenario())
+    assert json.loads(settings.read_text())["filters"]["fake:o/r"]["maps"] == [9]
+
+
+KEYED = [*FILTERED[:4], a_map(20, "Ship billing", key="TM-7"), *FILTERED[5:]]  # map #20 has the tracker key TM-7
+
+
+def keyed_app(tmp_path, value, tickets=KEYED, settings=None):
+    """The board as `ticketmaster <value>` opens it."""
+    from ticketmaster.cli import parse_args
+
+    named = parse_args([value]).map
+    query = Query(named_map=named if isinstance(named, int) else None)
+    return BoardApp(FakeProvider(tickets), query, interval=60, settings_path=settings or tmp_path / "settings.json",
+                    map_key=named if isinstance(named, str) else None)
+
+
+def test_each_accepted_map_form_presets_the_map_filter(tmp_path):
+    async def scenario(value):
+        app = keyed_app(tmp_path, value)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            assert headers(app) == [20], value
+            await pilot.press("escape")
+            await pilot.pause()
+            assert headers(app) == [9, 20], value
+
+    for value in ("#20", "20", "tm-7", "https://linear.app/t/issue/TM-7/ship", "https://github.com/o/r/issues/20"):
+        run(scenario(value))
+
+
+def test_a_key_matches_the_maps_tracker_key_never_its_number(tmp_path):
+    async def scenario():
+        app = keyed_app(tmp_path, "TM-20")  # #20's key is TM-7: TM-20 names no map here
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            assert headers(app) == [] and "map: TM-20" in status_of(app)
+            assert "No cards match the filters" in str(app.query_one("#empty").render())
+
+    run(scenario())
+
+
+def test_a_named_map_is_never_saved(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"filters": {"fake:o/r": {"maps": [9]}}}))
+
+    async def named():
+        app = keyed_app(tmp_path, "20", settings=settings)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            assert headers(app) == [20]
+            await pilot.press("f")
+            await pilot.pause()
+            await pick(pilot, app, "carol")
+
+    async def plain():
+        app = BoardApp(FakeProvider(KEYED), Query(), interval=60, settings_path=settings)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            assert headers(app) == [] and app.filters["Map"] == {"9": "include"}  # carol has no card on #9
+            assert app.filters["Author"] == {"carol": "include"}
+
+    run(named())
+    assert json.loads(settings.read_text())["filters"]["fake:o/r"]["maps"] == [9]
+    run(plain())

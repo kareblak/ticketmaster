@@ -42,6 +42,27 @@ def test_cli_accepts_bare_map_and_explicit_command():
     assert parse_args([]).command == "open"
 
 
+@pytest.mark.parametrize("value, number", [
+    ("#42", 42), ("42", 42), ("TM-1", "TM-1"), ("tm-1", "TM-1"), ("https://github.com/o/r/issues/42", 42),
+    ("https://gitlab.com/g/p/-/issues/42", 42), ("https://linear.app/team/issue/TM-1/pick-a-stack", "TM-1"),
+    ("https://gitlab.com/g/p/-/work_items/42", 42),
+])
+def test_cli_parses_each_map_form_as_the_map_argument(value, number):
+    from ticketmaster.cli import parse_args
+
+    assert (parse_args([value]).command, parse_args([value]).map) == ("open", number)
+    assert parse_args(["open", value, "--columns", "one"]).map == number
+
+
+@pytest.mark.parametrize("value", ["TM-", "pick-a-stack", "https://github.com/o/r", "#x"])
+def test_cli_refuses_a_map_that_names_no_issue(value, capsys, monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    from ticketmaster.cli import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["open", value])
+
+
 @pytest.mark.parametrize("command", ["snapshot", "adopt", "setup", "install-skill", "upgrade"])
 def test_removed_commands_get_argparses_invalid_choice_error(command, capsys, monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
