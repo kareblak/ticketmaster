@@ -219,23 +219,33 @@ def lanes(board):
     return {lane.map.number: {c: [t.number for t in ts] for c, ts in lane.columns.items() if ts} for lane in board.lanes}
 
 
-def test_each_open_map_is_a_lane_of_its_decision_tickets_in_the_four_columns():
+def test_each_open_map_is_a_lane_of_its_tickets_in_the_four_columns():
     other = ticket(number=20, labels=MAP)
     tickets = [
         other, MAP_TICKET,
         child(2), child(3, open_blockers=1, assignees=("bob",)), child(4, assignees=("bob",)),
         child(5, is_open=False), child(21, parent_number=20, parent_url="u20"),
         ticket(number=30),  # not wayfinder work
-        ticket(number=31, map_number=1, map_url="u1"),  # a spec: not a decision ticket
+        ticket(number=31, map_number=1, map_url="u1"),  # an implementation ticket of the map's spec
         ticket(number=32, labels=("wayfinder:task",)),  # its map not found
+        ticket(number=33, body="Part of #20", map_number=20, map_url="u20", assignees=("bob",)),  # map #20's spec
     ]
     board = build_board(tickets)
     assert [lane.map.number for lane in board.lanes] == [1, 20]
     assert lanes(board) == {
-        1: {Column.BLOCKED: [3], Column.FRONTIER: [2], Column.CLAIMED: [4], Column.DECIDED: [5]},
-        20: {Column.FRONTIER: [21]},
+        1: {Column.BLOCKED: [3], Column.FRONTIER: [2, 31], Column.CLAIMED: [4], Column.DECIDED: [5]},
+        20: {Column.FRONTIER: [21], Column.CLAIMED: [33]},
     }
-    assert board.ticket_count() == 5
+    assert board.ticket_count() == 7
+    assert map_progress(MAP_TICKET, tickets) == (1, 3, 1)  # the map's decisions only
+
+
+def test_spec_kind_tells_a_maps_spec_from_its_implementation_tickets():
+    assert ticket(body="Part of #1\n\n## Problem", map_number=1, map_url="u1").spec_kind == "spec"
+    assert ticket(body="## Parent\n\n#7", map_number=1, map_url="u1").spec_kind == "impl"
+    assert ticket(body="Part of #1", map_number=1, map_url="u1", labels=("wayfinder:task",)).spec_kind is None
+    assert ticket(body="Part of #1").spec_kind is None  # no map resolved
+    assert child(2).spec_kind is None and MAP_TICKET.spec_kind is None
 
 
 def test_lane_columns_sort_by_sub_issue_order_then_number_and_decided_keeps_all():
