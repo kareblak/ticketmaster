@@ -1,8 +1,6 @@
-"""Gitea and Forgejo via REST, reusing the login stored by the `tea` CLI.
-
-Token lookup order: GITEA_TOKEN / FORGEJO_TOKEN env vars, then the `tea` config login whose
-URL matches the repo host. Dependencies come from `/issues/{n}/dependencies` plus `Blocked by:`
-body lines. There are no sub-issues, so the board reads the repo's and its org's `wayfinder:` labels: the
+"""Gitea and Forgejo via `tea api`, with the `tea` login whose URL matches the repo host (a token or an OAuth login,
+which tea keeps fresh). `tea api` exits 0 on HTTP errors, so the status and headers come from its `-i` output on
+stderr. Dependencies come from `/issues/{n}/dependencies` plus `Blocked by:` body lines. There are no sub-issues, so the board reads the repo's and its org's `wayfinder:` labels: the
 open maps, and each typed ticket whose body's first line is `Part of #<map>` for one of them. A map's spec is an
 untyped issue with that first line, and the spec's implementation tickets name it in a `## Parent` section; both
 are found by an issue search (`q`). An open pull request closes an issue when its body says
@@ -13,23 +11,24 @@ from __future__ import annotations
 
 import functools
 import json
-import os
 import re
-import urllib.error
+import subprocess
 import urllib.parse
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from email.message import Message
+from email.parser import HeaderParser
 from email.utils import parsedate_to_datetime
-from pathlib import Path
 
 from ..model import Ticket, parse_time
 from . import (LABEL_LIMIT, LIMIT, SPEC_SEARCHES, IssueStates, NotFound, ProviderError, Query, RateLimited,
-               blocker_ref, map_board, resolve_maps, tracker_error, wayfinder_labels, with_body_blockers, with_specs)
+               blocker_ref, map_board, resolve_maps, run_json, tracker_error, wayfinder_labels, with_body_blockers,
+               with_specs)
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
+STATUS = re.compile(r"^HTTP/\S+ (\d{3})\b ?(.*)$", re.MULTILINE)
 
 
 def now() -> datetime:
@@ -51,23 +50,31 @@ def lifts_at(headers) -> datetime | None:
     return datetime.fromtimestamp(int(reset), timezone.utc) if reset and reset.strip().isdigit() else None
 
 
-def error_message(exc: urllib.error.HTTPError) -> str:
+def error_message(body: str) -> str:
     """The `message` of the tracker's JSON error body, when it sent one."""
     try:
-        return str(json.loads(exc.read() or b"null").get("message") or "")
-    except (ValueError, AttributeError, OSError):
+        return str(json.loads(body or "null").get("message") or "")
+    except (ValueError, AttributeError):
         return ""
 
 
 class GiteaProvider:
     name = "gitea"
 
-    def __init__(self, repo: str, host: str, token: str | None = None, scheme: str = "https"):
+    def __init__(self, repo: str, host: str, login: str | None = None):
         self.repo = repo
         self.host = host
-        self.base = f"{scheme}://{host}/api/v1"
-        self.token = token or find_token(host)
+        if login:
+            self.login = login
         self.states = IssueStates(self._issue_states)
+
+    @functools.cached_property
+    def login(self) -> str:
+        """The name of the `tea` login for this host, looked up on the first call."""
+        for login in run_json(["tea", "logins", "list", "-o", "json"]) or []:
+            if urllib.parse.urlparse(login.get("url", "")).hostname == self.host:
+                return login["name"]
+        raise ProviderError(f"no `tea` login for {self.host}: run `tea logins add --url https://{self.host}`")
 
     def viewer(self) -> str | None:
         return self._get("/user").get("login")
@@ -144,25 +151,31 @@ class GiteaProvider:
         return items[:limit]
 
     def _get(self, path: str, params: dict | None = None):
-        url = self.base + path + ("?" + urllib.parse.urlencode(params) if params else "")
-        request = urllib.request.Request(url, headers={"Accept": "application/json"})
-        if self.token:
-            request.add_header("Authorization", f"token {self.token}")
-        try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                answer = response.read()
-                return json.loads(answer) if answer else None
-        except urllib.error.HTTPError as exc:
-            if exc.code == 429:
-                raise RateLimited(f"{self.host}{path}: HTTP 429 rate limit exceeded", 429,
-                                  resets_at=lifts_at(exc.headers or {})) from exc
-            if exc.code == 404:
-                raise NotFound(f"{self.host}{path}: HTTP 404 {exc.reason}") from exc
-            said = error_message(exc)
-            raise tracker_error(f"{self.host}{path}: HTTP {exc.code} {exc.reason}" + (f": {said}" if said else "")) from exc
-        except urllib.error.URLError as exc:
-            raise ProviderError(f"{self.host}: {exc.reason}") from exc
+        endpoint = path + ("?" + urllib.parse.urlencode(params) if params else "")
+        status, reason, headers, body = tea_api(["tea", "api", "--login", self.login, "-i", endpoint])
+        if status == 429:
+            raise RateLimited(f"{self.host}{path}: HTTP 429 rate limit exceeded", 429, resets_at=lifts_at(headers))
+        if status == 404:
+            raise NotFound(f"{self.host}{path}: HTTP 404 {reason}")
+        if status >= 400:
+            said = error_message(body)
+            raise tracker_error(f"{self.host}{path}: HTTP {status} {reason}" + (f": {said}" if said else ""))
+        return json.loads(body) if body.strip() else None
 
+
+def tea_api(args: list[str]) -> tuple[int, str, Message, str]:
+    """Status, reason, headers and body of a `tea api -i` call; a call that never reached the tracker raises."""
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    except FileNotFoundError as exc:
+        raise ProviderError("`tea` is not installed or not on PATH") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ProviderError(f"`{' '.join(args[:3])}` timed out") from exc
+    status = STATUS.search(result.stderr)
+    if result.returncode != 0 or not status:
+        raise tracker_error(result.stderr.strip() or result.stdout.strip() or f"`tea` exited {result.returncode}")
+    headers = HeaderParser().parsestr(result.stderr[status.end():].lstrip("\r\n"), headersonly=True)
+    return int(status[1]), status[2].strip(), headers, result.stdout
 
 
 def with_native_blockers(ticket: Ticket, blocked_by: tuple[str, ...] | None) -> Ticket:
@@ -188,31 +201,3 @@ def to_ticket(issue: dict, blocked_by: tuple[str, ...] | None, pr_bodies: list[s
         has_open_change_request=is_open and any(closing.search(body) for body in pr_bodies),
         order=0,
     )
-
-
-def find_token(host: str) -> str | None:
-    for var in ("GITEA_TOKEN", "FORGEJO_TOKEN"):
-        if os.environ.get(var):
-            return os.environ[var]
-    for config in tea_config_paths():
-        if config.exists():
-            token = token_from_tea_config(config.read_text(), host)
-            if token:
-                return token
-    return None
-
-
-def tea_config_paths() -> list[Path]:
-    home = Path.home()
-    xdg = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
-    return [xdg / "tea" / "config.yml", home / "Library" / "Application Support" / "tea" / "config.yml"]
-
-
-def token_from_tea_config(text: str, host: str) -> str | None:
-    import yaml
-
-    data = yaml.safe_load(text) or {}
-    for login in data.get("logins") or []:
-        if urllib.parse.urlparse(login.get("url", "")).hostname == host and login.get("token"):
-            return login["token"]
-    return None
