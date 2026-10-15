@@ -1286,3 +1286,45 @@ def test_github_signature_search_is_lean_and_capped(monkeypatch):
     assert "specs and tickets" in provider.cut_off
     search = next(q for q in queries if "ISSUE_ADVANCED" in q)
     assert "title" not in search and "assignees" not in search and "blockedBy" not in search
+
+
+# --- a map's spec linked as a native sub-issue on GitHub -----------------------------------------------------------
+
+def test_github_takes_a_spec_signature_sub_issue_of_a_map_as_its_spec_without_a_part_of_line(monkeypatch):
+    spec = gh_issue(10, [], SPEC_SIG, parent=1)
+    plain = gh_issue(11, [], TICKET_SIG, parent=1)  # no spec signature: no spec
+    decision = gh_issue(12, ["wayfinder:grilling"], SPEC_SIG, parent=1)  # a `wayfinder:` label: a decision ticket
+    native = gh_issue(13, [], TICKET_SIG, parent=10, parent_labels=())
+    by_parent = gh_issue(14, [], "## Parent\n\n#10\n\n" + TICKET_SIG)
+    subs = {1: [spec, plain, decision], 10: [native]}
+    refs = {10: [by_parent]}
+    fake = FakeGitHub(monkeypatch, maps=[gh_issue(1, MAP_LABELS)], subs=subs, refs=refs,
+                      signed=[spec, plain, native, by_parent])
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    by_number = {t.number: t for t in tickets}
+    assert [by_number[n].spec_kind for n in (10, 11, 12, 13, 14)] == ["spec", None, None, "impl", "impl"]
+    assert (by_number[10].map_number, by_number[10].has_tickets) == (1, True)
+    assert by_number[12].is_wayfinder_ticket
+    assert not any(t.is_standalone_spec for t in tickets)
+    assert lanes(tickets) == {1: {"SPECS": [10], "FRONTIER": [12, 13, 14]}}
+    # The spec's children come in the batch after the map's, as a `Part of` spec the open search missed does.
+    assert [a for a in fake.asked if a[0] == "children"] == [("children", [1]), ("children", [10])]
+
+
+def test_github_lists_a_spec_linked_both_as_a_sub_issue_and_by_part_of_once(monkeypatch):
+    spec = gh_issue(10, [], "Part of #1\n\n" + SPEC_SIG, parent=1)
+    FakeGitHub(monkeypatch, maps=[gh_issue(1, MAP_LABELS)], specs=[spec], subs={1: [spec]}, refs={1: [spec]},
+               signed=[spec])
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert [t.number for t in tickets].count(10) == 1
+    assert lanes(tickets) == {1: {"SPECS": [10]}}
+
+
+def test_github_shows_a_closed_map_whose_sub_issue_spec_is_still_open(monkeypatch):
+    closed_map = gh_issue(1, MAP_LABELS, state="CLOSED")
+    spec = gh_issue(10, [], SPEC_SIG, parent=1)
+    subs = {1: [gh_issue(2, ["wayfinder:grilling"], parent=1, state="CLOSED"), spec],
+            10: [gh_issue(11, [], TICKET_SIG, parent=10, parent_labels=())]}
+    FakeGitHub(monkeypatch, issues=[closed_map], subs=subs, signed=[spec])
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert lanes(tickets) == {1: {"SPECS": [10], "FRONTIER": [11], "DECIDED": [2]}}

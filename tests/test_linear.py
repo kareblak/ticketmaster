@@ -110,6 +110,41 @@ def test_the_spec_whose_part_of_names_the_map_and_its_implementation_tickets_are
                                            "DECIDED": [decision["number"]]}}
 
 
+SPEC_SIG = "## Problem Statement\n\nIt hurts.\n\n## Solution\n\nFix it.\n"
+TICKET_SIG = "## What to build\n\nA slice.\n\n## Acceptance criteria\n\n- [ ] done\n"
+
+
+def test_a_spec_signature_sub_issue_of_the_map_is_its_spec_without_a_part_of_line():
+    fake = FakeLinear()
+    the_map = fake.add_issue("Pick a stack", labels=["wayfinder:map"])  # TM-1
+    spec = fake.add_issue("Spec", SPEC_SIG, parent=the_map)
+    plain = fake.add_issue("Plain", TICKET_SIG, parent=the_map)  # no spec signature: no spec
+    decision = fake.add_issue("Decide", SPEC_SIG, parent=the_map, labels=["wayfinder:grilling"])
+    native = fake.add_issue("Slice A", TICKET_SIG, parent=spec)
+    by_parent = fake.add_issue("Slice B", f"## Parent\n\nTM-{spec['number']}\n\n" + TICKET_SIG)
+
+    tickets = board(fake)
+
+    kinds = [tickets[n["number"]].spec_kind for n in (spec, plain, decision, native, by_parent)]
+    assert kinds == ["spec", None, None, "impl", "impl"]
+    for issue in (spec, native, by_parent):
+        assert tickets[issue["number"]].map_number == the_map["number"]
+    assert tickets[spec["number"]].has_tickets and tickets[decision["number"]].is_wayfinder_ticket
+    assert lanes(tickets.values()) == {1: {"SPECS": [spec["number"]],
+                                           "FRONTIER": [decision["number"], native["number"], by_parent["number"]]}}
+
+
+def test_a_spec_linked_both_as_a_sub_issue_and_by_part_of_is_listed_once():
+    fake = FakeLinear()
+    the_map = fake.add_issue("Pick a stack", labels=["wayfinder:map"])
+    spec = fake.add_issue("Spec", "Part of TM-1\n\n" + SPEC_SIG, parent=the_map)
+
+    tickets = LinearProvider("TM", transport=fake).fetch(Query())
+
+    assert [t.number for t in tickets] == [the_map["number"], spec["number"]]
+    assert lanes(tickets) == {1: {"SPECS": [spec["number"]]}}
+
+
 def test_body_blockers_are_read_by_key_and_closed_ones_do_not_block():
     fake = FakeLinear()
     the_map = fake.add_issue("Map", labels=["wayfinder:map"])

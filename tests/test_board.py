@@ -1781,6 +1781,27 @@ def test_s_on_the_map_card_of_a_ticketless_spec_starts_to_tickets_on_the_spec():
     run(scenario(a_map(9, "Pick a stack", is_open=False)))  # a closed map whose spec is open
 
 
+def test_a_spec_linked_only_as_a_sub_issue_of_the_map_is_on_its_spec_line_and_s_starts_to_tickets_on_it():
+    async def scenario():
+        bench = FakeBench()
+        spec = spec_of(9, 80, body="## Problem Statement\n\nIt hurts.\n\n## Solution\n\nFix it.\n")
+        app = spec_app(bench, spec=spec)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            assert 80 not in shown_numbers(app)
+            assert "▣ #80 open  no tickets yet" in card_text(app, 9)
+            await select(app, pilot, 9)
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Start /to-tickets on #80 Spec 80 in a new worktree?"
+            assert app.screen.detail == "/mattpocock-skills:to-tickets u80"
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 80)]
+
+    run(scenario())
+
+
 def test_s_on_a_map_card_takes_to_tickets_command_from_ticketmaster_toml(tmp_path):
     (tmp_path / ".git").mkdir()
     (tmp_path / ".ticketmaster.toml").write_text('to_tickets_command = "/to-tickets"\n')

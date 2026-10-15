@@ -232,7 +232,7 @@ map keeps its first sub-issues as Linear pages them.
 The board reads wayfinder's links between tickets; it never writes them, and never reads or writes
 `docs/agents/issue-tracker.md`. It understands these encodings:
 
-| Tracker         | Child → map                               | Blocking                                   | Out of scope                    |
+| Tracker         | Child or spec → map                       | Blocking                                   | Out of scope                    |
 | --------------- | ----------------------------------------- | ------------------------------------------ | ------------------------------- |
 | GitHub          | native sub-issue of the map, else `Part of #<map>` as the body's first line | native issue dependency (`blocked_by`) | closed as not planned, or linked from the map's `## Out of scope` section |
 | GitLab          | `Part of #<map>` as the description's first line | native `blocks` issue link (GitLab Premium) | linked from the map's `## Out of scope` section, closed |
@@ -245,7 +245,11 @@ On Linear a typed `TM-1` is stored as a mention, a link to the issue, so `Part o
 `Blocked by` accept the key, the mention or the issue URL.
 
 Once the map is resolved, its destination becomes a spec (`/to-spec`) and then implementation tickets
-(`/to-tickets`). The spec's first line is `Part of #<map>` (`Part of TM-<map>` on Linear); its
+(`/to-tickets`). On GitHub and Linear the spec is a native sub-issue of the map: a sub-issue with the
+spec signature (`## Problem Statement` and `## Solution`, below) and no `wayfinder:` label is the map's
+spec, so GitHub's progress bar on the map counts it. Its first line `Part of #<map>` (`Part of TM-<map>`
+on Linear) is the fallback link, and the only one on GitLab and Gitea/Forgejo; a spec linked both ways
+is listed once. Its
 implementation tickets are its sub-issues (GitHub and Linear) or name it in a `## Parent` section (every
 store). They carry no `wayfinder:` label,
 so they are no decision tickets. The spec is a line of the map card, and its implementation tickets sit
@@ -276,7 +280,7 @@ and the badges of the spec's sessions. The map card's own counts are of its deci
 
 On GitHub, each standalone spec is a spec lane. A standalone spec carries the spec **signature**, the
 headings `/to-spec` writes, `## Problem Statement` and `## Solution`, has no `Part of #<map>` line naming a
-map and no `wayfinder:` label. Both headings must be there, at `##` level, in any case; an issue that
+map, is no sub-issue of a map and has no `wayfinder:` label. Both headings must be there, at `##` level, in any case; an issue that
 only mentions them in prose does not count, and one that also carries the ticket signature is a spec.
 Its header is the spec card (`▣`, magenta): `▣ #<n> <title>`, `spec closed` once it is closed, its
 assignees, and `spec · N done · N open · N blocked` (done is closed, less canceled). Its tickets are the
@@ -354,10 +358,10 @@ refuses and names both options. The key goes bare in `Authorization`, the token 
 
 | Provider        | Access                                   | Blocking                  | Maps and their tickets              |
 | --------------- | ---------------------------------------- | ------------------------- | ----------------------------------- |
-| GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | a search for open `wayfinder:map` issues, then per map its sub-issues in order and the typed tickets and spec whose `Part of #<map>` line names it, then the spec's sub-issues and the issues whose `## Parent` names it |
+| GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | a search for open `wayfinder:map` issues, then per map its sub-issues in order (one with the spec signature is its spec) and the typed tickets and spec whose `Part of #<map>` line names it, then the spec's sub-issues and the issues whose `## Parent` names it |
 | GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | the project's `wayfinder:` labels (`wayfinder:map` or `wayfinder::map`, and the four types), one query per label; a typed ticket joins the map its `Part of #<map>` line names; a description search for `Part of` and `Parent` finds the specs and their implementation tickets |
 | Gitea / Forgejo | REST through `tea api`, with the `tea` login (token or OAuth) whose URL matches the repo host | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names; an issue search (`q`) for `Part of` and `Parent` finds the specs and their implementation tickets |
-| Linear          | GraphQL with the API key (`Authorization: <key>`) or the `login` token (`Bearer`) | `blocks` relations (`inverseRelations`) | the team's open `wayfinder:map` issues, then per map its sub-issues in sub-issue order; one description search for `Part of` and `Parent` finds the typed tickets and spec linked by `Part of`, and the spec's sub-issues and `## Parent` tickets |
+| Linear          | GraphQL with the API key (`Authorization: <key>`) or the `login` token (`Bearer`) | `blocks` relations (`inverseRelations`) | the team's open `wayfinder:map` issues, then per map its sub-issues in sub-issue order (one with the spec signature is its spec, and its own sub-issues are read too); one description search for `Part of` and `Parent` finds the typed tickets and spec linked by `Part of`, and the spec's sub-issues and `## Parent` tickets |
 
 On Linear only the workflow state's type counts, never its team-renamable name: `completed` is
 closed, `canceled` and `duplicate` closed as not planned. Only the assignee claims a ticket; the

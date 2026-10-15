@@ -1,8 +1,8 @@
 """GitHub via `gh api graphql`: native blockedBy plus `Blocked by:` body lines, sub-issues and closing PRs.
 
 The board is every open `wayfinder:map`, and every closed one an open spec still names, and, per map, its sub-issues in order, the typed tickets that link to
-it only by a `Part of #<map>` line, the spec that links to it that way and the spec's implementation tickets:
-its sub-issues and the issues whose `## Parent` section names it. Body links show up as cross-references in
+it only by a `Part of #<map>` line, the spec (a sub-issue with the spec signature, else linked by `Part of #<map>`)
+and the spec's implementation tickets: its sub-issues and the issues whose `## Parent` section names it. Body links show up as cross-references in
 the linked issue's timeline. Then every standalone spec with its tickets, found by their signatures: an open spec's
 tickets are its children the same way, a closed one's the open and recently closed tickets naming it.
 """
@@ -125,7 +125,7 @@ class GitHubProvider:
         self.cut_off: list[str] = []
 
     def fetch(self, query: Query) -> list[Ticket]:
-        """Every open map, every closed map an open spec's `Part of #<map>` names, and their children; the
+        """Every open map, every closed map an open spec names (`Part of #<map>`, or its parent), and their children; the
         sub-issue parent is the native child→map link, `Part of #<map>` the fallback. Then every standalone spec
         that is open or named by an open ticket, with its tickets.
 
@@ -150,10 +150,10 @@ class GitHubProvider:
         q = f'repo:{self.repo} is:issue is:open in:body "Part of"'
         specs = [lean_ticket(node) for node in self._paginate(SEARCH, {"q": q}, ["search"], LIMIT)]
         open_maps = [t.number for t in found]
-        wanted = closed_map_refs(specs, set(open_maps))
+        hits = {t.number: t for t in self._signature_hits(cut)}
+        wanted = closed_map_refs(specs + list(hits.values()), set(open_maps))
         if query.named_map is not None and query.named_map not in set(open_maps) | set(wanted):
             wanted.append(query.named_map)
-        hits = {t.number: t for t in self._signature_hits(cut)}
         wanted_specs = standalone_wanted(hits, set(open_maps), {s.number for s in specs})
         full = {n: to_ticket(node, order=0, repo=self.repo) for n, node in
                 self._issues(open_maps + wanted + wanted_specs.all()).items()}
@@ -257,7 +257,8 @@ class GitHubProvider:
         return ["gh", "api", "graphql", "--hostname", self.host, "-H", "Content-Type: application/json", "--input", "-"]
 
     def _map_family(self, map_ticket: Ticket, children: dict[int, Children], taken: set[int]) -> list[Ticket]:
-        """The map's sub-issues in order, then the typed tickets and the spec linked by `Part of #<map>`."""
+        """The map's sub-issues in order, then the typed tickets and the spec linked by `Part of #<map>`; a sub-issue
+        with the spec signature is a spec too."""
         number = map_ticket.number
         subs, refs, _ = children[number]
         tickets = new_tickets(subs, taken, self.repo)

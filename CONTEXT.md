@@ -28,10 +28,13 @@ The pair of `##` headings that marks an issue as a skill's output: `Problem Stat
 _Avoid_: marker, template
 
 **Map spec**:
-A spec whose body links a wayfinder map with `Part of #<map>`; it belongs to that map's lane.
+The spec a wayfinder map leads to; it belongs to that map's lane. On GitHub and Linear it is linked as a native
+sub-issue of the map, carrying the spec signature and no `wayfinder:` label; its body's first line
+`Part of #<map>` is the fallback link, and the only one on GitLab and Gitea/Forgejo.
 
 **Standalone spec**:
-An issue with the spec signature, no map link and no `wayfinder:` label.
+An issue with the spec signature, no map link (neither `Part of #<map>` nor a map as its sub-issue parent) and
+no `wayfinder:` label.
 _Avoid_: orphan spec, PRD
 
 **Loose ticket**:
