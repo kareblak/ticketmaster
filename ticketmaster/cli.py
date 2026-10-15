@@ -23,7 +23,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ticketmaster",
         usage="ticketmaster [open] [map] [options] | ticketmaster login | ticketmaster cleanup map --dry-run",
-        description="Live swimlane board of wayfinder maps, in herdr.",
+        description="Live swimlane board of wayfinder maps and standalone specs, in herdr.",
     )
     parser.add_argument("--version", action="store_true", help="print the version")
     parser.add_argument("command", choices=COMMANDS)

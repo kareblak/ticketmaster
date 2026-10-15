@@ -7,11 +7,12 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from typing import Literal, Protocol
 
-from ..model import WAYFINDER_TYPES, Ticket, key_ref, parse_blockers, part_of, wayfinder_kinds
+from ..model import (WAYFINDER_TYPES, Ticket, has_spec_signature, has_ticket_signature, lane_tickets, parent_ref,
+                     parent_refs, parse_blockers, part_of, wayfinder_kinds)
 
 TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo", "linear": "Linear"}
 
@@ -95,12 +96,18 @@ def error_notice(tracker: str, error: ProviderError) -> ErrorNotice:
                        reason)
 
 
+# The default fetch limit: open maps read per board, and tickets per map; a tracker page beyond these is not asked for.
+LIMIT = 300
+
+
 @dataclass(frozen=True)
 class Query:
     """What a board shows: every open wayfinder map with its tickets, every closed map with an open spec, plus
-    `named_map` when that map is closed."""
+    `named_map` when that map is closed, and every standalone spec with an open spec or ticket; at most `limit` open
+    maps, and `limit` tickets per map or spec."""
 
     named_map: int | None = None
+    limit: int = LIMIT
 
 
 @dataclass(frozen=True)
@@ -115,8 +122,6 @@ class Quota:
     resets_at: datetime | None  # when the points refill
 
 
-# Children read per map, and maps per board; a tracker page beyond these is not asked for.
-LIMIT = 300
 # Issues read per `wayfinder:` label on trackers without sub-issues: the whole repo's, open and closed, before
 # `Part of #<map>` picks a shown map's, so a map's tickets are not cut off by other maps' closed ones.
 LABEL_LIMIT = 5000
@@ -167,9 +172,69 @@ def closed_map_refs(candidates: list[Ticket], shown: set[int], key: str | None =
     return sorted(refs - shown)
 
 
+# What a fetch cut off at the limit, as the board's status line names it: the open maps, the signature search's
+# hits, or a map's or spec's tickets.
+OPEN_MAPS = "open maps"
+SIGNATURE_HITS = "specs and tickets"
+
+# How long a closed spec or ticket stays a signature search hit.
+RECENTLY_CLOSED = timedelta(days=7)
+
+
+def is_signature_hit(ticket: Ticket, since: datetime) -> bool:
+    """A signature search hit the board keeps: the spec or ticket signature in its body (the search only narrows), no
+    `wayfinder:` label, and open or closed since `since`."""
+    recent = ticket.is_open or ticket.closed_at is not None and ticket.closed_at >= since
+    signed = has_spec_signature(ticket.body) or has_ticket_signature(ticket.body)
+    return recent and signed and not wayfinder_kinds(ticket.labels)
+
+
+def is_standalone_candidate(ticket: Ticket, maps: set[int]) -> bool:
+    """The spec signature, no `wayfinder:` label, and no `Part of` line naming one of `maps`."""
+    return (has_spec_signature(ticket.body) and not wayfinder_kinds(ticket.labels)
+            and part_of(ticket.body, ticket.team_key) not in maps)
+
+
+def is_spec_ticket(ticket: Ticket, spec: int | None) -> bool:
+    """The ticket signature, and not the spec one, with `spec` as its sub-issue parent, else its first `## Parent`
+    reference."""
+    return (spec is not None and ticket.spec_number == spec and has_ticket_signature(ticket.body)
+            and not has_spec_signature(ticket.body) and not wayfinder_kinds(ticket.labels))
+
+
+def in_spec_lane(tickets: list[Ticket], spec: Ticket) -> list[Ticket]:
+    """The standalone spec is each ticket's parent, and their lane's."""
+    return [replace(with_map(t, spec), lane_spec=spec.number) for t in tickets]
+
+
+def lane_cut(map_ticket: Ticket) -> str:
+    return f"{map_ticket.ref}'s tickets"
+
+
+def capped(items: list, limit: int, what: str, cut: list[str]) -> list:
+    """The first `limit` items; when there are more, `what` goes on `cut`. Callers read `limit + 1` items where they
+    can, so the one past the limit tells that the tracker had more."""
+    if len(items) > limit:
+        cut.append(what)
+    return items[:limit]
+
+
+def cap_lanes(tickets: list[Ticket], limit: int, cut: list[str]) -> list[Ticket]:
+    """The board's tickets with each map's first `limit` in map order (its lane's tickets); a map with more goes on
+    `cut`. Run after resolve_maps, which links specs and their tickets to their map."""
+    dropped: set[int] = set()
+    for map_ticket in [t for t in tickets if t.is_wayfinder_map]:
+        family = lane_tickets(map_ticket, tickets)
+        kept = capped(family, limit, lane_cut(map_ticket), cut)
+        dropped |= {t.number for t in family[len(kept):]}
+    return [t for t in tickets if t.number not in dropped]
+
+
 class Provider(Protocol):
     name: str
     repo: str
+    # Each provider also sets `cut_off: list[str]` in fetch: what that fetch cut off at its query's limit, e.g.
+    # `open maps`, `#12's tickets`.
 
     def fetch(self, query: Query) -> list[Ticket]: ...
 
@@ -303,33 +368,9 @@ def blocker_ref(number: int, repo: str, own_repo: str) -> str:
     return f"#{number}" if not repo or repo.lower() == own_repo.lower() else f"{repo}#{number}"
 
 
-# How a map's spec and the spec's implementation tickets link back: the
-# spec's first line is `Part of #<map>`, an implementation ticket's `## Parent` section names the spec, as `#<n>`,
-# by issue URL, or with the tracker's key as Linear's `TM-<n>` (a mention links it, `[TM-<n>](…/issue/TM-<n>/…)`).
-_PARENT_SECTION = re.compile(r"^##\s*Parent\s*$(?P<text>.*?)(?=^#{1,2}\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
-_PARENT_REF = re.compile(r"(?<![\w&])#(\d+)\b|/issues/(\d+)\b")
-
-
-def parent_refs(body: str, key: str | None = None) -> list[int]:
-    """The issues the body's `## Parent` section names, in order: `#<n>`, issue URLs, and with the tracker's `key`
-    (Linear's `TM`) `TM-<n>`."""
-    match = _PARENT_SECTION.search(body or "")
-    if match is None:
-        return []
-    text = match.group("text")
-    patterns = (_PARENT_REF, key_ref(key)) if key else (_PARENT_REF,)
-    found = sorted((ref.start(), int(next(n for n in ref.groups() if n))) for p in patterns for ref in p.finditer(text))
-    return [number for _, number in found]
-
-
 def names_parent(body: str, parent: int, key: str | None = None) -> bool:
     """The body's `## Parent` section refers to `#<parent>`, to the parent's issue URL or to its key."""
     return parent in parent_refs(body, key)
-
-
-def parent_ref(body: str, key: str | None = None) -> int | None:
-    """The issue the body's `## Parent` section names first."""
-    return next(iter(parent_refs(body, key)), None)
 
 
 def is_map(found: Ticket | None) -> bool:
@@ -345,6 +386,13 @@ def is_spec(ticket: Ticket, map_number: int) -> bool:
 def as_spec(ticket: Ticket, map_ticket: Ticket) -> Ticket:
     """The map is the spec's parent, and the map its session starts wayfinder on."""
     return on_map(with_map(ticket, map_ticket), map_ticket.number, map_ticket.url)
+
+
+def with_spec_tickets(tickets: list[Ticket]) -> list[Ticket]:
+    """Marks each spec that an implementation ticket, open or closed, names as its parent: the sub-issue parent,
+    else the `## Parent` section."""
+    named = {t.spec_number for t in tickets if t.spec_kind == "impl"}
+    return [replace(t, has_tickets=True) if t.spec_kind == "spec" and t.number in named else t for t in tickets]
 
 
 def under_spec(tickets: list[Ticket], spec: Ticket) -> list[Ticket]:

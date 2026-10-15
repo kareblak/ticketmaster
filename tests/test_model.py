@@ -1,7 +1,8 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from ticketmaster.model import (Column, Ticket, build_board, classify, frontier, is_out_of_scope, map_progress,
-                                out_of_scope_refs, parse_blockers, part_of, summarize)
+                                out_of_scope_refs, parse_blockers, part_of, spec_tickets, summarize)
 
 NOW = datetime(2026, 10, 13, 12, tzinfo=timezone.utc)
 
@@ -249,7 +250,9 @@ def test_a_closed_ticket_is_out_of_scope_when_canceled_or_linked_from_the_maps_s
 
 
 def lanes(board):
-    return {lane.map.number: {c: [t.number for t in ts] for c, ts in lane.columns.items() if ts} for lane in board.lanes}
+    return {lane.header.number: {**({"SPECS": [t.number for t in lane.specs]} if lane.specs else {}),
+                              **{c: [t.number for t in ts] for c, ts in lane.columns.items() if ts}}
+            for lane in board.lanes}
 
 
 def test_each_open_map_is_a_lane_of_its_tickets_in_the_four_columns():
@@ -264,10 +267,10 @@ def test_each_open_map_is_a_lane_of_its_tickets_in_the_four_columns():
         ticket(number=33, body="Part of #20", map_number=20, map_url="u20", assignees=("bob",)),  # map #20's spec
     ]
     board = build_board(tickets)
-    assert [lane.map.number for lane in board.lanes] == [1, 20]
+    assert [lane.header.number for lane in board.lanes] == [1, 20]
     assert lanes(board) == {
         1: {Column.BLOCKED: [3], Column.FRONTIER: [2, 31], Column.CLAIMED: [4], Column.DECIDED: [5]},
-        20: {Column.FRONTIER: [21], Column.CLAIMED: [33]},
+        20: {"SPECS": [33], Column.FRONTIER: [21]},
     }
     assert board.ticket_count() == 7
     assert map_progress(MAP_TICKET, tickets) == (1, 3, 1)  # the map's decisions only
@@ -296,7 +299,7 @@ def test_a_closed_map_shows_only_when_named_and_then_as_its_header_alone():
     tickets = [closed_map, child(2), child(3, is_open=False)]
     assert build_board(tickets).lanes == []
     lane = build_board(tickets, named_map=1).lanes[0]
-    assert lane.map is closed_map and lane.collapsed
+    assert lane.header is closed_map and lane.collapsed
     assert all(not cards for cards in lane.columns.values())
     assert lane.progress == (1, 1, 0)
     assert build_board(tickets, named_map=1).ticket_count() == 0
@@ -307,8 +310,9 @@ def test_a_closed_map_with_an_open_spec_or_implementation_ticket_shows_in_full()
     spec = ticket(number=14, body="Part of #1", map_number=1, map_url="u1", is_open=False)
     impl = ticket(number=15, map_number=1, map_url="u1")
     lane = build_board([closed_map, child(2, is_open=False), spec, impl]).lanes[0]
-    assert lane.map is closed_map and not lane.collapsed
-    assert [t.number for t in lane.columns[Column.DECIDED]] == [2, 14]
+    assert lane.header is closed_map and not lane.collapsed
+    assert [t.number for t in lane.specs] == [14]
+    assert [t.number for t in lane.columns[Column.DECIDED]] == [2]
     assert [t.number for t in lane.columns[Column.FRONTIER]] == [15]
 
 
@@ -340,9 +344,34 @@ def spec_or_impl(kind, **kw):
     return ticket(map_number=9, map_url="u9", body="Part of #9" if kind == "spec" else "## Parent\n\n#8", **kw)
 
 
-def test_start_refusal_refuses_a_closed_ticket_and_a_spec():
+def test_start_refusal_refuses_a_closed_ticket():
     assert ticket(is_open=False, labels=("wayfinder:map",)).start_refusal("me") == "#1 is closed"
-    assert spec_or_impl("spec").start_refusal("me") == "#1 is a spec: s starts /implement on its implementation tickets"
+
+
+def test_start_refusal_no_longer_refuses_a_spec_but_still_a_closed_blocked_or_claimed_one():
+    assert spec_or_impl("spec").start_refusal("me") is None
+    assert spec_or_impl("spec", is_open=False).start_refusal("me") == "#1 is closed"
+    assert spec_or_impl("spec", open_blockers=1, blocked_by=("#5",)).start_refusal("me") == "#1 is blocked by #5"
+    assert spec_or_impl("spec", assignees=("bob",)).start_refusal("me") == "#1 is claimed by @bob"
+
+
+def test_a_maps_spec_is_a_line_of_its_lane_with_its_tickets_progress():
+    spec = ticket(number=40, body="Part of #1", map_number=1, map_url="u1", has_tickets=True)
+    bare = ticket(number=50, body="Part of #1", map_number=1, map_url="u1")
+
+    def impl(number, parent, **kw):
+        return ticket(number=number, body=f"## Parent\n\n#{parent}", map_number=1, map_url="u1", **kw)
+
+    tickets = [MAP_TICKET, child(2), spec, bare, impl(41, 40), impl(42, 40, open_blockers=1),
+               impl(43, 40, is_open=False), impl(44, 40, is_open=False, not_planned=True)]
+    lane = build_board(tickets).lanes[0]
+    assert [t.number for t in lane.specs] == [40, 50]
+    assert not any(t.spec_kind == "spec" for t in lane.tickets()[2:])  # no spec card in a column
+    assert lane.spec_counts == {40: (1, 2, 1), 50: (0, 0, 0)}  # done less canceled · open · blocked
+    assert lane.ticketless_spec is bare
+    closed = build_board([MAP_TICKET, child(2), replace(bare, is_open=False)]).lanes[0]
+    assert closed.ticketless_spec is None  # closed without tickets: passed over
+    assert spec_tickets(spec, tickets) == tickets[4:]
 
 
 def test_start_refusal_refuses_an_implementation_ticket_with_an_open_closing_pr():

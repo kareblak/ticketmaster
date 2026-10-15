@@ -1,4 +1,4 @@
-"""Live Textual swimlane board: a lane per wayfinder map, its tickets in four columns."""
+"""Live Textual swimlane board: a lane per wayfinder map and per standalone spec, its tickets in four columns."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import re
 import time
 import webbrowser
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -20,10 +21,11 @@ from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static
 
-from .config import (DEFAULT_BUDGET, board_budget, board_interval, load_settings, parse_budget, parse_interval, save_settings,
-                     seconds_text)
+from .config import (DEFAULT_BUDGET, board_budget, board_fetch_limit, board_interval, load_settings, parse_budget,
+                     parse_fetch_limit, parse_interval, save_settings, seconds_text)
 from .herdr import HerdrError, Session
-from .model import COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, Ticket, build_board, frontier
+from .model import (COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, LaneKind, SpecProgress, Ticket, build_board,
+                    frontier)
 from .providers import ErrorNotice, Provider, ProviderError, Query, Quota, RateLimited, error_notice
 from .start import branch_name, worktree_name
 
@@ -35,6 +37,8 @@ COLUMN_COLORS = {
     Column.DECIDED: "grey50",
 }
 MAP_COLOR = "cyan"
+SPEC_COLOR = "magenta"  # a standalone spec's lane
+LANE_GLYPHS = {LaneKind.MAP: "◆", LaneKind.SPEC: "▣"}
 STATUS_STYLES = {  # herdr agent states
     "working": ("● working", "bold yellow"),
     "blocked": ("⚠ needs you", "bold red"),
@@ -65,8 +69,9 @@ def session_lines(sessions: list[Session], starting: bool, claimed: bool = False
 
 
 def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
-                map_title: str = "", out_of_scope: bool = False, claimed: bool = False) -> Text:
-    """A ticket: type · HITL/AFK (or spec/impl), an open closing PR, assignee, open blockers and its map's title."""
+                lane_title: str = "", out_of_scope: bool = False, claimed: bool = False, glyph: str = "◆") -> Text:
+    """A ticket: type · HITL/AFK (or spec/impl), an open closing PR, assignee, open blockers and its lane's title
+    after the lane's `glyph`."""
     text = session_lines(sessions, starting, claimed)
     text.append(f"{ticket.ref} ", style=f"bold {COLUMN_COLORS[column]}")
     text.append(ticket.title, style="bold")
@@ -91,24 +96,55 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         chips.append(f"⛔ {' '.join(ticket.blocked_by) or ticket.open_blockers} ", style="red")
     if ticket.assignees:
         chips.append(" ".join("@" + a for a in ticket.assignees) + " ", style="italic cyan")
-    if map_title:
-        chips.append(f"◆ {map_title}", style="grey62")
+    if lane_title:
+        chips.append(f"{glyph} {lane_title}", style="grey62")
     if chips.plain:
         text.append("\n")
         text.append(chips)
     return text
 
 
-def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False, claimed: bool = False) -> Text:
-    """A lane's header: the map's title and its decided / open / blocked counts."""
+def render_lane_header(lane: Lane, sessions: list[Session] = (), starting: bool = False, claimed: bool = False,
+               spec_sessions: dict[int, list[Session]] | None = None, spec_starting: set[int] = frozenset()) -> Text:
+    """A lane's header. A map's: its title and its decided / open / blocked counts, then a line per spec with its
+    tickets' done / open / blocked counts, or that it has none yet, and its sessions' badges. A standalone spec's: its
+    title, whether it is closed, its assignees and its tickets' done / open / blocked counts."""
     text = session_lines(sessions, starting, claimed)
-    text.append(f"◆ {lane.map.ref} ", style=f"bold {MAP_COLOR}")
-    text.append(lane.map.title, style="bold")
+    if not lane.is_map:
+        return render_spec_lane(lane, text)
+    text.append(f"◆ {lane.header.ref} ", style=f"bold {MAP_COLOR}")
+    text.append(lane.header.title, style="bold")
     if lane.collapsed:
         text.append("  closed", style="grey50")
     progress = lane.progress
     text.append(f"\n{progress.decided} decided · {progress.open} open · {progress.blocked} blocked",
                 style=f"bold {MAP_COLOR}")
+    for spec in lane.specs:
+        text.append(f"\n▣ {spec.ref} {'open' if spec.is_open else 'closed'}", style="bold")
+        counts = lane.spec_counts.get(spec.number, SpecProgress(0, 0, 0))
+        tickets = f"{counts.done} done · {counts.open} open · {counts.blocked} blocked" \
+            if spec.has_tickets or any(counts) else "no tickets yet"
+        text.append(f"  {tickets}", style="grey62")
+        badges = session_lines((spec_sessions or {}).get(spec.number, []), spec.number in spec_starting)
+        badges.rstrip()
+        if badges.plain:
+            text.append("\n")
+            text.append(badges)
+    return text
+
+
+def render_spec_lane(lane: Lane, text: Text) -> Text:
+    """A spec lane's header after `text` (its sessions' badges): the spec, `spec closed` once it is, its assignees,
+    then its tickets' done / open / blocked counts."""
+    spec, progress = lane.header, lane.progress
+    text.append(f"▣ {spec.ref} ", style=f"bold {SPEC_COLOR}")
+    text.append(spec.title, style="bold")
+    if not spec.is_open:
+        text.append("  spec closed", style="grey50")
+    if spec.assignees:
+        text.append("  " + " ".join("@" + a for a in spec.assignees), style="italic cyan")
+    text.append(f"\nspec · {progress.done} done · {progress.open} open · {progress.blocked} blocked",
+                style=f"bold {SPEC_COLOR}")
     return text
 
 
@@ -150,8 +186,8 @@ def passes_filters(ticket: Ticket, filters: dict[str, dict[str, str]], known: di
 
 
 def known_values(board: Board) -> dict[str, set[str]]:
-    """The types, modes and authors the lanes' cards carry, which the picker offers."""
-    cards = [ticket for lane in board.lanes for ticket in lane.tickets()]
+    """The types, modes and authors the lanes' cards carry, a spec lane's header included, which the picker offers."""
+    cards = [ticket for lane in board.lanes for ticket in (*lane.spec_cards(), *lane.columns_tickets())]
     return {
         TYPE: {kind for t in cards if (kind := card_type(t))},
         MODE: {t.mode for t in cards if t.mode},
@@ -519,13 +555,15 @@ class SettingsMenu(ModalScreen[dict | None]):
 KEY_DETAILS = {
     "primary": "go to the card's most urgent session, else its worktree with a shell, else say what s would do; "
                "never starts or resumes Claude",
-    "start": "start /wayfinder for the ticket, or /implement on an impl card, in its own issue-<n> worktree, or "
-             "continue Claude in it when it has no agent; not when closed, blocked, claimed by someone else or live "
-             "(press Enter), never for a spec or an issue that is not wayfinder work",
+    "start": "start /wayfinder for the ticket, /implement on an impl card, or /to-tickets on a map card whose spec "
+             "has no tickets yet, in its own issue-<n> worktree, or continue Claude in it when it has no agent; not "
+             "when closed, blocked, claimed by someone else or live (press Enter), never for an issue that is not "
+             "wayfinder work",
     "open": "open the issue in the browser",
     "pick_filter": "narrow by type, HITL/AFK, assignee (me, unassigned, anyone), map and author; combines with /, "
                    "Esc on the board clears all, saved per repo",
-    "settings": "the refresh interval (and the budget on GitHub), applied at once and saved per repo",
+    "settings": "the refresh interval, applied at once, the fetch limit, from the next fetch, and the budget on "
+                "GitHub; saved per repo",
 }
 
 
@@ -560,14 +598,23 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     text.append("  Click selects a card, double-click acts like Enter.\n", style="dim")
 
     heading("Lanes")
-    text.append("  Each open wayfinder map is a lane, headed by its map card: its decided (closed, not out\n"
-                "  of scope), open and blocked tickets. Naming a map (ticketmaster <map>, a number or a\n"
-                "  tracker key) filters this run's board to it, unsaved; Esc shows every open map again.\n"
+    text.append("  Map lanes come first, by number, then spec lanes, by number. A map lane is an open\n"
+                "  wayfinder map, headed by its map card (◆): its decided (closed, not out of scope), open\n"
+                "  and blocked tickets. Naming a map (ticketmaster <map>, a number or a tracker key) filters\n"
+                "  this run's board to it, unsaved, and hides the spec lanes; Esc shows every lane again.\n"
                 "  A map named by number shows also when closed, as its header card\n"
                 f"  alone.{'  ← this board' if query.named_map else ''}\n"
-                "  A spec whose first line is `Part of #<map>` and its implementation tickets (sub-issues,\n"
-                "  or a `## Parent` section naming the spec) sit in the map's lane, tagged spec and impl.\n"
-                "  Other issues are not shown. PR open: an open pull request will close the card's issue.\n")
+                "  A spec whose first line is `Part of #<map>` is a line of the map card, ▣ #<spec> open or\n"
+                "  closed, with its tickets' done (closed, less canceled), open and blocked counts, or no\n"
+                "  tickets yet. Its implementation tickets (sub-issues, or a `## Parent` section naming the\n"
+                "  spec) sit in the map's lane, tagged impl. The spec type filter keeps a lane with a spec.\n"
+                "  A spec lane is a standalone spec, from /to-spec with no map link: `## Problem Statement`\n"
+                "  and `## Solution`, no wayfinder: label. Its header card (▣) shows the spec's assignees,\n"
+                "  spec closed once it is, and `spec · N done · N open · N blocked`. Its tickets, from\n"
+                "  /to-tickets (`## What to build` and `## Acceptance criteria`, the spec as sub-issue parent\n"
+                "  or in `## Parent`), fill the columns, tagged impl; the spec is tagged spec. The lane stays\n"
+                "  while the spec or any of its tickets is open.\n"
+                "  PR open: an open pull request will close the card's issue.\n")
 
     heading("Columns (the first rule that matches)")
     for column, rule in [
@@ -588,9 +635,13 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  When the ticket's worktree exists without an agent, it runs claude --continue there instead;\n"
                 "  it never makes a second worktree. What it starts depends on the card:\n")
     for kind, prompt in [
-        ("wayfinder map", "s on the lane's header card starts the map's first frontier ticket\n"
-                          + " " * 22 + "(open, unblocked, unclaimed, no live session) on that ticket's own\n"
-                          + " " * 22 + "worktree; with an empty frontier, the map itself in its own worktree"),
+        ("wayfinder map", "s on the lane's header card, while its open spec has no tickets (open\n"
+                          + " " * 22 + "or closed), starts to_tickets_command (default\n"
+                          + " " * 22 + "/mattpocock-skills:to-tickets) with the spec's URL, focused, in the\n"
+                          + " " * 22 + "spec's own worktree, also on a closed map. Else the map's first\n"
+                          + " " * 22 + "frontier ticket (open, unblocked, unclaimed, no live session) in\n"
+                          + " " * 22 + "that ticket's own worktree; with an empty frontier, the map itself\n"
+                          + " " * 22 + "in its own worktree"),
         ("wayfinder ticket", "a wayfinder:research/prototype/grilling/task ticket (or wayfinder::…);\n"
                              + " " * 22 + "its map is the native parent, else `Part of #<map>` on the body's\n"
                              + " " * 22 + "first line"),
@@ -598,9 +649,9 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                         + " " * 22 + "ticket's URL, unfocused (AFK). On Linear the branch is the issue's\n"
                         + " " * 22 + "gitBranchName. Not with an open PR that closes it. The session owns\n"
                         + " " * 22 + "review, push and PR; the board starts nothing else"),
-        ("refused", "a closed, blocked or someone else's ticket, one with a live session\n"
-                    + " " * 22 + "(press Enter instead), and a spec: s starts /implement on its\n"
-                    + " " * 22 + "implementation tickets"),
+        ("refused", "a closed, blocked or someone else's ticket or ticketless spec, and\n"
+                    + " " * 22 + "one with a live session (press Enter instead); a spec closed\n"
+                    + " " * 22 + "without tickets is passed over"),
     ]:
         row(kind, 18, prompt)
     text.append("  A wayfinder ticket's card says who it needs: HITL (you at the keyboard) for grilling and\n"
@@ -614,13 +665,17 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  Each card shows a badge per session: ⚠ needs you, ● working, ◌ idle, ✓ done, or ○ no agent\n"
                 "  for a worktree without Claude; a claimed ticket with none says so. Enter, on any card, goes\n"
                 "  to the most urgent one, else opens its worktree with a shell; it never starts Claude.\n"
-                "  A map card goes to the map's own session, never a ticket's.\n")
+                "  A map card goes to the map's own session, else its spec's (badged on the spec line),\n"
+                "  never a ticket's.\n")
 
     heading("Settings")
     text.append("  c opens the settings menu: Enter applies the values at once and saves them per repo, Esc\n"
                 "  closes it unchanged. Refresh interval: --interval for this run, then the repo's saved\n"
                 "  interval, then the default (5 s, 30 s on Linear). Any positive number of seconds; a rate\n"
-                "  limit still slows the board down.\n"
+                "  limit still slows the board down. Fetch limit: the open maps the board reads, and the\n"
+                "  tickets it reads per map (default 300), from the next fetch; a lower one asks the tracker\n"
+                "  less. A fetch that reaches it says so in the status line, e.g. `cut off at 300: open maps,\n"
+                "  #12's tickets`, so a missing ticket can be traced to the limit.\n"
                 "  GitHub budget: the board spends about 1,000 GraphQL points an hour by default (any\n"
                 "  positive number, saved per repo). Ticket fetches come every --interval, or every\n"
                 "  last fetch's cost × 3600 / budget when that is longer, and longer still when the points\n"
@@ -720,8 +775,9 @@ class BoardApp(App):
         self.settings_path = settings_path  # None: settings live only as long as the board
         self.settings = load_settings(settings_path) if settings_path else {}
         self.herdr_error: str | None = None
-        self.board_query = query
         self.repo_key = f"{provider.name}:{provider.repo}"
+        self.board_query = replace(query, limit=board_fetch_limit(self._repo_settings()))
+        self.cut_off: str | None = None  # what the last ticket fetch cut off at the fetch limit
         self.interval = board_interval(interval, self._repo_settings(), provider.name)
         self.clock = clock
         self.wall = wall
@@ -810,12 +866,15 @@ class BoardApp(App):
         if not tickets:
             self.call_from_thread(self._apply, None, None, sessions, herdr_error, fetched_tickets=False)
             return
+        query = self.board_query
         try:
             if self.viewer is None:
                 self.viewer = self._viewer()
-            board = build_board(self.provider.fetch(self.board_query), self.board_query.named_map)
+            board = build_board(self.provider.fetch(query), query.named_map)
+            cut = getattr(self.provider, "cut_off", [])  # what the fetch cut off at the limit, when it says
+            cut_off = f"cut off at {query.limit}: {', '.join(cut)}" if cut else None
             quota = getattr(self.provider, "quota", None)  # GitHub's, after this fetch
-            self.call_from_thread(self._apply, board, None, sessions, herdr_error, quota=quota)
+            self.call_from_thread(self._apply, board, None, sessions, herdr_error, cut_off=cut_off, quota=quota)
         except RateLimited as exc:
             explain = getattr(self.provider, "explain", None)  # GitHub can say which limit it was
             self.call_from_thread(self._apply, None, explain(exc) if explain else exc, sessions, herdr_error,
@@ -836,7 +895,7 @@ class BoardApp(App):
 
     def _apply(self, board: Board | None, error: ProviderError | None, sessions: dict[int, list[Session]] | None = None,
                herdr_error: str | None = None, fetched_tickets: bool = True, rate_limited: bool = False,
-               quota: Quota | None = None) -> None:
+               cut_off: str | None = None, quota: Quota | None = None) -> None:
         self.fetching = False
         if fetched_tickets:
             self.pacer.fetched(self.clock(), ok=board is not None, rate_limited=rate_limited)
@@ -851,6 +910,7 @@ class BoardApp(App):
         if board is not None:
             changed = board.lanes != self.board.lanes or self.last_ok is None
             self.board = board
+            self.cut_off = cut_off
             self.known = known_values(board)
             self.last_ok = datetime.now()
         if sessions is not None and sessions != self.sessions:
@@ -872,8 +932,7 @@ class BoardApp(App):
         return self.board.tickets()
 
     def _visible(self, lane: Lane, column: Column) -> list[Ticket]:
-        return [t for t in lane.columns[column]
-                if matches(t, self.needle) and passes_filters(t, self.filters, self.known, self.viewer)]
+        return [t for t in lane.columns[column] if self._passes(t)]
 
     def _chosen(self, section: str) -> list[str]:
         """The section's selected values that are on the board, in the picker's order. The preset map counts even
@@ -883,20 +942,26 @@ class BoardApp(App):
         selected = self.filters[section]
         chosen = [value for value, _ in self._picker_values(section) if value in selected]
         if section == MAP:
-            on_board = {value for lane in self.board.lanes for value in map_ids(lane.map)}
+            on_board = {value for lane in self.board.lanes if lane.is_map for value in map_ids(lane.header)}
             preset = self.map_preset is not None and selected == self.map_preset
             chosen += [value for value in selected if value not in chosen and (preset or value in on_board)]
         return chosen
 
     def _shown_lanes(self) -> list[Lane]:
-        """The lanes the map filter keeps; while cards are filtered, only those with a card that passes, and a named
-        closed map, which has no cards to pass."""
+        """The lanes the map filter keeps, which are map lanes only; while cards are filtered, only those with a card
+        that passes (a spec lane's header is its spec card), and a named closed map, which has no cards to pass."""
         maps = set(self._chosen(MAP))
-        lanes = [lane for lane in self.board.lanes if not maps or maps & map_ids(lane.map)]
+        lanes = [lane for lane in self.board.lanes if not maps or lane.is_map and maps & map_ids(lane.header)]
         if self.needle or any(self.filters[section] for section in CARD_FILTERS):
-            lanes = [lane for lane in lanes
-                     if lane.collapsed or any(self._visible(lane, column) for column in COLUMN_ORDER)]
+            lanes = [lane for lane in lanes if lane.collapsed or any(self._passes(spec) for spec in lane.spec_cards())
+                     or any(self._visible(lane, column) for column in COLUMN_ORDER)]
         return lanes
+
+    def _passes(self, ticket: Ticket) -> bool:
+        return matches(ticket, self.needle) and passes_filters(ticket, self.filters, self.known, self.viewer)
+
+    def _lane(self, header: Ticket) -> Lane | None:
+        return next((lane for lane in self.board.lanes if lane.header.number == header.number), None)
 
     def _render_board(self) -> None:
         container = self.query_one("#lanes", VerticalScroll)
@@ -905,10 +970,12 @@ class BoardApp(App):
         container.remove_children()
         self.grid, lanes = [], []
         for lane in self._shown_lanes():
-            header = Card(lane.map, None, render_map(lane, self.sessions.get(lane.map.number, []),
-                                                     lane.map.number in self.starting, self._claimed(lane.map)))
+            head = lane.header
+            header = Card(head, None, render_lane_header(lane, self.sessions.get(head.number, []), head.number in self.starting,
+                                                 self._claimed(head), self.sessions, self.starting))
             cells = [[Card(t, column, render_card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
-                                                  lane.map.title, t.number in lane.out_of_scope, self._claimed(t)))
+                                                  head.title, t.number in lane.out_of_scope, self._claimed(t),
+                                                  LANE_GLYPHS[lane.kind]))
                       for t in self._visible(lane, column)] for column in COLUMN_ORDER]
             self.grid.append((header, cells))
             if lane.collapsed:
@@ -920,7 +987,7 @@ class BoardApp(App):
             lanes.append(Vertical(header, Horizontal(*row, classes="lane-row"), classes="lane"))
         if not lanes and self.last_ok:
             empty = ("No cards match the filters; Esc clears them." if self.board.lanes
-                     else f"No open wayfinder maps in {self.provider.repo}.")
+                     else f"No open wayfinder maps or specs in {self.provider.repo}.")
             lanes.append(Static(empty, id="empty"))
         container.mount_all(lanes)
         for column in COLUMN_ORDER:
@@ -952,12 +1019,16 @@ class BoardApp(App):
         status = Text(self.sub_title, style="bold")
         if self.last_ok:
             status.append(" · ")
-            maps, tickets = len(self.board.lanes), self.board.ticket_count()
-            status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)} · {tickets} tickets")
+            maps = sum(lane.is_map for lane in self.board.lanes)
+            specs, tickets = len(self.board.lanes) - maps, self.board.ticket_count()
+            status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)}"
+                          + (f" · {specs} spec{'s' * (specs != 1)}" if specs else "") + f" · {tickets} tickets")
             if not self.pacer.limited:
                 status.append(f" · every {seconds_text(self.pacer.tickets_every)}s")
                 if self.quota is not None and self.quota.remaining is not None:
                     status.append(f" · {self.quota.remaining:,} pts left")
+            if self.cut_off:
+                status.append(f" · {self.cut_off}", style="bold yellow")
         if self.pacer.limited:
             slow = "rate-limited again · once a minute until restart" if self.pacer.stuck else "rate-limited"
             reason = f" · {self.notice.reason}" if self.notice else ""
@@ -1105,6 +1176,8 @@ class BoardApp(App):
         if card is None:
             return
         ticket, sessions = card.ticket, self.sessions.get(card.ticket.number, [])
+        if not sessions and (lane := self._lane(ticket)) is not None:  # a map card: else its spec's sessions
+            sessions = next((found for spec in lane.specs if (found := self.sessions.get(spec.number))), [])
         if sessions:
             session = min(sessions, key=lambda s: s.urgency)
             self._run(lambda: self.workbench.go_to(ticket, session))
@@ -1112,6 +1185,9 @@ class BoardApp(App):
         plan = self._start_plan(ticket)
         if isinstance(plan, str):
             would = f"s refuses: {plan}"
+        elif plan.ticket.spec_kind == "spec":
+            prompt = self.describe_start(plan.ticket).partition("\n")[0]
+            would = f"s starts {prompt or '/to-tickets'} on its spec {plan.ticket.ref}"
         elif plan.ticket is not ticket:
             would = f"s starts {plan.ticket.ref} {plan.ticket.title}, next on the map"
         elif ticket.is_wayfinder_map:
@@ -1123,14 +1199,15 @@ class BoardApp(App):
         self.notify(f"{ticket.ref} has no session here; {would}", severity="warning")
 
     def action_start(self) -> None:
-        """s: start /wayfinder on the card's ticket (/implement on an impl card), or on a map's first frontier
-        ticket, else on the map itself; or say why it refuses."""
+        """s: start /to-tickets on a map card's ticketless spec, /wayfinder on the card's ticket (/implement on an
+        impl card), or on a map's first frontier ticket, else on the map itself; or say why it refuses."""
         card = self._card()
         if card is None:
             return
         ticket = card.ticket
         map_order = getattr(self.provider, "map_order", None)
-        if not (ticket.is_wayfinder_map and ticket.is_open and map_order):
+        lane = self._lane(ticket)
+        if not (ticket.is_wayfinder_map and ticket.is_open and map_order) or (lane and lane.ticketless_spec):
             self._offer_start(ticket, None)
             return
 
@@ -1151,8 +1228,15 @@ class BoardApp(App):
             self._confirm_start(plan.ticket, plan.via)
 
     def _start_plan(self, ticket: Ticket, order: list[int] | None = None) -> StartPlan | str:
-        """What s does on a card, or why it refuses. A map is
-        worked through its first frontier ticket without a live session, else, with an empty frontier, itself."""
+        """What s does on a card, or why it refuses. A map whose open spec has no tickets yet breaks the spec into
+        tickets, the map open or closed; else an open map is worked through its first frontier ticket without a live
+        session, else, with an empty frontier, itself."""
+        if (lane := self._lane(ticket)) is not None and (spec := lane.ticketless_spec) is not None:
+            if refusal := spec.start_refusal(self.viewer):
+                return refusal
+            if self._live(spec.number):
+                return f"{spec.ref} has a live session: press Enter to go to it"
+            return StartPlan(spec)
         if ticket.is_wayfinder_map and ticket.is_open:
             taken = {n for n in self.sessions if self._live(n)} | self.starting
             if ready := frontier(ticket, self._tickets(), taken, order):
@@ -1190,10 +1274,12 @@ class BoardApp(App):
                 self._render_board()
                 self._run(start)
 
-        if ticket.spec_kind == "impl":
+        if ticket.spec_kind:
             where = "its worktree with claude --continue" if worktree else "a new worktree"
-            question = f"Start /implement on {ticket.ref} {ticket.title} in {where}?"
-            detail, yes = self.describe_start(ticket) + "\nunfocused (AFK)", "Start"
+            skill = "/implement" if ticket.spec_kind == "impl" else "/to-tickets"
+            question = f"Start {skill} on {ticket.ref} {ticket.title} in {where}?"
+            unfocused = "\nunfocused (AFK)" if ticket.spec_kind == "impl" else ""
+            detail, yes = self.describe_start(ticket) + unfocused, "Start"
         elif worktree is None:
             question = f"Start {ticket.ref} {ticket.title}{via} in a new worktree?"
             detail, yes = self.describe_start(ticket), "Start"
@@ -1217,7 +1303,8 @@ class BoardApp(App):
         if section == ASSIGNEE:
             return [(value, value) for value in ASSIGNEES]
         if section == MAP:
-            return [(map_value(lane.map), f"{lane.map.ref} {lane.map.title}") for lane in self.board.lanes]
+            return [(map_value(lane.header), f"{lane.header.ref} {lane.header.title}") for lane in self.board.lanes
+                    if lane.is_map]
         known = self.known.get(section, set())
         if section == AUTHOR:
             return [(author, author) for author in sorted(known, key=str.lower)]
@@ -1254,18 +1341,21 @@ class BoardApp(App):
                 self.notify(f"{what} not saved: {exc}", severity="warning")
 
     def action_settings(self) -> None:
-        fields = [Setting("interval", "Refresh interval (seconds)", seconds_text(self.interval), parse_interval)]
+        fields = [Setting("interval", "Refresh interval (seconds)", seconds_text(self.interval), parse_interval),
+                  Setting("fetch_limit", "Fetch limit (open maps, and tickets per map)", str(self.board_query.limit),
+                          parse_fetch_limit)]
         if self.provider.name == "github":
             fields.append(Setting("budget", "GitHub budget (GraphQL points an hour)", seconds_text(self.budget),
                                   parse_budget))
         self.push_screen(SettingsMenu(fields), self._apply_settings)
 
     def _apply_settings(self, values: dict | None) -> None:
-        """Applies the menu's values at once and saves those that differ from the repo's saved ones, also a value
-        that `--interval` already set for this run; Esc (None) changes nothing."""
+        """Applies the menu's values, the interval at once and the fetch limit from the next fetch, and saves those
+        that differ from the repo's saved ones, also a value that `--interval` already set for this run, but not an
+        unchanged default fetch limit; Esc (None) changes nothing."""
         if values is None:
             return
-        interval, budget = values["interval"], values.get("budget", self.budget)
+        interval, limit, budget = values["interval"], values["fetch_limit"], values.get("budget", self.budget)
         if interval != self.interval or budget != self.budget:
             if interval != self.interval:
                 self.interval = interval
@@ -1274,9 +1364,12 @@ class BoardApp(App):
             self.budget = budget
             self._pace()
             self._render_status()
-        if values.get("budget") == DEFAULT_BUDGET and "budget" not in self._repo_settings():
-            del values["budget"]  # the untouched default stays a default
-        saved = {key: int(value) if value.is_integer() else value for key, value in values.items()}
+        saved = {"interval": int(interval) if interval.is_integer() else interval}
+        if limit != self.board_query.limit or "fetch_limit" in self._repo_settings():
+            self.board_query = replace(self.board_query, limit=limit)
+            saved["fetch_limit"] = limit
+        if "budget" in values and (budget != DEFAULT_BUDGET or "budget" in self._repo_settings()):
+            saved["budget"] = int(budget) if budget.is_integer() else budget  # an untouched default stays a default
         if any(self._repo_settings().get(key) != value for key, value in saved.items()):
             self._repo_settings(create=True).update(saved)
             self._write_settings("settings")

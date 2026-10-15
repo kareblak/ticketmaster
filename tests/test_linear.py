@@ -19,8 +19,10 @@ def board(fake, named_map=None):
 
 
 def lanes(tickets, named_map=None):
-    """{map: {column: [ticket numbers]}}, an empty column left out."""
-    return {lane.map.number: {column.name: [t.number for t in cards] for column, cards in lane.columns.items() if cards}
+    """{map: {SPECS: [spec numbers], column: [ticket numbers]}}, an empty one left out."""
+    return {lane.header.number: {**({"SPECS": [t.number for t in lane.specs]} if lane.specs else {}),
+                              **{column.name: [t.number for t in cards]
+                                 for column, cards in lane.columns.items() if cards}}
             for lane in build_board(list(tickets), named_map).lanes}
 
 
@@ -100,10 +102,11 @@ def test_the_spec_whose_part_of_names_the_map_and_its_implementation_tickets_are
         assert (ticket.map_number, ticket.map_url) == (1, "https://linear.app/fabricskill/issue/TM-1/slug")
     assert [tickets[n["number"]].spec_kind for n in (spec, native, by_parent)] == ["spec", "impl", "impl"]
     assert tickets[native["number"]].parent_number == spec["number"]
+    assert tickets[spec["number"]].has_tickets and not tickets[the_map["number"]].has_tickets
     assert tickets[typed["number"]].is_wayfinder_ticket and tickets[typed["number"]].mode == "AFK"
     assert tickets[by_parent["number"]].blocked_by == (f"TM-{native['number']}",)  # a body blocker
-    assert lanes(tickets.values()) == {1: {"BLOCKED": [by_parent["number"]],
-                                           "FRONTIER": [spec["number"], typed["number"], native["number"]],
+    assert lanes(tickets.values()) == {1: {"SPECS": [spec["number"]], "BLOCKED": [by_parent["number"]],
+                                           "FRONTIER": [typed["number"], native["number"]],
                                            "DECIDED": [decision["number"]]}}
 
 
@@ -145,9 +148,10 @@ def test_a_closed_map_whose_spec_is_still_open_is_shown_in_full():
 
     tickets = LinearProvider("TM", transport=fake).fetch(Query())
     lane = build_board(tickets).lanes[0]
-    assert lane.map.number == closed["number"] and not lane.collapsed
+    assert lane.header.number == closed["number"] and not lane.collapsed
     assert [t.number for t in lane.columns[Column.DECIDED]] == [decided["number"]]
-    assert [t.number for t in lane.columns[Column.FRONTIER]] == [spec["number"], impl["number"]]
+    assert [t.number for t in lane.specs] == [spec["number"]]
+    assert [t.number for t in lane.columns[Column.FRONTIER]] == [impl["number"]]
 
 
 def test_the_viewer_is_the_keys_display_name():
@@ -259,6 +263,28 @@ def test_a_missing_key_names_the_variable_and_the_key_env_option(monkeypatch):
     monkeypatch.delenv("LINEAR_API_KEY_ACME", raising=False)
     with pytest.raises(ProviderError, match="LINEAR_API_KEY_ACME is not set.*key_env"):
         LinearProvider("TM", key_env="LINEAR_API_KEY_ACME")
+
+
+def test_the_fetch_limit_caps_the_open_maps_and_says_so():
+    fake = FakeLinear()
+    for n in range(3):
+        fake.add_issue(f"Map {n}", labels=["wayfinder:map"])
+    provider = LinearProvider("TM", transport=fake)
+    assert len(lanes(provider.fetch(Query(limit=2)))) == 2 and provider.cut_off == ["open maps"]
+    assert len(lanes(provider.fetch(Query(limit=3)))) == 3 and provider.cut_off == []
+
+
+def test_the_fetch_limit_caps_a_maps_tickets_and_reads_no_page_past_it():
+    fake = FakeLinear()  # two issues a page
+    the_map = fake.add_issue("Map", labels=["wayfinder:map"])
+    for n in range(8):
+        fake.add_issue(f"Ticket {n}", parent=the_map, labels=["wayfinder:task"])
+    provider = LinearProvider("TM", transport=fake)
+    shown = lanes(provider.fetch(Query(limit=2)))  # the first sub-issues as Linear pages them
+    assert list(shown) == [1] and len(shown[1]["FRONTIER"]) == 2
+    assert provider.cut_off == ["TM-1's tickets"]
+    assert fake.ops().count("TicketmasterChildren") == 2  # three of the eight sub-issues tell it was cut
+    assert len(provider.fetch(Query(limit=8))) == 9 and provider.cut_off == []
 
 
 def test_linear_reports_no_quota():

@@ -12,6 +12,7 @@ from .model import Ticket
 
 DEFAULT_WAYFINDER_COMMAND = "/mattpocock-skills:wayfinder"
 DEFAULT_IMPLEMENT_COMMAND = "/mattpocock-skills:implement"
+DEFAULT_TO_TICKETS_COMMAND = "/mattpocock-skills:to-tickets"
 
 
 class MapNotFound(ValueError):
@@ -23,14 +24,17 @@ class NotWayfinderWork(ValueError):
 
 
 def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND,
-                 implement_command: str = DEFAULT_IMPLEMENT_COMMAND) -> str:
-    """Exactly `<wayfinder_command> <map-url> [<ticket-url>]`: wayfinder claims and resolves map tickets itself,
-    and drives a ticket that has a map (the spec a map led to). An implementation ticket gets /implement on the
-    ticket alone. Without a map there is nothing to start: a typed wayfinder ticket raises MapNotFound, anything
-    else NotWayfinderWork.
+                 implement_command: str = DEFAULT_IMPLEMENT_COMMAND,
+                 to_tickets_command: str = DEFAULT_TO_TICKETS_COMMAND) -> str:
+    """Exactly `<wayfinder_command> <map-url> [<ticket-url>]`: wayfinder claims and resolves map tickets itself.
+    The spec a map led to gets /to-tickets on the spec alone, and an implementation ticket /implement on the ticket
+    alone. Without a map there is nothing to start: a typed wayfinder ticket raises MapNotFound, anything else
+    NotWayfinderWork.
     """
     if ticket.spec_kind == "impl":
         return f"{implement_command} {ticket.url}"
+    if ticket.spec_kind == "spec":
+        return f"{to_tickets_command} {ticket.url}"
     if ticket.is_wayfinder_map:
         return f"{wayfinder_command} {ticket.url}"
     if ticket.is_wayfinder_ticket:
@@ -83,6 +87,7 @@ class Workbench:
     cwd: Path
     wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND
     implement_command: str = DEFAULT_IMPLEMENT_COMMAND
+    to_tickets_command: str = DEFAULT_TO_TICKETS_COMMAND
     claude: str = "claude"
     herdr: Herdr = field(default_factory=Herdr)
 
@@ -90,7 +95,7 @@ class Workbench:
         return self.herdr.sessions(self.cwd)
 
     def prompt(self, ticket: Ticket) -> str:
-        return build_prompt(ticket, self.wayfinder_command, self.implement_command)
+        return build_prompt(ticket, self.wayfinder_command, self.implement_command, self.to_tickets_command)
 
     def start(self, ticket: Ticket) -> str:
         """In the ticket's own worktree, named by its key: created with the prompt, or reopened with
@@ -102,6 +107,8 @@ class Workbench:
         )
         if ticket.spec_kind == "impl":
             return f"Started {self.implement_command} on {ticket.ref} in {where}, unfocused"
+        if ticket.spec_kind == "spec":
+            return f"Started {self.to_tickets_command} on {ticket.ref} in {where}"
         return f"Started {ticket.ref} in {where}" + ("" if focus else ", unfocused: research runs AFK")
 
     def go_to(self, ticket: Ticket, session: Session) -> str:
@@ -109,6 +116,7 @@ class Workbench:
 
 
 def workbench_for(cwd: Path, config: dict) -> Workbench:
-    """`.ticketmaster.toml` can rename the wayfinder and implement skills the sessions start with."""
+    """`.ticketmaster.toml` can rename the wayfinder, implement and to-tickets skills the sessions start with."""
     return Workbench(cwd, wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND),
-                     implement_command=config.get("implement_command", DEFAULT_IMPLEMENT_COMMAND))
+                     implement_command=config.get("implement_command", DEFAULT_IMPLEMENT_COMMAND),
+                     to_tickets_command=config.get("to_tickets_command", DEFAULT_TO_TICKETS_COMMAND))

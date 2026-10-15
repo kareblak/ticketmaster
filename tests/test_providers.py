@@ -1,7 +1,7 @@
 import json
 import re
 import subprocess
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 
 import pytest
@@ -55,13 +55,15 @@ def test_github_merged_closing_pr_is_marked_merged():
                             0).has_merged_change_request is False
 
 
-def gh_issue(number, labels=(), body="", parent=None, state="OPEN"):
+def gh_issue(number, labels=(), body="", parent=None, state="OPEN", closed_at=None, parent_labels=("wayfinder:map",)):
     node = {"number": number, "title": f"t{number}", "url": f"https://gh/o/r/issues/{number}", "body": body,
             "state": state, "assignees": {"nodes": []}, "labels": {"nodes": [{"name": n} for n in labels]},
             "repository": {"nameWithOwner": "o/r"}}
+    if closed_at is not None:
+        node["closedAt"] = closed_at.isoformat().replace("+00:00", "Z")
     if parent is not None:
         node["parent"] = {"number": parent, "url": f"https://gh/o/r/issues/{parent}",
-                          "labels": {"nodes": [{"name": "wayfinder:map"}]}}
+                          "labels": {"nodes": [{"name": n} for n in parent_labels]}}
     return node
 
 
@@ -78,13 +80,16 @@ RESET = "2026-10-15T13:00:00Z"
 
 
 class FakeGitHub:
-    """Fakes `gh api graphql` for a repo of `issues` (full nodes by number): the map search answers `maps` and the
-    `Part of` search `specs`, lean; `subs` and `refs` are each issue's sub-issues and cross-references. `asked` is
-    what was asked, and every answer costs `cost` points and leaves `remaining`, one fewer each call."""
+    """Fakes `gh api graphql` for a repo of `issues` (full nodes by number): the map search answers `maps`, the
+    `Part of` search `specs` and the signature search `signed` (full nodes, also issues of the repo), lean; `subs`
+    and `refs` are each issue's sub-issues and cross-references. `asked` is what was asked, and every answer costs
+    `cost` points and leaves `remaining`, one fewer each call."""
 
-    def __init__(self, monkeypatch, issues=(), maps=(), specs=(), subs=None, refs=None, cost=1, remaining=4000):
-        self.issues = {n["number"]: n for n in [*maps, *issues]}
+    def __init__(self, monkeypatch, issues=(), maps=(), specs=(), subs=None, refs=None, cost=1, remaining=4000,
+                 signed=()):
+        self.issues = {n["number"]: n for n in [*maps, *signed, *issues]}
         self.maps, self.specs, self.subs, self.refs = list(maps), list(specs), subs or {}, refs or {}
+        self.signed = list(signed)
         self.cost, self.remaining = cost, remaining
         self.asked = []
         gh_answers(monkeypatch, self.answer)
@@ -95,8 +100,13 @@ class FakeGitHub:
         errors = []
         if "q" in variables:
             self.asked.append(("search", variables["q"]))
-            hits = self.specs if '"Part of"' in variables["q"] else self.maps
-            data = {"search": page([{k: n[k] for k in ("number", "body", "labels")} for n in hits])}
+            if '"What to build"' in variables["q"]:
+                assert "ISSUE_ADVANCED" in gql
+                lean = ("number", "body", "labels", "state", "closedAt", "parent")
+                data = {"search": page([{k: n.get(k) for k in lean} for n in self.signed])}
+            else:
+                hits = self.specs if '"Part of"' in variables["q"] else self.maps
+                data = {"search": page([{k: n[k] for k in ("number", "body", "labels")} for n in hits])}
         elif "issueOrPullRequest" in gql:
             self.asked.append(("states", aliases))
             data = {"repository": {f"i{n}": {"state": self.issues[n]["state"]} if n in self.issues else None
@@ -138,7 +148,8 @@ def github_board(monkeypatch, maps, subs=None, refs=None, named=None, specs=()):
 def lanes(tickets, named_map=None):
     from ticketmaster.model import build_board
 
-    return {lane.map.number: {c.name: [t.number for t in ts] for c, ts in lane.columns.items() if ts}
+    return {lane.header.number: {**({"SPECS": [t.number for t in lane.specs]} if lane.specs else {}),
+                              **{c.name: [t.number for t in ts] for c, ts in lane.columns.items() if ts}}
             for lane in build_board(tickets, named_map).lanes}
 
 
@@ -153,7 +164,8 @@ def test_github_fetches_every_open_map_with_its_children_in_map_order(monkeypatc
     asked = github_board(monkeypatch, maps, subs, refs)
     tickets = github.GitHubProvider("o/r").fetch(Query())
     assert asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
-                     ("search", 'repo:o/r is:issue is:open in:body "Part of"'), ("issues", [1, 20]), ("children", [1, 20])]
+                     ("search", 'repo:o/r is:issue is:open in:body "Part of"'), signature_search(),
+                     ("issues", [1, 20]), ("children", [1, 20])]
     assert [(t.number, t.order) for t in tickets] == [(1, 0), (20, 0), (5, 0), (3, 1), (4, 2), (21, 0)]
     assert lanes(tickets) == {1: {"FRONTIER": [5, 4], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
 
@@ -241,7 +253,7 @@ def test_gitlab_fetches_every_open_map_with_its_children_by_their_part_of_line(m
                      ("search", "Part of"), ("search", "Parent")]
     assert [t.number for t in tickets] == [1, 20, 5, 3, 21, 40]  # #40: untyped with `Part of #1`, so the spec
     assert (tickets[2].parent_number, tickets[2].parent_url) == (1, "https://gl/g/p/-/issues/1")
-    assert lanes(tickets) == {1: {"FRONTIER": [5, 40], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
+    assert lanes(tickets) == {1: {"SPECS": [40], "FRONTIER": [5], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
 
 
 def test_gitlab_keeps_an_open_maps_tickets_behind_many_of_another_maps(monkeypatch):
@@ -333,7 +345,7 @@ def test_github_shows_a_closed_map_whose_spec_is_still_open(monkeypatch):
                          specs=[spec, gh_issue(7, [], "Part of #9")])
     tickets = github.GitHubProvider("o/r").fetch(Query())
     assert ("issues", [1, 9]) in asked
-    assert lanes(tickets) == {1: {"FRONTIER": [14, 15], "DECIDED": [2]}}
+    assert lanes(tickets) == {1: {"SPECS": [14], "FRONTIER": [15], "DECIDED": [2]}}
 
 
 def test_gitea_fetches_every_open_map_with_its_children_by_their_part_of_line(monkeypatch):
@@ -344,7 +356,7 @@ def test_gitea_fetches_every_open_map_with_its_children_by_their_part_of_line(mo
     assert asked == [("open", "wayfinder:map"), ("all", "wayfinder:research"), ("all", "wayfinder:task"),
                      ("search", "Part of"), ("search", "Parent")]
     assert [t.number for t in tickets] == [1, 20, 5, 3, 2, 21, 40]
-    assert lanes(tickets) == {1: {"BLOCKED": [5], "FRONTIER": [40], "CLAIMED": [2], "DECIDED": [3]},
+    assert lanes(tickets) == {1: {"SPECS": [40], "BLOCKED": [5], "CLAIMED": [2], "DECIDED": [3]},
                               20: {"FRONTIER": [21]}}
 
 
@@ -771,9 +783,10 @@ def assert_lane_family(tickets, map_url):
     for n in (3, 4, 5):
         assert (by_number[n].map_number, by_number[n].map_url) == (1, map_url), n
     assert [by_number[n].spec_kind for n in (2, 3, 4, 5)] == [None, "spec", "impl", "impl"]
+    assert [by_number[n].has_tickets for n in (1, 2, 3, 4, 5)] == [False, False, True, False, False]
     # The body's blockers, after any native ones.
     assert (by_number[4].blocked_by[-1:], by_number[5].blocked_by[-1:]) == (("#2",), ("#4",))
-    assert lanes(tickets) == {1: {"BLOCKED": [4, 5], "FRONTIER": [2, 3]}}
+    assert lanes(tickets) == {1: {"SPECS": [3], "BLOCKED": [4, 5], "FRONTIER": [2]}}
 
 
 def assert_map_family(tickets, map_url, spec_url):
@@ -861,7 +874,7 @@ def test_gitlab_shows_a_closed_map_whose_spec_is_still_open(monkeypatch):
     asked = gitlab_board(monkeypatch, ["wayfinder::map", "wayfinder::grilling"], issues, named=issues[0])
     tickets = gitlab.GitLabProvider("g/p").fetch(Query())
     assert ("named", "1") in asked
-    assert lanes(tickets) == {1: {"FRONTIER": [14, 15], "DECIDED": [2]}}
+    assert lanes(tickets) == {1: {"SPECS": [14], "FRONTIER": [15], "DECIDED": [2]}}
 
 
 def test_github_map_order_is_the_maps_sub_issue_order(monkeypatch):
@@ -1034,6 +1047,81 @@ def test_resolve_maps_follows_ticket_to_spec_to_map_fetching_each_issue_once():
     assert sorted(fetched) == [1, 3, 20, 21, 22, 404]  # each chain issue off the board fetched once
 
 
+def test_a_spec_has_tickets_when_an_open_or_a_closed_implementation_ticket_names_it():
+    def spec(number):
+        return Ticket(number=number, title="Spec", url=f"u{number}", is_open=True, body="Part of #1",
+                      map_number=1, map_url="u1")
+
+    def impl(number, parent, **kw):
+        base = dict(number=number, title="Slice", url=f"u{number}", is_open=True, body=f"## Parent\n\n#{parent}",
+                    map_number=1, map_url="u1")
+        return Ticket(**{**base, **kw})
+
+    tickets = [spec(3), spec(4), spec(5), impl(6, 3, is_open=False), impl(7, 0, body="", parent_number=4)]
+    marked = {t.number: t.has_tickets for t in providers.with_spec_tickets(tickets)}
+    assert marked == {3: True, 4: True, 5: False, 6: False, 7: False}
+
+
+def test_a_linear_spec_has_tickets_by_its_teams_parent_section():
+    spec = Ticket(number=3, title="Spec", url="u3", is_open=True, key="TM-3", body="Part of TM-1",
+                  map_number=1, map_url="u1")
+    impl = Ticket(number=6, title="Slice", url="u6", is_open=False, key="TM-6", body="## Parent\n\nTM-3",
+                  map_number=1, map_url="u1")
+    assert [t.has_tickets for t in providers.with_spec_tickets([spec, impl])] == [True, False]
+
+
+# ---------- the fetch limit: maps per board and tickets per map, and what a fetch cut off ----------
+
+def test_github_reads_at_most_the_limit_of_maps_and_of_each_maps_tickets_and_says_what_it_cut(monkeypatch):
+    maps = [gh_issue(1, MAP_LABELS), gh_issue(20, MAP_LABELS), gh_issue(30, MAP_LABELS)]
+    subs = {1: [gh_issue(n, ["wayfinder:task"], parent=1) for n in (2, 3, 4)]}
+    github_board(monkeypatch, maps, subs)
+    provider = github.GitHubProvider("o/r")
+    assert [t.number for t in provider.fetch(Query(limit=2))] == [1, 20, 2, 3]
+    assert provider.cut_off == ["open maps", "#1's tickets"]
+    assert len(provider.fetch(Query(limit=3))) == 6 and provider.cut_off == []
+
+
+def test_gitlab_reads_at_most_the_limit_of_maps_and_of_each_maps_tickets_and_says_what_it_cut(monkeypatch):
+    issues = [gl_issue(1, ["wayfinder::map"]), gl_issue(20, ["wayfinder::map"]), gl_issue(30, ["wayfinder::map"]),
+              *(gl_issue(n, ["wayfinder::task"], "Part of #1") for n in (2, 3, 4))]
+    gitlab_board(monkeypatch, GITLAB_LABELS, issues)
+    provider = gitlab.GitLabProvider("g/p")
+    assert lanes(provider.fetch(Query(limit=2))) == {1: {"FRONTIER": [2, 3]}, 20: {}}
+    assert provider.cut_off == ["open maps", "#1's tickets"]
+    assert len(provider.fetch(Query(limit=3))) == 6 and provider.cut_off == []
+
+
+def test_gitea_reads_at_most_the_limit_of_maps_and_of_each_maps_tickets_and_says_what_it_cut(monkeypatch):
+    issues = [gt_issue(1, ["wayfinder:map"]), gt_issue(20, ["wayfinder:map"]), gt_issue(30, ["wayfinder:map"]),
+              *(gt_issue(n, ["wayfinder:task"], "Part of #1") for n in (2, 3, 4))]
+    gitea_board(monkeypatch, ["wayfinder:map", "wayfinder:task"], None, issues)
+    provider = gitea.GiteaProvider("o/r", "codeberg.org", login="x")
+    assert lanes(provider.fetch(Query(limit=2))) == {1: {"FRONTIER": [2, 3]}, 20: {}}
+    assert provider.cut_off == ["open maps", "#1's tickets"]
+    assert len(provider.fetch(Query(limit=3))) == 6 and provider.cut_off == []
+
+
+def test_a_spec_whose_tickets_the_limit_cuts_still_has_tickets(monkeypatch):
+    lean_board(monkeypatch)
+    tickets = github.GitHubProvider("o/r").fetch(Query(limit=2))  # each lane keeps its decision ticket and spec
+    assert {t.number: t.has_tickets for t in tickets if t.spec_kind} == {3: True, 12: True, 22: True}
+    issues = [gl_issue(1, ["wayfinder::map"]), gl_issue(2, ["wayfinder::grilling"], "Part of #1"),
+              gl_issue(3, [], "Part of #1"), gl_issue(4, [], "## Parent\n\n#3")]
+    gitlab_board(monkeypatch, GITLAB_LABELS, issues)
+    assert {t.number: t.has_tickets for t in gitlab.GitLabProvider("g/p").fetch(Query(limit=2))} == \
+        {1: False, 2: False, 3: True}
+
+
+def test_a_cut_map_lane_keeps_its_first_tickets_in_map_order():
+    the_map = Ticket(number=1, title="", url="u1", is_open=True, labels=MAP_LABELS)
+    kids = [Ticket(number=n, title="", url=f"u{n}", is_open=True, labels=("wayfinder:task",), parent_number=1,
+                   parent_url="u1", parent_labels=MAP_LABELS, order=order) for n, order in ((7, 2), (8, 0), (9, 1))]
+    cut: list[str] = []
+    assert [t.number for t in providers.cap_lanes([the_map, *kids], 2, cut)] == [1, 8, 9]
+    assert cut == ["#1's tickets"]
+
+
 def lean_board(monkeypatch, cost=1):
     """Three open maps (#1, #10, #20), each with a decision ticket and a spec that names it by `Part of`; each spec has
     an implementation ticket as a sub-issue and one by its `## Parent` section. #30 is no map's spec."""
@@ -1058,12 +1146,12 @@ def test_github_searches_lean_then_fetches_the_hits_and_every_maps_and_specs_chi
     tickets = github.GitHubProvider("o/r").fetch(Query())
     # #30's `Part of #404` names a closed issue that is no map, so it is fetched with the maps and dropped.
     assert fake.asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
-                          ("search", 'repo:o/r is:issue is:open in:body "Part of"'),
+                          ("search", 'repo:o/r is:issue is:open in:body "Part of"'), signature_search(),
                           ("issues", [1, 10, 20, 404]),
                           ("children", [1, 10, 20, 3, 12, 22])]
-    for search in queries[:2]:
+    for search in queries[:3]:
         assert "title" not in search and "assignees" not in search and "blockedBy" not in search
-    assert lanes(tickets) == {m: {"FRONTIER": [m + 1, m + 2, m + 3, m + 4]} for m in (1, 10, 20)}
+    assert lanes(tickets) == {m: {"SPECS": [m + 2], "FRONTIER": [m + 1, m + 3, m + 4]} for m in (1, 10, 20)}
 
 
 def test_github_reports_what_its_last_fetch_cost_and_the_points_left(monkeypatch):
@@ -1072,11 +1160,11 @@ def test_github_reports_what_its_last_fetch_cost_and_the_points_left(monkeypatch
     assert provider.quota is None
     provider.fetch(Query())
     reset = datetime(2026, 10, 15, 13, tzinfo=timezone.utc)
-    # Four calls at 3 points each: the remaining count the last call saw.
-    assert provider.quota == providers.Quota(cost=12, remaining=4000 - 9, resets_at=reset)
+    # Five calls at 3 points each: the remaining count the last call saw.
+    assert provider.quota == providers.Quota(cost=15, remaining=4000 - 12, resets_at=reset)
     provider.viewer()  # outside a fetch: no fetch's cost
     provider.fetch(Query())
-    assert provider.quota == providers.Quota(cost=12, remaining=4000 - 24, resets_at=reset)
+    assert provider.quota == providers.Quota(cost=15, remaining=4000 - 30, resets_at=reset)
 
 
 def test_trackers_other_than_github_report_no_quota(monkeypatch):
@@ -1118,3 +1206,83 @@ def test_github_failed_fetch_still_reports_the_points_it_saw(monkeypatch):
     with pytest.raises(ProviderError):
         provider.fetch(Query())
     assert (provider.quota.cost, provider.quota.remaining) == (4, 3998)
+
+
+# --- standalone specs and their tickets on GitHub ------------------------------------------------------------------
+
+SPEC_SIG = "## Problem Statement\n\nIt hurts.\n\n## Solution\n\nFix it.\n"
+TICKET_SIG = "## What to build\n\nA slice.\n\n## Acceptance criteria\n\n- [ ] done\n"
+
+
+def signature_search(days=7):
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).date()
+    return ("search", f'repo:o/r is:issue (in:body "Problem Statement" OR in:body "What to build") '
+                      f'(is:open OR closed:>={since:%Y-%m-%d})')
+
+
+def ago(days):
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def test_github_takes_an_issue_with_both_spec_headings_as_a_standalone_spec_and_drops_the_rest(monkeypatch):
+    map_spec = gh_issue(34, [], "Part of #1\n\n" + SPEC_SIG)
+    signed = [
+        gh_issue(30, ["ready-for-agent"], SPEC_SIG),
+        gh_issue(31, [], "## Problem Statement\n\nOnly half.\n"),  # half a signature
+        gh_issue(32, [], SPEC_SIG + TICKET_SIG),  # both signatures: a spec
+        gh_issue(33, ["wayfinder:task"], SPEC_SIG),  # a wayfinder ticket is never standalone
+        map_spec,  # `Part of #1` keeps it the map's spec
+        gh_issue(35, [], "### Problem Statement\n\n## Solution\n"),  # not at `##` level
+        gh_issue(36, [], "## PROBLEM  statement\n\n## solution\n"),  # any case
+        gh_issue(37, [], "We need a Problem Statement and a Solution."),  # prose only
+    ]
+    fake = FakeGitHub(monkeypatch, maps=[gh_issue(1, MAP_LABELS)], specs=[map_spec], refs={1: [map_spec]},
+                      signed=signed)
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert lanes(tickets) == {1: {"SPECS": [34]}, 30: {}, 32: {}, 36: {}}
+    assert {t.number: t.spec_kind for t in tickets if t.number >= 30} == {30: "spec", 32: "spec", 34: "spec", 36: "spec"}
+    assert fake.asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
+                          ("search", 'repo:o/r is:issue is:open in:body "Part of"'), signature_search(),
+                          ("issues", [1, 30, 32, 36]), ("children", [1, 34, 30, 32, 36])]
+
+
+def test_github_fills_each_spec_lane_from_its_children_and_a_closed_specs_from_its_open_tickets(monkeypatch):
+    def ticket(number, parent_line="", **kw):
+        return gh_issue(number, [], (f"## Parent\n\n{parent_line}\n\n" if parent_line else "") + TICKET_SIG, **kw)
+
+    closed_spec = gh_issue(50, [], SPEC_SIG, state="CLOSED", closed_at=ago(60))  # outside the window: no hit
+    subs = {40: [ticket(41, parent=40, parent_labels=()), gh_issue(44, [], "Hand-made", parent=40, parent_labels=())]}
+    refs = {40: [ticket(42, "#40"), ticket(43, "https://gh/o/r/issues/40", state="CLOSED", closed_at=ago(400)),
+                 gh_issue(45, [], "See #40.\n\n" + TICKET_SIG)]}
+    signed = [
+        gh_issue(40, [], SPEC_SIG), ticket(42, "#40"),
+        ticket(51, "#50"), ticket(52, "#50", state="CLOSED", closed_at=ago(2)),
+        ticket(53, "#50", state="CLOSED", closed_at=ago(30)),  # closed before the window
+        ticket(54, parent=50, parent_labels=()),  # a sub-issue of the closed spec
+        ticket(55),  # no parent: a loose ticket, not in this lane or any
+        gh_issue(60, [], SPEC_SIG, state="CLOSED", closed_at=ago(1)), ticket(61, "#60", state="CLOSED", closed_at=ago(1)),
+    ]
+    fake = FakeGitHub(monkeypatch, issues=[closed_spec], subs=subs, refs=refs, signed=signed)
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert lanes(tickets) == {40: {"FRONTIER": [41, 42], "DECIDED": [43]}, 50: {"FRONTIER": [51, 54], "DECIDED": [52]}}
+    assert {t.number for t in tickets if t.has_tickets} == {40, 50}
+    by_number = {t.number: t for t in tickets}
+    assert (by_number[42].parent_number, by_number[42].lane_spec, by_number[42].spec_kind) == (40, 40, "impl")
+    # One lean search more, the closed spec and its tickets in the one full fetch, the open spec's children in the
+    # one batched query: no call per spec.
+    assert fake.asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
+                          ("search", 'repo:o/r is:issue is:open in:body "Part of"'), signature_search(),
+                          ("issues", [40, 50, 51, 52, 54]), ("children", [40])]
+
+
+def test_github_signature_search_is_lean_and_capped(monkeypatch):
+    signed = [gh_issue(n, [], SPEC_SIG) for n in range(1, providers.LIMIT + 2)]
+    fake = FakeGitHub(monkeypatch, signed=signed)
+    queries = []
+    gh_answers(monkeypatch, lambda args, stdin: queries.append(json.loads(stdin)["query"]) or fake.answer(args, stdin))
+    provider = github.GitHubProvider("o/r")
+    tickets = provider.fetch(Query())
+    assert len([t for t in tickets if t.is_standalone_spec]) == providers.LIMIT
+    assert "specs and tickets" in provider.cut_off
+    search = next(q for q in queries if "ISSUE_ADVANCED" in q)
+    assert "title" not in search and "assignees" not in search and "blockedBy" not in search
