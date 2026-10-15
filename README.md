@@ -3,10 +3,11 @@
 A live, read-only swimlane board of [wayfinder](https://github.com/mattpocock/skills) maps and
 standalone specs for [herdr](https://herdr.dev), packaged as a Claude Code plugin. Run `/ticketmaster` in a
 Claude session inside herdr and the board opens in a pane beside it. Every open map is a lane, and its
-decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub, so is every standalone spec
-written by `/to-spec`, with its `/to-tickets` tickets. `s` starts `/wayfinder` for a ticket in its
-own git worktree, opened as a herdr workspace with Claude running in it as a herdr agent, and each
-card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
+decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub, GitLab, Gitea/Forgejo and Linear, so
+is every standalone spec written by `/to-spec`, with its `/to-tickets` tickets, and on GitHub one Loose lane holds the `/to-tickets`
+tickets with no spec parent. `s` starts `/wayfinder` for a ticket, `/to-tickets` on a spec or `/implement` on
+its tickets, in its own git worktree, opened as a herdr workspace with Claude running in it as a herdr
+agent, and each card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
 tracker or the repo, and never removes a worktree.
 
 ```
@@ -90,11 +91,11 @@ checkout it runs from, such as one whose PR was squash-merged. Nothing is forced
 removed and what was kept, with the reasons. It exits non-zero when git or herdr refused a step.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
-its spec and the spec's implementation tickets, and on GitHub every standalone spec written by `/to-spec`
-as a lane of its own, with its `/to-tickets` tickets (see [Lanes and columns](#lanes-and-columns)).
-Other issues are not shown. `map` (`42`, `#42`, the issue's URL, or a tracker
+its spec and the spec's implementation tickets, and on GitHub, GitLab, Gitea/Forgejo and Linear every standalone spec
+written by `/to-spec` as a lane of its own, with its `/to-tickets` tickets, then on GitHub the Loose lane of `/to-tickets`
+tickets with no spec parent (see [Lanes and columns](#lanes-and-columns)). Other issues are not shown. `map` (`42`, `#42`, the issue's URL, or a tracker
 key like `TM-1` or a Linear issue URL) opens the full board with the [map filter](#filters) preset to
-that map, for this run only, which hides the spec lanes; `Esc` clears it and shows every lane. A key matches the map card
+that map, for this run only, which hides the spec lanes and the Loose lane; `Esc` clears it and shows every lane. A key matches the map card
 whose tracker key it is, never issue number 1; a key no map carries shows an empty board. A closed map
 whose spec is still open stays on the board in full. Any other closed map shows only when you name it by
 number or URL, or on Linear by its team's key, as its header card alone.
@@ -111,11 +112,11 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 | Key            | Column            | Effect                                                              |
 | -------------- | ----------------- | ------------------------------------------------------------------- |
 | `Enter` / double-click | any       | go to the card's most urgent session, else its worktree with a shell; with neither, the status line says what `s` would do there or why it refuses. It never starts or resumes Claude |
-| `s`            | all but Decided   | start `/wayfinder` for the ticket, `/implement` on an `impl` card, or `/to-tickets` on a map card whose spec has no tickets yet, in its own `issue-<n>` worktree, or continue Claude in it when it has no agent (asks first); refused when closed, blocked, assigned to someone else or live (press `Enter`) |
+| `s`            | all but Decided   | start `/wayfinder` for the ticket, `/implement` on an `impl` card, or `/to-tickets` on a map card whose spec has no tickets yet or on a standalone spec card without tickets, in its own `issue-<n>` worktree, or continue Claude in it when it has no agent (asks first); refused when closed, blocked, assigned to someone else or live (press `Enter`) |
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | free-text filter, clear every filter, refresh now, quit             |
 | `f`            | any               | filter picker: type, HITL/AFK, assignee, map, author ([Filters](#filters); saved per repo) |
-| `c`            | any               | settings menu: refresh interval, fetch limit, GitHub budget ([Settings](#settings); saved per repo) |
+| `c`            | any               | settings menu: refresh interval, fetch limit, Decided age, GitHub budget ([Settings](#settings); saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
 
 Arrows or `hjkl` move between cards: up and down walk each lane's map card and then its cards in the
@@ -133,10 +134,12 @@ claude -n "#<n> <title>" "<prompt>"
 | Card                                                          | Prompt                                         |
 | ------------------------------------------------------------- | ---------------------------------------------- |
 | a map (`wayfinder:map`) whose spec has no tickets yet         | `/mattpocock-skills:to-tickets <spec-url>` in the spec's worktree; see below |
+| a standalone spec (a spec lane's header) with no tickets yet  | `/mattpocock-skills:to-tickets <spec-url>`, focused; refused once it has tickets, see below |
 | any other map                                                 | its first frontier ticket's; with an empty frontier `/mattpocock-skills:wayfinder <map-url>`; see below |
 | has a `wayfinder:<type>` label (`research`, `prototype`, `grilling`, `task`; GitLab's `wayfinder::<type>` too) | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
-| an implementation ticket (`impl`)                             | `/mattpocock-skills:implement <ticket-url>`, see below |
+| an implementation ticket (`impl`), in a map or a spec lane    | `/mattpocock-skills:implement <ticket-url>`, see below |
 | closed, blocked, assigned to someone else, a live session     | never started; the status line says why        |
+| anything else (no map, no standalone spec, not loose)         | not board work: never started                  |
 
 The skills are `wayfinder_command`, `implement_command` and `to_tickets_command` in `.ticketmaster.toml`. Each ticket gets
 one worktree, never a `-2` copy: when it exists without an agent, `s` opens it and runs
@@ -160,6 +163,13 @@ asked for when you press `s`; else issue number). That ticket gets its own `issu
 card and `/mattpocock-skills:wayfinder <map-url> <ticket-url>` session, so a second press starts the
 next frontier ticket. With an empty frontier it starts `/mattpocock-skills:wayfinder <map-url>` in
 the map's own worktree, so wayfinder can graduate fog or finish the map.
+
+`s` on a spec lane's header card, a standalone spec with no implementation ticket yet (neither open nor
+closed), starts `/mattpocock-skills:to-tickets <spec-url>`, focused, in the spec's own `issue-<spec>` worktree.
+It refuses a closed spec, a blocked one, one assigned to someone else, then one that has tickets (`s
+starts /implement on its tickets`), in that order. `s` on a ticket in a spec lane starts
+`/mattpocock-skills:implement <ticket-url>` unfocused in its `issue-<n>` worktree, as on a map spec's
+tickets. The board never removes a spec's worktree.
 
 The board finds the sessions working a ticket, including ones it did not start. A herdr agent works
 ticket `<n>` when its worktree path or branch is `issue-<n>` or `tm-<n>` (optionally `worktree-`
@@ -189,7 +199,7 @@ and the board narrows as you go. Every value comes from the tracker data on the 
 | Type      | `research`, `prototype`, `grilling`, `task`, `spec`, `impl` (those on the board) | its type is selected; `spec` keeps a lane whose map card carries a spec, and a spec lane |
 | HITL/AFK  | `HITL`, `AFK`                                             | its wayfinder mode is selected |
 | Assignee  | `me` (your tracker login), `unassigned`, `anyone` (the default); one at a time | it is assigned to you, or to nobody |
-| Map       | each map lane's map                                       | its lane's map is selected; spec lanes hide while a map is selected |
+| Map       | each map lane's map                                       | its lane's map is selected; spec lanes and the Loose lane hide while a map is selected |
 | Author    | each card's author                                        | one of them opened it        |
 
 Values in a section are alternatives; a card must pass every section with a selection, and the `/`
@@ -209,7 +219,7 @@ that is no longer on the board is ignored until it comes back. There are no labe
 per user and repo, under `repos` in the same `settings.json`:
 
 ```json
-{"repos": {"github:owner/name": {"interval": 10, "fetch_limit": 100, "budget": 1000}}}
+{"repos": {"github:owner/name": {"interval": 10, "fetch_limit": 100, "decided_age": 14, "budget": 1000}}}
 ```
 
 `Esc` closes the menu without changing anything. A field that is not valid stays open with a message
@@ -219,6 +229,7 @@ saying why, and a failed save shows a warning while the new value still applies 
 | ---------------- | ---------------------------- | --------------------------------------------------------- |
 | Refresh interval | any positive number of seconds, no floor | ticket and session fetches reschedule at once; the status line's `every Ns` shows it |
 | Fetch limit      | a whole number, 1 or more; default 300 | the open maps the board reads, and the tickets it reads per map, from the next ticket fetch |
+| Decided age      | a whole number of days, 0 or more; empty (off) by default | Decided tickets closed more than that many days ago are hidden at once, without a fetch |
 | GitHub budget    | any positive number of GraphQL points an hour, default 1,000; GitHub only | ticket fetches re-pace at once to the [budget](#providers) |
 
 The refresh interval is `--interval` for this run, then the repo's saved interval, then the
@@ -235,6 +246,11 @@ closed map that an open spec names, or that the board was started on, comes on t
 On GitLab and Gitea/Forgejo, which have no sub-issues, a map's tickets are still found among every
 issue with a `wayfinder:` type label, so there the per-map limit trims the board, not the requests. A Linear
 map keeps its first sub-issues as Linear pages them.
+
+The Decided age hides old Decided tickets: those closed more than N days ago. Open tickets, however
+old, and closed ones without a close date always show; 0 hides every closed ticket with a close date.
+Column heads and tabs count only the cards shown, while lane headers keep the map's or spec's full
+progress. Emptying the field shows every Decided ticket again and removes the saved value.
 
 ## Wayfinding links
 
@@ -270,7 +286,7 @@ to_tickets_command = "/to-tickets"        # default /mattpocock-skills:to-ticket
 
 ## Lanes and columns
 
-Map lanes come first, then spec lanes, each ordered by issue number.
+Map lanes come first, then spec lanes, each ordered by issue number, then the Loose lane.
 
 Each open `wayfinder:map` is a map lane. Its header is the map card (`◆`, cyan): the map's
 title and its counts, **decided** (closed tickets, less those out of scope), **open** and
@@ -283,17 +299,28 @@ is no card: the map card shows it on a line of its own, `▣ #<spec> open` (or `
 tickets' counts, `N done · N open · N blocked` (done is closed, less canceled), or `no tickets yet`,
 and the badges of the spec's sessions. The map card's own counts are of its decision tickets only.
 
-On GitHub, each standalone spec is a spec lane. A standalone spec carries the spec **signature**, the
+On GitHub, GitLab, Gitea/Forgejo and Linear, each standalone spec is a spec lane. A standalone spec carries the spec **signature**, the
 headings `/to-spec` writes, `## Problem Statement` and `## Solution`, has no `Part of #<map>` line naming a
-map and no `wayfinder:` label. Both headings must be there, at `##` level, in any case; an issue that
+map and no `wayfinder:` label. Both headings must be there, at `##` level, in any case (on Linear, whose
+search matches the heading exactly, as `/to-spec` writes it); an issue that
 only mentions them in prose does not count, and one that also carries the ticket signature is a spec.
 Its header is the spec card (`▣`, magenta): `▣ #<n> <title>`, `spec closed` once it is closed, its
 assignees, and `spec · N done · N open · N blocked` (done is closed, less canceled). Its tickets are the
 issues with the ticket signature `/to-tickets` writes, `## What to build` and `## Acceptance criteria`,
-whose sub-issue parent, else first `## Parent` reference (`#<n>` or the issue's URL), is the spec. They
+whose sub-issue parent, else first `## Parent` reference (`#<n>` or the issue's URL; on Linear `TM-<n>`, a
+mention or the issue's URL), is the spec. They
 fill the same four columns, every closed one in Decided however old. The lane stays while the spec or any
 of its tickets is open, so a closed spec with an open ticket keeps its lane; it leaves once all are
 closed. A ticket whose parent is a map spec stays in the map's lane.
+
+On GitHub, a **loose ticket** is an issue with the ticket signature whose parent is no spec: it has no
+sub-issue parent or `## Parent` reference, or the one it names is a plain issue, a wayfinder ticket or no
+issue at all. The loose tickets share one Loose lane, last on the board. It has no issue behind it: its
+header (`◇`, blue) reads `◇ Loose tickets  to-tickets output with no parent` and
+`N done · N open · N blocked` (done is closed, less canceled). It holds the open loose tickets and those
+closed in the last 7 days, in the same four columns, tagged `impl`, and is left out when there are none.
+`s` on a loose ticket starts `/implement`, as on a map spec's implementation ticket; on its header it starts
+nothing, and `o` opens nothing.
 
 | Column   | Rule                                                                                   |
 | -------- | -------------------------------------------------------------------------------------- |
@@ -312,12 +339,13 @@ section when it has one, else the `## What to build` section), and then:
 - its type and who it needs: `HITL` (you at the keyboard) for `grilling` and `prototype`, `AFK` (the
   agent alone) for `research`, and for a `task` whichever of the words `HITL` / `AFK` its body names
   first (no badge when it names neither); `impl` for a spec's implementation ticket, a map spec's or a
-  standalone spec's
+  standalone spec's, and for a loose ticket
 - `PR open` on an open card when an open pull or merge request will close its issue
 - `out of scope`, in Decided
 - its open blockers (`⛔ #3 other/lib#12`, `⛔ TM-3` on Linear)
 - its assignees (`@kare`; Linear's display name, `@kaare.blakstad`)
-- its lane's title (`◆ Pick a stack` for a map, `▣ Board shows standalone work` for a spec)
+- its lane's title (`◆ Pick a stack` for a map, `▣ Board shows standalone work` for a spec,
+  `◇ Loose tickets` in the Loose lane)
 
 ## Providers
 
@@ -364,9 +392,9 @@ refuses and names both options. The key goes bare in `Authorization`, the token 
 | Provider        | Access                                   | Blocking                  | Maps and their tickets              |
 | --------------- | ---------------------------------------- | ------------------------- | ----------------------------------- |
 | GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | a search for open `wayfinder:map` issues, then per map its sub-issues in order and the typed tickets and spec whose `Part of #<map>` line names it, then the spec's sub-issues and the issues whose `## Parent` names it |
-| GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | the project's `wayfinder:` labels (`wayfinder:map` or `wayfinder::map`, and the four types), one query per label; a typed ticket joins the map its `Part of #<map>` line names; a description search for `Part of` and `Parent` finds the specs and their implementation tickets |
-| Gitea / Forgejo | REST through `tea api`, with the `tea` login (token or OAuth) whose URL matches the repo host | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names; an issue search (`q`) for `Part of` and `Parent` finds the specs and their implementation tickets |
-| Linear          | GraphQL with the API key (`Authorization: <key>`) or the `login` token (`Bearer`) | `blocks` relations (`inverseRelations`) | the team's open `wayfinder:map` issues, then per map its sub-issues in sub-issue order; one description search for `Part of` and `Parent` finds the typed tickets and spec linked by `Part of`, and the spec's sub-issues and `## Parent` tickets |
+| GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | the project's `wayfinder:` labels (`wayfinder:map` or `wayfinder::map`, and the four types), one query per label; a typed ticket joins the map its `Part of #<map>` line names; a description search for `Part of` and `Parent` finds the specs and their implementation tickets; two description searches per signature find the standalone specs and tickets, the open ones and those closed within 7 days, and one `Parent <spec>` search per open standalone spec its older tickets |
+| Gitea / Forgejo | REST through `tea api`, with the `tea` login (token or OAuth) whose URL matches the repo host | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names; an issue search (`q`) for `Part of` and `Parent` finds the specs and their implementation tickets; two issue searches per signature find the standalone specs and tickets, the open ones and those closed within 7 days (a hit by a comment alone is dropped), and one `Parent #<spec>` search per open standalone spec its older tickets |
+| Linear          | GraphQL with the API key (`Authorization: <key>`) or the `login` token (`Bearer`) | `blocks` relations (`inverseRelations`) | the team's open `wayfinder:map` issues, then per map its sub-issues in sub-issue order; one description search for `Part of`, `Parent` and the spec and ticket signatures finds the typed tickets and spec linked by `Part of`, the spec's sub-issues and `## Parent` tickets, and the standalone specs and their tickets, then one query for the open standalone specs' sub-issues |
 
 On Linear only the workflow state's type counts, never its team-renamable name: `completed` is
 closed, `canceled` and `duplicate` closed as not planned. Only the assignee claims a ticket; the
@@ -393,8 +421,9 @@ once, with the next scheduled fetch one paced interval after it. The rate-limit 
 the pace while it lasts.
 
 A Linear API key allows 2,500 requests an hour, shared by everything using its user's key, which is why
-the board polls Linear every 30 s. Every refresh lists the maps, then makes one query per open map and
-one search for specs and implementation tickets; each stays under half of Linear's 10,000-point
+the board polls Linear every 30 s. Every refresh lists the maps, then makes one query per open map, one
+search for specs and implementation tickets, standalone ones included, and one query for the open
+standalone specs' sub-issues; each stays under half of Linear's 10,000-point
 complexity cap per query.
 
 When the tracker rate-limits the board (GitHub's primary or secondary limit, an HTTP 429 from

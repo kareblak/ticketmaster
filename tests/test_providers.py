@@ -148,7 +148,7 @@ def github_board(monkeypatch, maps, subs=None, refs=None, named=None, specs=()):
 def lanes(tickets, named_map=None):
     from ticketmaster.model import build_board
 
-    return {lane.header.number: {**({"SPECS": [t.number for t in lane.specs]} if lane.specs else {}),
+    return {"loose" if lane.header is None else lane.header.number: {**({"SPECS": [t.number for t in lane.specs]} if lane.specs else {}),
                               **{c.name: [t.number for t in ts] for c, ts in lane.columns.items() if ts}}
             for lane in build_board(tickets, named_map).lanes}
 
@@ -199,9 +199,9 @@ def test_gitlab_node_to_ticket():
     assert t.labels == ("review::ux",) and t.author == "gl-user"
 
 
-def gl_issue(iid, labels, body="", state="opened"):
+def gl_issue(iid, labels, body="", state="opened", closed_at=None):
     return {"iid": str(iid), "title": f"t{iid}", "webUrl": f"https://gl/g/p/-/issues/{iid}", "description": body,
-            "state": state, "closedAt": None, "assignees": {"nodes": []},
+            "state": state, "closedAt": closed_at and closed_at.isoformat(), "assignees": {"nodes": []},
             "labels": {"nodes": [{"title": n} for n in labels]}, "blockedByIssues": {"nodes": []},
             "mergeRequestsCount": 0}
 
@@ -212,8 +212,15 @@ def searched(words, *texts):
     return all(word in haystack for word in words.lower().split() if len(word) >= 3)
 
 
+GITLAB_SIGNATURES = [("search", words, state) for words in ("problem statement solution", "build acceptance criteria")
+                     for state in ("opened", "closed")]
+GITEA_SIGNATURES = [("search", words, state) for words in ("Problem Statement", "What to build")
+                    for state in ("open", "closed")]
+
+
 def gitlab_board(monkeypatch, labels, issues, named=None):
-    """Fakes `glab api graphql`: the project's labels, issues by label (and state), a named issue."""
+    """Fakes `glab api graphql`: the project's labels, issues by label (and state), a named issue (by default the
+    one with that iid)."""
     asked = []
 
     def fake_run_json(args, stdin=None):
@@ -223,10 +230,13 @@ def gitlab_board(monkeypatch, labels, issues, named=None):
             return {"data": {"project": {"labels": page([{"title": title} for title in labels])}}}
         if "named" in variables:
             asked.append(("named", variables["named"]))
-            return {"data": {"project": {"issue": named}}}
+            found = named or next((n for n in issues if n["iid"] == variables["named"]), None)
+            return {"data": {"project": {"issue": found}}}
         if "search" in variables:
-            asked.append(("search", variables["search"]))
-            nodes = [n for n in issues if searched(variables["search"], n["title"], n["description"])]
+            state, after = variables.get("state"), variables.get("closedAfter")
+            asked.append(("search", variables["search"], state) if state else ("search", variables["search"]))
+            nodes = [n for n in issues if searched(variables["search"], n["title"], n["description"])
+                     and state in (None, n["state"]) and (after is None or (n["closedAt"] or "") >= after)]
             return {"data": {"project": {"issues": page(nodes)}}}
         asked.append((variables.get("state"), tuple(variables["labels"])))
         nodes = [n for n in issues if variables["labels"][0] in [label["title"] for label in n["labels"]["nodes"]]
@@ -250,7 +260,7 @@ def test_gitlab_fetches_every_open_map_with_its_children_by_their_part_of_line(m
     asked = gitlab_board(monkeypatch, GITLAB_LABELS, GITLAB_ISSUES)
     tickets = gitlab.GitLabProvider("g/p").fetch(Query())
     assert asked == [("opened", ("wayfinder::map",)), (None, ("wayfinder::grilling",)), (None, ("wayfinder::task",)),
-                     ("search", "Part of"), ("search", "Parent")]
+                     ("search", "Part of"), ("search", "Parent"), *GITLAB_SIGNATURES]
     assert [t.number for t in tickets] == [1, 20, 5, 3, 21, 40]  # #40: untyped with `Part of #1`, so the spec
     assert (tickets[2].parent_number, tickets[2].parent_url) == (1, "https://gl/g/p/-/issues/1")
     assert lanes(tickets) == {1: {"SPECS": [40], "FRONTIER": [5], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
@@ -289,9 +299,10 @@ def test_gitea_issue_to_ticket_detects_closing_pr():
     assert gitea.to_ticket(issue, (), ["Fixes #40"]).has_open_change_request is False
 
 
-def gt_issue(number, labels, body="", state="open", assignees=()):
+def gt_issue(number, labels, body="", state="open", assignees=(), closed_at=None, comments=""):
     return {"number": number, "title": f"t{number}", "html_url": f"https://gt/o/r/issues/{number}", "body": body,
-            "state": state, "assignees": [{"login": a} for a in assignees], "labels": [{"name": n} for n in labels]}
+            "state": state, "closed_at": closed_at and closed_at.isoformat(), "comments_text": comments,
+            "assignees": [{"login": a} for a in assignees], "labels": [{"name": n} for n in labels]}
 
 
 def gitea_board(monkeypatch, repo_labels, org_labels, issues, dependencies=None):
@@ -308,8 +319,10 @@ def gitea_board(monkeypatch, repo_labels, org_labels, issues, dependencies=None)
         if path.endswith("/pulls"):
             return []
         if path == "/repos/o/r/issues" and "q" in params:
-            asked.append(("search", params["q"]))
-            return [i for i in issues if searched(params["q"], i["title"], i["body"])]
+            state, since = params["state"], params.get("since")
+            asked.append(("search", params["q"], state) if state != "all" else ("search", params["q"]))
+            return [i for i in issues if searched(params["q"], i["title"], i["body"], i.get("comments_text", ""))
+                    and state in ("all", i["state"]) and (since is None or (i["closed_at"] or "") >= since)]
         if path == "/repos/o/r/issues":
             asked.append((params["state"], params["labels"]))
             return [i for i in issues if params["labels"] in [label["name"] for label in i["labels"]]
@@ -354,7 +367,7 @@ def test_gitea_fetches_every_open_map_with_its_children_by_their_part_of_line(mo
                         dependencies={5: [{"number": 2, "state": "open", "repository": {"full_name": "o/r"}}]})
     tickets = gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query())
     assert asked == [("open", "wayfinder:map"), ("all", "wayfinder:research"), ("all", "wayfinder:task"),
-                     ("search", "Part of"), ("search", "Parent")]
+                     ("search", "Part of"), ("search", "Parent"), *GITEA_SIGNATURES]
     assert [t.number for t in tickets] == [1, 20, 5, 3, 2, 21, 40]
     assert lanes(tickets) == {1: {"SPECS": [40], "BLOCKED": [5], "CLAIMED": [2], "DECIDED": [3]},
                               20: {"FRONTIER": [21]}}
@@ -366,7 +379,8 @@ def test_gitea_adds_a_named_closed_map_without_org_labels(monkeypatch):
     assert ("issue", 30) in asked and {30, 31} <= {t.number for t in tickets}
     asked = gitea_board(monkeypatch, ["bug"], None, GITEA_ISSUES)
     assert gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query()) == []
-    assert asked == []  # no wayfinder labels: no issue listed
+    # No wayfinder labels: no issue listed by label, only the signature searches.
+    assert asked == GITEA_SIGNATURES
 
 
 def fake_tea(monkeypatch, answer, logins=()):
@@ -845,7 +859,7 @@ def test_gitlab_reads_each_maps_spec_and_its_implementation_tickets_by_their_bod
     asked = gitlab_board(monkeypatch, ["wayfinder::map", "wayfinder::grilling"], issues)
     tickets = gitlab.GitLabProvider("g/p").fetch(Query())
     assert_lane_family(tickets, "https://gl/g/p/-/issues/1")
-    assert asked[-2:] == [("search", "Part of"), ("search", "Parent")]
+    assert asked[-6:-4] == [("search", "Part of"), ("search", "Parent")]
 
 
 def test_gitea_reads_each_maps_spec_and_its_implementation_tickets_with_no_sub_issues(monkeypatch):
@@ -864,7 +878,7 @@ def test_gitea_reads_each_maps_spec_and_its_implementation_tickets_with_no_sub_i
 def test_trackers_without_sub_issues_search_for_specs_only_with_a_map_label(monkeypatch):
     asked = gitlab_board(monkeypatch, ["bug"], [gl_issue(3, [], "Part of #1")])
     assert gitlab.GitLabProvider("g/p").fetch(Query()) == []
-    assert not any(kind == "search" for kind, _ in asked)
+    assert not any(call[1] in providers.SPEC_SEARCHES for call in asked if call[0] == "search")
 
 
 def test_gitlab_shows_a_closed_map_whose_spec_is_still_open(monkeypatch):
@@ -1264,7 +1278,8 @@ def test_github_fills_each_spec_lane_from_its_children_and_a_closed_specs_from_i
     ]
     fake = FakeGitHub(monkeypatch, issues=[closed_spec], subs=subs, refs=refs, signed=signed)
     tickets = github.GitHubProvider("o/r").fetch(Query())
-    assert lanes(tickets) == {40: {"FRONTIER": [41, 42], "DECIDED": [43]}, 50: {"FRONTIER": [51, 54], "DECIDED": [52]}}
+    assert lanes(tickets) == {40: {"FRONTIER": [41, 42], "DECIDED": [43]}, 50: {"FRONTIER": [51, 54], "DECIDED": [52]},
+                              "loose": {"FRONTIER": [55]}}
     assert {t.number for t in tickets if t.has_tickets} == {40, 50}
     by_number = {t.number: t for t in tickets}
     assert (by_number[42].parent_number, by_number[42].lane_spec, by_number[42].spec_kind) == (40, 40, "impl")
@@ -1272,7 +1287,7 @@ def test_github_fills_each_spec_lane_from_its_children_and_a_closed_specs_from_i
     # one batched query: no call per spec.
     assert fake.asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
                           ("search", 'repo:o/r is:issue is:open in:body "Part of"'), signature_search(),
-                          ("issues", [40, 50, 51, 52, 54]), ("children", [40])]
+                          ("issues", [40, 50, 51, 52, 54, 55]), ("children", [40])]
 
 
 def test_github_signature_search_is_lean_and_capped(monkeypatch):
@@ -1286,3 +1301,146 @@ def test_github_signature_search_is_lean_and_capped(monkeypatch):
     assert "specs and tickets" in provider.cut_off
     search = next(q for q in queries if "ISSUE_ADVANCED" in q)
     assert "title" not in search and "assignees" not in search and "blockedBy" not in search
+
+
+def test_github_takes_a_ticket_without_a_spec_parent_as_loose_and_keeps_a_map_specs_ticket_on_the_map(monkeypatch):
+    def ticket(number, parent_line="", **kw):
+        return gh_issue(number, [], (f"## Parent\n\n{parent_line}\n\n" if parent_line else "") + TICKET_SIG, **kw)
+
+    map_spec = gh_issue(34, [], "Part of #1\n\n" + SPEC_SIG)
+    on_map_spec = ticket(74, "#34")
+    question = gh_issue(81, ["wayfinder:research"], "Part of #1", parent=1)
+    signed = [
+        ticket(71),  # no parent
+        ticket(72, "#80"),  # a plain issue
+        ticket(73, "#81"),  # a wayfinder ticket
+        on_map_spec,
+        ticket(75, parent=82, parent_labels=()),  # a plain issue as sub-issue parent
+        ticket(76, state="CLOSED", closed_at=ago(2)),
+        ticket(77, state="CLOSED", closed_at=ago(10)),  # closed before the window
+        ticket(78, "#404"),  # no such issue
+        ticket(79, "#83"),  # a ticket, no spec
+        ticket(83),
+        ticket(84, "#85"),  # a plain issue whose `Part of` names no map
+    ]
+    fake = FakeGitHub(monkeypatch, maps=[gh_issue(1, MAP_LABELS)], specs=[map_spec],
+                      issues=[gh_issue(80, [], "Plain."), gh_issue(82, [], "Plain too."), question,
+                              gh_issue(85, [], "Part of #80\n\nAn epic's child.")],
+                      subs={1: [question]}, refs={1: [map_spec], 34: [on_map_spec]}, signed=signed)
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert lanes(tickets) == {1: {"SPECS": [34], "FRONTIER": [81, 74]},
+                              "loose": {"FRONTIER": [71, 72, 73, 75, 78, 79, 83, 84], "DECIDED": [76]}}
+    by_number = {t.number: t for t in tickets}
+    assert {by_number[n].spec_kind for n in (71, 72, 73, 75, 76, 78, 79, 83, 84)} == {"impl"}
+    assert by_number[74].map_number == 1 and not by_number[74].loose
+    assert by_number[71].start_refusal("me") is None
+    # The loose tickets and the parents no search answered come in the one full fetch.
+    assert fake.asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
+                          ("search", 'repo:o/r is:issue is:open in:body "Part of"'), signature_search(),
+                          ("issues", [1, 80, 81, 82, 404, 85, 72, 73, 75, 78, 84, 71, 76, 79, 83]),
+                          ("children", [1, 34])]
+
+
+# --- standalone specs and their tickets on GitLab and Gitea/Forgejo ------------------------------------------------
+
+def standalone_family(issue, closed, url):
+    """A board's standalone specs and tickets, as `issue(number, labels, body, state=…, closed_at=…)` makes them, with
+    `closed` its closed state's name and `url` an issue's URL without the number."""
+    def ticket(number, parent_line="", **kw):
+        return issue(number, [], (f"## Parent\n\n{parent_line}\n\n" if parent_line else "") + TICKET_SIG, **kw)
+
+    return [
+        issue(40, [], SPEC_SIG),  # an open standalone spec
+        ticket(41, "#40"),
+        ticket(42, f"{url}40", state=closed, closed_at=ago(2)),  # names it by URL, closed within the window
+        ticket(43, "#40", state=closed, closed_at=ago(400)),  # closed long ago: only the children search finds it
+        issue(44, [], "## Parent\n\n#40\n\nHand-made"),  # no ticket signature
+        issue(31, [], "## Problem Statement\n\nOnly half.\n"),  # half a signature
+        issue(32, [], "## What to build\n\nOnly half.\n\n## Parent\n\n#40\n"),
+        issue(33, ["wayfinder:task"], SPEC_SIG), issue(34, ["wayfinder:task"], "## Parent\n\n#40\n\n" + TICKET_SIG),
+        issue(50, [], SPEC_SIG, state=closed, closed_at=ago(60)),  # closed before the window, an open ticket names it
+        ticket(51, "#50"),
+        issue(60, [], SPEC_SIG, state=closed, closed_at=ago(30)),  # closed before the window, so are its tickets
+        ticket(61, "#60", state=closed, closed_at=ago(30)),
+        ticket(55),  # no parent: a loose ticket
+        issue(7, [], "Just a bug."), ticket(56, "#7"),  # its parent is no spec: looked up, no lane
+    ]
+
+
+STANDALONE_LANES = {40: {"FRONTIER": [41], "DECIDED": [42, 43]}, 50: {"FRONTIER": [51]}}
+
+
+def test_gitlab_shows_standalone_specs_with_their_tickets_from_two_signature_searches(monkeypatch):
+    def issue(number, labels, body, state="opened", closed_at=None):
+        return gl_issue(number, [label.replace("wayfinder:", "wayfinder::") for label in labels], body, state, closed_at)
+
+    asked = gitlab_board(monkeypatch, ["wayfinder::task"], standalone_family(issue, "closed", "https://gl/g/p/-/issues/"))
+    tickets = gitlab.GitLabProvider("g/p").fetch(Query())
+    assert lanes(tickets) == STANDALONE_LANES
+    by_number = {t.number: t for t in tickets}
+    assert (by_number[42].parent_number, by_number[42].lane_spec, by_number[42].spec_kind) == (40, 40, "impl")
+    assert {t.number for t in tickets if t.has_tickets} == {40, 50}
+    # Two signature searches, open and closed within the window, one children search per open spec, and the parents
+    # an open ticket names that no search found: a closed spec, and #7, which is no spec.
+    assert asked == [(None, ("wayfinder::task",)), *GITLAB_SIGNATURES, ("named", "7"), ("named", "50"),
+                     ("search", "Parent 40")]
+
+
+def test_gitea_shows_standalone_specs_with_their_tickets_from_two_signature_searches(monkeypatch):
+    issues = standalone_family(gt_issue, "closed", "https://gt/o/r/issues/")
+    issues.append(gt_issue(70, [], "Unrelated.", comments="## Problem Statement\n\nx\n\n## Solution\n\ny"))
+    asked = gitea_board(monkeypatch, ["wayfinder:task"], None, issues)
+    tickets = gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query())
+    assert lanes(tickets) == STANDALONE_LANES
+    assert 70 not in {t.number for t in tickets}  # a hit by its comment only
+    assert {t.number for t in tickets if t.has_tickets} == {40, 50}
+    assert asked == [("all", "wayfinder:task"), *GITEA_SIGNATURES, ("issue", 7), ("issue", 50),
+                     ("search", "Parent #40")]
+
+
+def test_standalone_specs_sit_beside_map_lanes_and_leave_map_specs_to_their_map(monkeypatch):
+    issues = [gl_issue(1, ["wayfinder::map"]), gl_issue(14, [], "Part of #1\n\n" + SPEC_SIG),
+              gl_issue(15, [], "## Parent\n\n#14\n\n" + TICKET_SIG), gl_issue(40, [], SPEC_SIG),
+              gl_issue(41, [], "## Parent\n\n#40\n\n" + TICKET_SIG)]
+    asked = gitlab_board(monkeypatch, ["wayfinder::map"], issues)
+    tickets = gitlab.GitLabProvider("g/p").fetch(Query())
+    assert lanes(tickets) == {1: {"SPECS": [14], "FRONTIER": [15]}, 40: {"FRONTIER": [41]}}
+    assert [call for call in asked if call[0] == "search"] == [
+        ("search", "Part of"), ("search", "Parent"), *GITLAB_SIGNATURES, ("search", "Parent 40")]
+
+
+def test_gitlab_signature_hits_are_capped(monkeypatch):
+    gitlab_board(monkeypatch, [], [gl_issue(n, [], SPEC_SIG) for n in range(1, providers.LIMIT + 2)])
+    provider = gitlab.GitLabProvider("g/p")
+    tickets = provider.fetch(Query())
+    assert len([t for t in tickets if t.is_standalone_spec]) == providers.LIMIT
+    assert provider.cut_off == ["specs and tickets"]
+
+
+def test_a_spec_lane_cut_after_the_body_check_says_so(monkeypatch):
+    # The children search finds more issues than the limit, most of them no ticket of the spec: the lane is cut
+    # only by its own tickets.
+    noise = [gl_issue(n, [], "## Parent\n\n#400\n\n" + TICKET_SIG) for n in range(100, 110)]
+    family = [gl_issue(40, [], SPEC_SIG), *noise,
+              *(gl_issue(n, [], "## Parent\n\n#40\n\n" + TICKET_SIG, "closed", ago(30)) for n in (41, 42, 43))]
+    gitlab_board(monkeypatch, [], family)
+    provider = gitlab.GitLabProvider("g/p")
+    assert lanes(provider.fetch(Query(limit=2)))[40] == {"DECIDED": [41, 42]}
+    assert provider.cut_off == ["#40's tickets"]
+    assert lanes(provider.fetch(Query(limit=3)))[40] == {"DECIDED": [41, 42, 43]} and provider.cut_off == []
+
+
+def test_a_spec_closed_within_the_window_with_every_ticket_closed_has_no_lane(monkeypatch):
+    gitlab_board(monkeypatch, [], [gl_issue(40, [], SPEC_SIG, "closed", ago(2)),
+                                   gl_issue(41, [], "## Parent\n\n#40\n\n" + TICKET_SIG, "closed", ago(2))])
+    assert lanes(gitlab.GitLabProvider("g/p").fetch(Query())) == {}
+
+
+def test_a_parent_that_is_no_standalone_spec_is_looked_up_once_per_board_run(monkeypatch):
+    issues = standalone_family(gt_issue, "closed", "https://gt/o/r/issues/")
+    asked = gitea_board(monkeypatch, [], None, issues)
+    provider = gitea.GiteaProvider("o/r", "codeberg.org", login="x")
+    provider.fetch(Query())
+    asked.clear()
+    assert lanes(provider.fetch(Query())) == STANDALONE_LANES
+    assert [call for call in asked if call[0] == "issue"] == [("issue", 50)]  # the closed spec, not #7 again

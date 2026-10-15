@@ -5,6 +5,10 @@ open maps, and each typed ticket whose body's first line is `Part of #<map>` for
 untyped issue with that first line, and the spec's implementation tickets name it in a `## Parent` section; both
 are found by an issue search (`q`). An open pull request closes an issue when its body says
 `closes/fixes/resolves #<n>`.
+
+Then every standalone spec with its tickets, from two issue searches per signature, the open specs and tickets and
+those closed within a week, and per open spec one `Parent #<spec>` search, which also finds its older tickets. The
+search also matches comments; the body check drops those hits.
 """
 
 from __future__ import annotations
@@ -24,9 +28,12 @@ from email.utils import parsedate_to_datetime
 from ..model import Ticket, parse_time
 from . import (LABEL_LIMIT, LIMIT, OPEN_MAPS, SPEC_SEARCHES, IssueStates, NotFound, ProviderError, Query,
                RateLimited, blocker_ref, cap_lanes, capped, closed_map_refs, map_board, resolve_maps, run_json,
-               tracker_error, wayfinder_labels, with_body_blockers, with_spec_tickets, with_specs)
+               standalone_lanes, tracker_error, wayfinder_labels, with_body_blockers, with_spec_tickets, with_specs)
 
 PAGE = 50
+# What the signature searches ask for, one heading each: `q` takes one phrase, and the indexer drops `##`. The
+# other heading of the pair is checked in the body.
+SIGNATURE_SEARCHES = ("Problem Statement", "What to build")
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
 STATUS = re.compile(r"^HTTP/\S+ (\d{3})\b ?(.*)$", re.MULTILINE)
 
@@ -67,6 +74,7 @@ class GiteaProvider:
         if login:
             self.login = login
         self.states = IssueStates(self._issue_states)
+        self.not_specs: set[int] = set()  # parents an open ticket names that are no standalone spec
         self.cut_off: list[str] = []
 
     @functools.cached_property
@@ -108,6 +116,14 @@ class GiteaProvider:
         tickets = map_board(maps, named, children)
         if any(t.is_wayfinder_map for t in tickets):
             tickets = with_specs(tickets, candidates)
+        def signature_search(words: str, closed_since: datetime | None) -> list[Ticket]:
+            if closed_since is None:
+                return issues("open", LIMIT + 1, q=words)
+            return issues("closed", LIMIT + 1, q=words, since=closed_since.isoformat())  # updated since: a close sets it
+
+        tickets += standalone_lanes(tickets, signature_search, SIGNATURE_SEARCHES,
+                                    lambda number: issues("all", LABEL_LIMIT, q=f"Parent #{number}"), self._issue,
+                                    self.not_specs, limit, cut)
         open_numbers = [t.number for t in tickets if t.is_open]
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
