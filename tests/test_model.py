@@ -74,15 +74,24 @@ def test_parse_blockers_ignores_none_mentions_and_other_repos():
     assert parse_blockers("") == ()
 
 
+DECISION = dict(parent_url="u9", parent_labels=("wayfinder:map",))  # with a wayfinder:<type> label, a ticket of map #9
+
+
+def test_start_refusal_names_a_closed_ticket_first():
+    assert ticket(**DECISION, labels=("wayfinder:task",), is_open=False, open_blockers=1).start_refusal("me") \
+        == "#1 is closed"
+    assert ticket(key="TM-1", is_open=False).start_refusal("me") == "TM-1 is closed"  # Linear's key
+
+
 def test_start_refusal_names_blockers_and_other_claimant():
     assert ticket(blocked_by=("#3", "o/x#4"), open_blockers=2).start_refusal("me") == "#1 is blocked by #3, o/x#4"
     assert ticket(open_blockers=1).start_refusal("me") == "#1 is blocked by 1 open issue"
-    assert ticket(labels=("Blocked",), map_number=9, map_url="u9").start_refusal("me") is None
+    assert ticket(**DECISION, labels=("Blocked", "wayfinder:task")).start_refusal("me") is None
     assert ticket(assignees=("bob", "eve")).start_refusal("me") == "#1 is claimed by @bob, @eve"
 
 
 def test_start_refusal_lets_the_claimant_and_unknown_viewers_start():
-    on_map = dict(map_number=9, map_url="u9")
+    on_map = dict(**DECISION, labels=("wayfinder:grilling",))
     assert ticket(**on_map).start_refusal("me") is None
     assert ticket(assignees=("Me", "bob"), **on_map).start_refusal("me") is None
     assert ticket(assignees=("bob",), **on_map).start_refusal(None) is None
@@ -146,13 +155,13 @@ def test_start_refusal_names_a_ticket_that_is_not_wayfinder_work_last():
     assert ticket().start_refusal("me") == "#1 is not wayfinder work: the board only starts work on a map"
     assert ticket(open_blockers=1).start_refusal("me") == "#1 is blocked by 1 open issue"
     assert ticket(labels=("wayfinder:map",)).start_refusal("me") is None
-    assert ticket(map_number=9, map_url="u9").start_refusal("me") is None
+    assert ticket(**DECISION, labels=("wayfinder:grilling",)).start_refusal("me") is None
     assert ticket(labels=("wayfinder:task",)).start_refusal("me") is None  # map not found: warned elsewhere
 
 
 def test_triage_labels_never_hold_a_start():
     for label in ("needs-info", "ready-for-human"):
-        assert ticket(labels=(label,), map_number=9, map_url="u9").start_refusal("me") is None
+        assert ticket(**DECISION, labels=(label, "wayfinder:task")).start_refusal("me") is None
 
 
 def child(number, **kw):

@@ -9,7 +9,7 @@ import webbrowser
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -23,6 +23,7 @@ from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
 from .model import COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, Ticket, build_board, frontier
 from .providers import ErrorNotice, Provider, ProviderError, Query, RateLimited, error_notice
+from .start import branch_name, worktree_name
 
 NARROW_WIDTH = 100  # below this the "auto" view shows one column at a time
 COLUMN_COLORS = {
@@ -254,6 +255,13 @@ class Cell(Vertical):
         self.column = column
 
 
+class StartPlan(NamedTuple):
+    """The ticket s starts for a card, and how the confirm names it (`via` a map)."""
+
+    ticket: Ticket
+    via: str = ""
+
+
 class Workbench(Protocol):
     """The herdr side of the board, see start.Workbench. Every call blocks."""
 
@@ -412,10 +420,11 @@ class FilterPicker(ModalScreen[None]):
 
 
 KEY_DETAILS = {
-    "primary": "go to the card's most urgent session, else its worktree with a shell; never starts or resumes Claude",
-    "start": "start /wayfinder for the ticket in a new issue-<n> worktree, even when it already has one, or "
-             "/implement on an impl card in its own worktree; not while blocked or claimed by someone else, never "
-             "for a spec or an issue that is not wayfinder work",
+    "primary": "go to the card's most urgent session, else its worktree with a shell, else say what s would do; "
+               "never starts or resumes Claude",
+    "start": "start /wayfinder for the ticket, or /implement on an impl card, in its own issue-<n> worktree, or "
+             "continue Claude in it when it has no agent; not when closed, blocked, claimed by someone else or live "
+             "(press Enter), never for a spec or an issue that is not wayfinder work",
     "open": "open the issue in the browser",
     "pick_filter": "narrow by type, HITL/AFK, assignee (me, unassigned, anyone), map and author; combines with /, "
                    "Esc on the board clears all, saved per repo",
@@ -474,30 +483,32 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     text.append("  Within a column: sub-issue order, then issue number.\n", style="dim")
 
     heading("Starting a session")
-    text.append("  s asks first, then creates a git worktree workspace in herdr on branch issue-<n>\n"
-                "  (issue-<n>-2… when it exists) and starts Claude in it as herdr agent issue-<n> with the\n"
-                "  wayfinder skill (wayfinder_command in .ticketmaster.toml). The prompt depends on the ticket:\n")
+    text.append("  s asks first, then creates a git worktree workspace in herdr on branch issue-<n> (tm-<n> on\n"
+                "  Linear), labelled '#<n> <title>' ('TM-<n> <title>'), and starts Claude in it as\n"
+                "  herdr agent issue-<n> with `<wayfinder_command> <map-url> [<ticket-url>]`\n"
+                "  (wayfinder_command in .ticketmaster.toml).\n"
+                "  When the ticket's worktree exists without an agent, it runs claude --continue there instead;\n"
+                "  it never makes a second worktree. What it starts depends on the card:\n")
     for kind, prompt in [
-        ("wayfinder map", "never started itself: s on the lane's header card starts the map's\n"
-                          + " " * 22 + "first frontier ticket (open, unblocked, unclaimed, not started yet)\n"
-                          + " " * 22 + "on that ticket's own card and worktree"),
-        ("wayfinder ticket", "the wayfinder skill with the map's and the ticket's URLs: a\n"
-                             + " " * 22 + "wayfinder:research/prototype/grilling/task ticket (or wayfinder::…),\n"
-                             + " " * 22 + "on any board; its map is the native parent, else `Part of #<map>`\n"
-                             + " " * 22 + "on the body's first line. Without a map it warns and won't start"),
+        ("wayfinder map", "s on the lane's header card starts the map's first frontier ticket\n"
+                          + " " * 22 + "(open, unblocked, unclaimed, no live session) on that ticket's own\n"
+                          + " " * 22 + "worktree; with an empty frontier, the map itself in its own worktree"),
+        ("wayfinder ticket", "a wayfinder:research/prototype/grilling/task ticket (or wayfinder::…);\n"
+                             + " " * 22 + "its map is the native parent, else `Part of #<map>` on the body's\n"
+                             + " " * 22 + "first line"),
         ("impl ticket", "implement_command (default /mattpocock-skills:implement) with the\n"
-                        + " " * 22 + "ticket's URL, unfocused (AFK), in its own tm-<n>/issue-<n> worktree:\n"
-                        + " " * 22 + "reopened with claude --continue when it exists, never a -2 copy. On\n"
-                        + " " * 22 + "Linear the branch is the issue's gitBranchName. Not with a live\n"
-                        + " " * 22 + "session (press Enter) or an open PR that closes it. The session owns\n"
+                        + " " * 22 + "ticket's URL, unfocused (AFK). On Linear the branch is the issue's\n"
+                        + " " * 22 + "gitBranchName. Not with an open PR that closes it. The session owns\n"
                         + " " * 22 + "review, push and PR; the board starts nothing else"),
-        ("spec", "never started: s starts /implement on its implementation tickets"),
-        ("closed ticket", "never started: it is decided"),
+        ("refused", "a closed, blocked or someone else's ticket, one with a live session\n"
+                    + " " * 22 + "(press Enter instead), and a spec: s starts /implement on its\n"
+                    + " " * 22 + "implementation tickets"),
     ]:
         row(kind, 18, prompt)
     text.append("  A wayfinder ticket's card says who it needs: HITL (you at the keyboard) for grilling and\n"
                 "  prototype, AFK (the agent alone) for research, and for a task whichever of the two\n"
-                "  words its body names first.\n")
+                "  words its body names first. Maps and HITL tickets take focus when started; research\n"
+                "  starts unfocused, and the status line says so.\n")
 
     heading("Finding sessions")
     text.append("  A herdr agent in this repo works #<n> when its worktree or branch is issue-<n> or tm-<n>\n"
@@ -591,7 +602,7 @@ class BoardApp(App):
         self.provider = provider
         self.workbench = workbench
         self.describe_start = describe_start or (lambda ticket: "")
-        self.starting: set[int] = set()  # started from this board, until herdr lists the worktree
+        self.starting: set[int] = set()  # started from this board, until herdr lists its agent or the start fails
         self.sessions: dict[int, list[Session]] = {}
         self.settings_path = settings_path  # None: settings live only as long as the board
         self.settings = load_settings(settings_path) if settings_path else {}
@@ -716,7 +727,7 @@ class BoardApp(App):
             self.known = known_values(board)
             self.last_ok = datetime.now()
         if sessions is not None and sessions != self.sessions:
-            self.starting -= set(sessions) - set(self.sessions)
+            self.starting -= {n for n in self.starting if any(s.status is not None for s in sessions.get(n, []))}
             self.sessions = sessions
             changed = True
         self.herdr_error = herdr_error
@@ -955,7 +966,7 @@ class BoardApp(App):
 
     def action_primary(self) -> None:
         """Enter, on any card: go to the card's own most urgent session, else its worktree with a shell; with
-        neither, say so. It never starts or resumes Claude."""
+        neither, say what s would do there or why it refuses. It never starts or resumes Claude."""
         card = self._card()
         if card is None:
             return
@@ -964,81 +975,98 @@ class BoardApp(App):
             session = min(sessions, key=lambda s: s.urgency)
             self._run(lambda: self.workbench.go_to(ticket, session))
             return
-        message = f"#{ticket.number} has no session here"
-        if ticket.spec_kind == "impl":
-            refusal = self._implement_refusal(ticket)
-            start = self.describe_start(ticket).partition("\n")[0] or "/implement"  # the prompt line alone
-            message += f"; s refuses: {refusal}" if refusal else f"; s starts {start}"
-        self.notify(message, severity="warning")
+        plan = self._start_plan(ticket)
+        if isinstance(plan, str):
+            would = f"s refuses: {plan}"
+        elif plan.ticket is not ticket:
+            would = f"s starts {plan.ticket.ref} {plan.ticket.title}, next on the map"
+        elif ticket.is_wayfinder_map:
+            would = "s starts /wayfinder on the map, its frontier is empty"
+        elif ticket.spec_kind == "impl":
+            would = "s starts " + (self.describe_start(ticket).partition("\n")[0] or "/implement")  # the prompt line
+        else:
+            would = "s starts /wayfinder on it"
+        self.notify(f"{ticket.ref} has no session here; {would}", severity="warning")
 
     def action_start(self) -> None:
+        """s: start /wayfinder on the card's ticket (/implement on an impl card), or on a map's first frontier
+        ticket, else on the map itself; or say why it refuses."""
         card = self._card()
         if card is None:
             return
         ticket = card.ticket
-        if not ticket.is_open:
-            self.notify(f"#{ticket.number} is closed", severity="warning")
-            return
-        if ticket.is_wayfinder_map:  # the map is worked through its next frontier ticket, on that ticket's card
-            self._start_frontier(ticket)
-            return
-        if ticket.spec_kind == "impl":
-            refusal = self._implement_refusal(ticket)
-        else:
-            refusal = ticket.start_refusal(self.viewer)
-        if refusal:
-            self.notify(refusal, severity="warning")
-            return
-        self._confirm_start(ticket)
-
-    def _implement_refusal(self, ticket: Ticket) -> str | None:
-        """The ticket's own refusal, else one for a live session, which /implement must not get a second of."""
-        if refusal := ticket.start_refusal(self.viewer):
-            return refusal
-        if any(s.status is not None for s in self.sessions.get(ticket.number, [])):
-            return f"#{ticket.number} has a live session: press Enter"
-        return None
-
-    def _start_frontier(self, map_ticket: Ticket) -> None:
-        """Asks the tracker for the map's own order when it has one (GitHub), then offers the first frontier ticket."""
         map_order = getattr(self.provider, "map_order", None)
-        if map_order is None:
-            self._start_first_frontier(map_ticket, None)
+        if not (ticket.is_wayfinder_map and ticket.is_open and map_order):
+            self._offer_start(ticket, None)
             return
 
-        def work() -> None:
+        def work() -> None:  # the tracker's own map order (GitHub sub-issue order) picks the frontier ticket
             try:
-                order = map_order(map_ticket.number)
+                order = map_order(ticket.number)
             except ProviderError:
                 order = None  # the board's own order is the fallback
-            self.call_from_thread(self._start_first_frontier, map_ticket, order)
+            self.call_from_thread(self._offer_start, ticket, order)
 
         self.run_worker(work, thread=True, group="herdr")
 
-    def _start_first_frontier(self, map_ticket: Ticket, order: list[int] | None) -> None:
-        taken = self.starting | {n for n, sessions in self.sessions.items() if sessions}
-        if not (ready := frontier(map_ticket, self._tickets(), taken, order)):
-            self.notify(f"Map #{map_ticket.number} has no frontier ticket: none open, unblocked, unclaimed "
-                        "and not already started", severity="warning")
-            return
-        self._confirm_start(ready[0], f" (next on map #{map_ticket.number})")
+    def _offer_start(self, ticket: Ticket, order: list[int] | None) -> None:
+        plan = self._start_plan(ticket, order)
+        if isinstance(plan, str):
+            self.notify(plan, severity="warning")
+        else:
+            self._confirm_start(plan.ticket, plan.via)
+
+    def _start_plan(self, ticket: Ticket, order: list[int] | None = None) -> StartPlan | str:
+        """What s does on a card, or why it refuses. A map is
+        worked through its first frontier ticket without a live session, else, with an empty frontier, itself."""
+        if ticket.is_wayfinder_map and ticket.is_open:
+            taken = {n for n in self.sessions if self._live(n)} | self.starting
+            if ready := frontier(ticket, self._tickets(), taken, order):
+                return StartPlan(ready[0], f" (next on map {ticket.ref})")
+            via = f" (map {ticket.ref}'s frontier is empty)"
+        else:
+            via = ""
+        if refusal := ticket.start_refusal(self.viewer):
+            return refusal
+        if self._live(ticket.number):
+            return f"{ticket.ref} has a live session: press Enter to go to it"
+        return StartPlan(ticket, via)
+
+    def _live(self, number: int) -> bool:
+        """An agent works the ticket, or this board is starting one."""
+        return number in self.starting or any(s.status is not None for s in self.sessions.get(number, []))
 
     def _confirm_start(self, ticket: Ticket, via: str = "") -> None:
-        existing = [Path(s.path).name for s in self.sessions.get(ticket.number, [])]
-        if ticket.spec_kind == "impl":  # one worktree per ticket, reused: the board refused a live session
-            where = "its worktree with claude --continue" if existing else "a new worktree"
-            question, warn = f"Start /implement on #{ticket.number} {ticket.title} in {where}?", "\nunfocused (AFK)"
-        else:
-            question = f"Start #{ticket.number} {ticket.title}{via} in a new worktree?"
-            warn = f"\nalready has {', '.join(existing)}: this makes another" if existing else ""
+        """Asks first; herdr then starts Claude in the ticket's own worktree, new, or continued with
+        `claude --continue` when it exists without an agent."""
+        name, branch = worktree_name(ticket), branch_name(ticket)
+        worktree = next((s for s in self.sessions.get(ticket.number, [])  # no live session: each is agentless
+                         if Path(s.path).name in (name, f"worktree-{name}") or s.branch == branch), None)
+
+        def start() -> str:
+            try:
+                return self.workbench.start(ticket)
+            except HerdrError:
+                self.call_from_thread(self.starting.discard, ticket.number)
+                raise
 
         def confirmed(yes: bool | None) -> None:
             if yes:
                 self.starting.add(ticket.number)
                 self._render_board()
-                self._run(lambda: self.workbench.start(ticket))
+                self._run(start)
 
-        self.push_screen(Confirm(question, self.describe_start(ticket) + warn, "Start"), confirmed)
+        if ticket.spec_kind == "impl":
+            where = "its worktree with claude --continue" if worktree else "a new worktree"
+            question = f"Start /implement on {ticket.ref} {ticket.title} in {where}?"
+            detail, yes = self.describe_start(ticket) + "\nunfocused (AFK)", "Start"
+        elif worktree is None:
+            question = f"Start {ticket.ref} {ticket.title}{via} in a new worktree?"
+            detail, yes = self.describe_start(ticket), "Start"
+        else:
+            question = f"Continue {ticket.ref} {ticket.title}{via} in its worktree {Path(worktree.path).name}?"
+            detail, yes = f"claude --continue in {worktree.path}", "Continue"
+        self.push_screen(Confirm(question, detail, yes), confirmed)
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen(key_help(self), self.board_query))
