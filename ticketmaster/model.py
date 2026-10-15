@@ -99,6 +99,14 @@ class Ticket:
         return "map" in wayfinder_kinds(self.parent_labels)
 
     @property
+    def spec_kind(self) -> str | None:
+        """`spec` for the spec a map led to (`Part of #<map>`), `impl` for one of its implementation tickets, else
+        None; either is untyped and has a map the provider resolved."""
+        if self.map_number is None or wayfinder_kinds(self.labels):
+            return None
+        return "spec" if part_of(self.body) == self.map_number else "impl"
+
+    @property
     def map_missing(self) -> bool:
         """A typed ticket whose map the board could not find: it starts neither wayfinder nor implement."""
         return self.wayfinder_type is not None and not self.is_wayfinder_ticket
@@ -135,6 +143,12 @@ def map_tickets(map_ticket: Ticket, tickets: list[Ticket]) -> list[Ticket]:
     """The map's typed wayfinder tickets, in map order."""
     children = [t for t in tickets if t.parent_number == map_ticket.number and t.is_wayfinder_ticket]
     return sorted(children, key=lambda t: (t.order, t.number))
+
+
+def lane_tickets(map_ticket: Ticket, tickets: list[Ticket]) -> list[Ticket]:
+    """The map's decision tickets, its specs and their implementation tickets, in map order."""
+    follow_ups = [t for t in tickets if t.spec_kind and t.map_number == map_ticket.number]
+    return sorted(map_tickets(map_ticket, tickets) + follow_ups, key=lambda t: (t.order, t.number))
 
 
 def frontier(map_ticket: Ticket, tickets: list[Ticket], taken: set[int] = frozenset(),
@@ -199,7 +213,8 @@ def classify(ticket: Ticket) -> Column:
 
 @dataclass
 class Lane:
-    """A map and its decision tickets by column; a closed map is collapsed to its header."""
+    """A map and its decision tickets, specs and implementation tickets by column; a closed map is collapsed to its
+    header. `progress` counts the decision tickets only."""
 
     map: Ticket
     columns: dict[Column, list[Ticket]] = field(default_factory=lambda: {c: [] for c in COLUMN_ORDER})
@@ -233,7 +248,7 @@ def build_board(tickets: list[Ticket], named_map: int | None = None) -> Board:
                   key=lambda t: t.number)
     board = Board()
     for map_ticket in maps:
-        children = map_tickets(map_ticket, tickets)
+        children = lane_tickets(map_ticket, tickets)
         lane = Lane(map_ticket, progress=map_progress(map_ticket, tickets),
                     out_of_scope={t.number for t in children if is_out_of_scope(t, map_ticket)})
         if not lane.collapsed:

@@ -130,6 +130,22 @@ def map_board(maps: dict[int, Ticket], named: Ticket | None, children: list[Tick
     return list(maps.values()) + [t for n, t in linked.items() if n not in maps]
 
 
+# What trackers without sub-issues search their issues for: a spec's `Part of #<map>` line, and an implementation
+# ticket's `## Parent` section. The search only narrows; `with_specs` checks each hit's body exactly.
+SPEC_SEARCHES = ("Part of", "Parent")
+
+
+def with_specs(tickets: list[Ticket], candidates: list[Ticket]) -> list[Ticket]:
+    """For trackers without sub-issues: the board's tickets, then each untyped candidate whose `Part of #<map>`
+    line names one of the board's maps (a spec), then each whose `## Parent` section names one of those specs."""
+    maps = {t.number for t in tickets if t.is_wayfinder_map}
+    seen = {t.number for t in tickets}
+    plain = {t.number: t for t in candidates if t.number not in seen and not wayfinder_kinds(t.labels)}
+    specs = {n: t for n, t in plain.items() if part_of(t.body) in maps}
+    impls = [t for n, t in plain.items() if n not in specs and parent_ref(t.body) in specs]
+    return [*tickets, *specs.values(), *impls]
+
+
 class Provider(Protocol):
     name: str
     repo: str

@@ -40,6 +40,7 @@ STATUS_STYLES = {  # herdr agent states
     None: ("○ no agent", "grey50"),
 }
 MODE_STYLES = {"HITL": "black on yellow", "AFK": "black on cyan"}  # who a wayfinder ticket needs at the keyboard
+PR_STYLE = "black on magenta"  # an open pull/merge request that closes the card
 NOTICE_SECONDS = 10  # a tracker error's notification stays up this long
 LIMITED_TICKETS_EVERY = 60.0  # ticket fetches while the tracker rate-limits the board
 LIMITED_SESSIONS_EVERY = 10.0  # herdr session refreshes meanwhile
@@ -61,7 +62,7 @@ def session_lines(sessions: list[Session], starting: bool, claimed: bool = False
 
 def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
                 map_title: str = "", out_of_scope: bool = False, claimed: bool = False) -> Text:
-    """A ticket: type · HITL/AFK, assignee, its open blockers and its map's title."""
+    """A ticket: type · HITL/AFK (or spec/impl), an open closing PR, assignee, open blockers and its map's title."""
     text = session_lines(sessions, starting, claimed)
     text.append(f"#{ticket.number} ", style=f"bold {COLUMN_COLORS[column]}")
     text.append(ticket.title, style="bold")
@@ -73,6 +74,11 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         if ticket.mode:
             chips.append(" · ")
             chips.append(f" {ticket.mode} ", style=MODE_STYLES[ticket.mode])
+        chips.append(" ")
+    elif ticket.spec_kind:
+        chips.append(f"{ticket.spec_kind} ", style="bold")
+    if ticket.is_open and ticket.has_open_change_request:
+        chips.append(" PR open ", style=PR_STYLE)
         chips.append(" ")
     if out_of_scope:
         chips.append(" out of scope ", style="black on grey50")
@@ -392,7 +398,9 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     text.append("  Each open wayfinder map is a lane, headed by its map card: its decided (closed, not out\n"
                 "  of scope), open and blocked tickets. A closed map shows only when named\n"
                 f"  (ticketmaster <map>), as its header card alone.{'  ← this board' if query.named_map else ''}\n"
-                "  Issues that are not a map or a map's decision ticket are not shown.\n")
+                "  A spec whose first line is `Part of #<map>` and its implementation tickets (sub-issues,\n"
+                "  or a `## Parent` section naming the spec) sit in the map's lane, tagged spec and impl.\n"
+                "  Other issues are not shown. PR open: an open pull request will close the card's issue.\n")
 
     heading("Columns (the first rule that matches)")
     for column, rule in [

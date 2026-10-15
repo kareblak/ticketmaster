@@ -3,8 +3,10 @@
 Token lookup order: GITEA_TOKEN / FORGEJO_TOKEN env vars, then the `tea` config login whose
 URL matches the repo host. Dependencies come from `/issues/{n}/dependencies` plus `Blocked by:`
 body lines. There are no sub-issues, so the board reads the repo's and its org's `wayfinder:` labels: the
-open maps, and each typed ticket whose body's first line is `Part of #<map>` for one of them. An open pull
-request closes an issue when its body says `closes/fixes/resolves #<n>`.
+open maps, and each typed ticket whose body's first line is `Part of #<map>` for one of them. A map's spec is an
+untyped issue with that first line, and the spec's implementation tickets name it in a `## Parent` section; both
+are found by an issue search (`q`). An open pull request closes an issue when its body says
+`closes/fixes/resolves #<n>`.
 """
 
 from __future__ import annotations
@@ -23,8 +25,8 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from ..model import Ticket, parse_time
-from . import (LABEL_LIMIT, LIMIT, IssueStates, NotFound, ProviderError, Query, RateLimited, blocker_ref, map_board,
-               resolve_maps, tracker_error, wayfinder_labels, with_body_blockers)
+from . import (LABEL_LIMIT, LIMIT, SPEC_SEARCHES, IssueStates, NotFound, ProviderError, Query, RateLimited,
+               blocker_ref, map_board, resolve_maps, tracker_error, wayfinder_labels, with_body_blockers, with_specs)
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -76,17 +78,19 @@ class GiteaProvider:
         pulls = self._list(f"/repos/{self.repo}/pulls", {"state": "open"}, 200)
         pr_bodies = [f"{p.get('title', '')}\n{p.get('body') or ''}" for p in pulls]
 
-        def issues(label: str, state: str, limit: int = LIMIT) -> list[Ticket]:
-            params = {"type": "issues", "state": state, "labels": label}
+        def issues(state: str, limit: int = LIMIT, **filters: str) -> list[Ticket]:
+            params = {"type": "issues", "state": state, **filters}
             return [to_ticket(i, None, pr_bodies) for i in self._list(f"/repos/{self.repo}/issues", params, limit)]
 
-        maps = {t.number: t for label in labels["map"] for t in issues(label, "open") if t.is_wayfinder_map}
+        maps = {t.number: t for label in labels["map"] for t in issues("open", labels=label) if t.is_wayfinder_map}
         named = None
         if query.named_map is not None and query.named_map not in maps:
             found = self._issue_or_none(query.named_map)
             named = to_ticket(found, None, pr_bodies) if found else None
-        children = [t for label in labels["ticket"] for t in issues(label, "all", LABEL_LIMIT)]
+        children = [t for label in labels["ticket"] for t in issues("all", LABEL_LIMIT, labels=label)]
         tickets = map_board(maps, named, children)
+        if any(t.is_wayfinder_map for t in tickets):
+            tickets = with_specs(tickets, [t for words in SPEC_SEARCHES for t in issues("all", LABEL_LIMIT, q=words)])
         open_numbers = [t.number for t in tickets if t.is_open]
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))

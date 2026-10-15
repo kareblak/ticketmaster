@@ -64,10 +64,10 @@ calling pane (the focused pane when `HERDR_PANE_ID` is stale or another session'
 `ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there. It
 only runs inside herdr (`HERDR_ENV=1`).
 
-The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets
-(see [Lanes and columns](#lanes-and-columns)). Issues that are not wayfinder work are not shown. A
-closed map shows only when you name it: `map` (`42`, `#42` or an issue URL) adds that map, as its
-header card alone.
+The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
+its spec and the spec's implementation tickets (see [Lanes and columns](#lanes-and-columns)).
+Issues that are not wayfinder work are not shown. A closed map shows only when you name it: `map`
+(`42`, `#42` or an issue URL) adds that map, as its header card alone.
 
 The board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
 switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` sets the start).
@@ -150,8 +150,9 @@ The `## Out of scope` section links a ticket as `#<n>` or by its issue URL in th
 
 Once the map is resolved, its destination becomes a spec (`/to-spec`) and then implementation tickets
 (`/to-tickets`). The spec's first line is `Part of #<map>`; its implementation tickets are its
-sub-issues (GitHub) or name it in a `## Parent` section. They carry no `wayfinder:` label, so they are
-no decision tickets, and the board does not show them yet.
+sub-issues (GitHub) or name it in a `## Parent` section (every store). They carry no `wayfinder:` label,
+so they are no decision tickets: they sit in the map's lane tagged `spec` and `impl`. The board reads
+these links, and never writes them.
 
 Settings in `.ticketmaster.toml`:
 
@@ -165,7 +166,8 @@ Each open `wayfinder:map` is a lane, ordered by issue number. Its header is the 
 title and its counts, **decided** (closed tickets, less those out of scope), **open** and
 **blocked**. A closed map shows only when named (`ticketmaster <map>`), shrunk to its header card.
 The lane holds the map's decision tickets (`wayfinder:research`, `prototype`, `grilling` or `task`),
-each in the first column whose rule matches:
+then its spec and the spec's implementation tickets, each in the first column whose rule matches.
+The map card's counts are of its decision tickets only.
 
 | Column   | Rule                                                                                   |
 | -------- | -------------------------------------------------------------------------------------- |
@@ -183,7 +185,8 @@ section when it has one), and then:
 
 - its type and who it needs: `HITL` (you at the keyboard) for `grilling` and `prototype`, `AFK` (the
   agent alone) for `research`, and for a `task` whichever of the words `HITL` / `AFK` its body names
-  first (no badge when it names neither)
+  first (no badge when it names neither); `spec` or `impl` for a spec and its implementation tickets
+- `PR open` on an open card when an open pull or merge request will close its issue
 - `out of scope`, in Decided
 - its open blockers (`⛔ #3 other/lib#12`)
 - its assignees (`@kare`)
@@ -206,9 +209,9 @@ Flags override the file, and the file overrides the remote.
 
 | Provider        | Access                                   | Blocking                  | Maps and their tickets              |
 | --------------- | ---------------------------------------- | ------------------------- | ----------------------------------- |
-| GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | a search for open `wayfinder:map` issues, then per map its sub-issues in order and the typed tickets whose `Part of #<map>` line names it |
-| GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | the project's `wayfinder:` labels (`wayfinder:map` or `wayfinder::map`, and the four types), one query per label; a typed ticket joins the map its `Part of #<map>` line names |
-| Gitea / Forgejo | REST with the `tea` login token, or `GITEA_TOKEN` / `FORGEJO_TOKEN` | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names |
+| GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | a search for open `wayfinder:map` issues, then per map its sub-issues in order and the typed tickets and spec whose `Part of #<map>` line names it, then the spec's sub-issues and the issues whose `## Parent` names it |
+| GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | the project's `wayfinder:` labels (`wayfinder:map` or `wayfinder::map`, and the four types), one query per label; a typed ticket joins the map its `Part of #<map>` line names; a description search for `Part of` and `Parent` finds the specs and their implementation tickets |
+| Gitea / Forgejo | REST with the `tea` login token, or `GITEA_TOKEN` / `FORGEJO_TOKEN` | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names; an issue search (`q`) for `Part of` and `Parent` finds the specs and their implementation tickets |
 
 Every provider only reads: the board has no way to close, label, assign or comment.
 

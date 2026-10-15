@@ -1391,3 +1391,66 @@ def test_blocked_card_without_refs_keeps_the_count_and_a_label_only_card_shows_n
     assert "⛔ 2 " in blocked_card(open_blockers=2)
     assert "⛔" not in blocked_card(labels=("blocked",))
     assert "⛔" not in blocked_card(labels=("blocked",), open_blockers=0)
+
+
+def spec_of(map_number, number, title="", **kw):
+    """A spec of map #<map_number>: `Part of #<map>`, no `wayfinder:` label, and the map as its parent."""
+    map_url = f"https://gh/o/r/issues/{map_number}"
+    base = dict(number=number, title=title or f"Spec {number}", url=f"u{number}", is_open=True,
+                body=f"Part of #{map_number}\n\n## Problem Statement", labels=("ready-for-agent",),
+                parent_number=map_number, parent_url=map_url, parent_labels=("wayfinder:map",),
+                map_number=map_number, map_url=map_url)
+    return Ticket(**{**base, **kw})
+
+
+def impl_of(spec, number, title="", **kw):
+    """An implementation ticket of `spec`, linked by its `## Parent` section."""
+    base = dict(number=number, title=title or f"Slice {number}", url=f"u{number}", is_open=True,
+                body=f"## Parent\n\n#{spec.number}\n\n## What to build", map_number=spec.map_number,
+                map_url=spec.map_url)
+    return Ticket(**{**base, **kw})
+
+
+def chips_of(app, number):
+    return card_text(app, number).split("\n")[-1]
+
+
+def test_a_maps_spec_and_its_implementation_tickets_sit_in_its_lane_tagged_and_classified():
+    closed = dict(is_open=False, closed_at=datetime.now(timezone.utc))
+    spec = spec_of(9, 50, assignees=("me",))
+    other_spec = spec_of(20, 60)
+    tickets = [*TICKETS, a_map(20, "Ship billing"), spec, other_spec,
+               impl_of(spec, 51, open_blockers=1, blocked_by=("#52",)), impl_of(spec, 52), impl_of(spec, 53, **closed),
+               impl_of(spec, 54, assignees=("bob",)), impl_of(other_spec, 61),
+               Ticket(number=70, title="Stray", url="u70", is_open=True, body="## Parent\n\n#50\n")]  # no map found
+
+    async def scenario():
+        app = BoardApp(FakeProvider(tickets), Query(), interval=60)
+        async with app.run_test(size=(200, 70)) as pilot:
+            await loaded(app, pilot)
+            assert shown_lanes(app) == {9: {"BLOCKED": [3, 51], "FRONTIER": [1, 52], "CLAIMED": [2, 50, 54],
+                                            "DECIDED": [4, 53]},
+                                        20: {"FRONTIER": [60, 61]}}
+            assert chips_of(app, 50).startswith("spec ") and chips_of(app, 52).startswith("impl ")
+            assert "impl" not in chips_of(app, 50) and "spec" not in chips_of(app, 1)
+            assert "◆ Pick a stack" in chips_of(app, 51) and "⛔ #52" in chips_of(app, 51)
+            assert "1 decided · 3 open · 1 blocked" in card_text(app, 9)  # the counts are the map's decisions
+            assert 70 not in [c.ticket.number for c in app.query(Card)]
+
+    run(scenario())
+
+
+def test_an_open_closing_pr_shows_as_a_badge_and_none_without_one():
+    spec = spec_of(9, 50)
+    tickets = [*TICKETS, spec, impl_of(spec, 51, has_open_change_request=True), impl_of(spec, 52),
+               on(9, 5, has_open_change_request=True),
+               impl_of(spec, 53, has_open_change_request=True, is_open=False)]  # decided: no badge
+
+    async def scenario():
+        app = BoardApp(FakeProvider(tickets), Query(), interval=60)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            assert "PR open" in chips_of(app, 51) and "PR open" in chips_of(app, 5)
+            assert not any("PR open" in card_text(app, n) for n in (1, 2, 50, 52, 53, 9))
+
+    run(scenario())

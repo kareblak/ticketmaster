@@ -141,6 +141,12 @@ def gl_issue(iid, labels, body="", state="opened"):
             "mergeRequestsCount": 0}
 
 
+def searched(words, *texts):
+    """A tracker's word search, loosely: every word of three letters or more is in the title or body."""
+    haystack = " ".join(texts).lower()
+    return all(word in haystack for word in words.lower().split() if len(word) >= 3)
+
+
 def gitlab_board(monkeypatch, labels, issues, named=None):
     """Fakes `glab api graphql`: the project's labels, issues by label (and state), a named issue."""
     asked = []
@@ -153,6 +159,10 @@ def gitlab_board(monkeypatch, labels, issues, named=None):
         if "named" in variables:
             asked.append(("named", variables["named"]))
             return {"data": {"project": {"issue": named}}}
+        if "search" in variables:
+            asked.append(("search", variables["search"]))
+            nodes = [n for n in issues if searched(variables["search"], n["title"], n["description"])]
+            return {"data": {"project": {"issues": page(nodes)}}}
         asked.append((variables.get("state"), tuple(variables["labels"])))
         nodes = [n for n in issues if variables["labels"][0] in [label["title"] for label in n["labels"]["nodes"]]
                  and variables.get("state", n["state"]) == n["state"]]
@@ -174,10 +184,11 @@ GITLAB_ISSUES = [
 def test_gitlab_fetches_every_open_map_with_its_children_by_their_part_of_line(monkeypatch):
     asked = gitlab_board(monkeypatch, GITLAB_LABELS, GITLAB_ISSUES)
     tickets = gitlab.GitLabProvider("g/p").fetch(Query())
-    assert asked == [("opened", ("wayfinder::map",)), (None, ("wayfinder::grilling",)), (None, ("wayfinder::task",))]
-    assert [t.number for t in tickets] == [1, 20, 5, 3, 21]
+    assert asked == [("opened", ("wayfinder::map",)), (None, ("wayfinder::grilling",)), (None, ("wayfinder::task",)),
+                     ("search", "Part of"), ("search", "Parent")]
+    assert [t.number for t in tickets] == [1, 20, 5, 3, 21, 40]  # #40: untyped with `Part of #1`, so the spec
     assert (tickets[2].parent_number, tickets[2].parent_url) == (1, "https://gl/g/p/-/issues/1")
-    assert lanes(tickets) == {1: {"FRONTIER": [5], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
+    assert lanes(tickets) == {1: {"FRONTIER": [5, 40], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
 
 
 def test_gitlab_keeps_an_open_maps_tickets_behind_many_of_another_maps(monkeypatch):
@@ -231,6 +242,9 @@ def gitea_board(monkeypatch, repo_labels, org_labels, issues, dependencies=None)
             return [{"name": name} for name in org_labels]
         if path.endswith("/pulls"):
             return []
+        if path == "/repos/o/r/issues" and "q" in params:
+            asked.append(("search", params["q"]))
+            return [i for i in issues if searched(params["q"], i["title"], i["body"])]
         if path == "/repos/o/r/issues":
             asked.append((params["state"], params["labels"]))
             return [i for i in issues if params["labels"] in [label["name"] for label in i["labels"]]
@@ -262,9 +276,11 @@ def test_gitea_fetches_every_open_map_with_its_children_by_their_part_of_line(mo
     asked = gitea_board(monkeypatch, ["wayfinder:map", "wayfinder:research", "bug"], ["wayfinder:task"], GITEA_ISSUES,
                         dependencies={5: [{"number": 2, "state": "open", "repository": {"full_name": "o/r"}}]})
     tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
-    assert asked == [("open", "wayfinder:map"), ("all", "wayfinder:research"), ("all", "wayfinder:task")]
-    assert [t.number for t in tickets] == [1, 20, 5, 3, 2, 21]
-    assert lanes(tickets) == {1: {"BLOCKED": [5], "CLAIMED": [2], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
+    assert asked == [("open", "wayfinder:map"), ("all", "wayfinder:research"), ("all", "wayfinder:task"),
+                     ("search", "Part of"), ("search", "Parent")]
+    assert [t.number for t in tickets] == [1, 20, 5, 3, 2, 21, 40]
+    assert lanes(tickets) == {1: {"BLOCKED": [5], "FRONTIER": [40], "CLAIMED": [2], "DECIDED": [3]},
+                              20: {"FRONTIER": [21]}}
 
 
 def test_gitea_adds_a_named_closed_map_without_org_labels(monkeypatch):
@@ -639,16 +655,28 @@ FAMILY = {
     1: ("Map", "Notes", ["wayfinder:map"]),
     2: ("Decide", "Part of #1", ["wayfinder:grilling"]),
     3: ("Spec", "Part of #1\n\n## Problem Statement", ["ready-for-agent"]),
-    4: ("Slice A", "## Parent\n\n#3\n\n## What to build", ["ready-for-agent"]),
-    5: ("Slice B", "## Parent\n\n#3\n", []),
+    4: ("Slice A", "## Parent\n\n#3\n\n## What to build\n\n## Blocked by\n\n- #2\n", ["ready-for-agent"]),
+    5: ("Slice B", "## Parent\n\n#3\n\nBlocked by: #4", []),
     6: ("Aside", "see #1", []),
     7: ("Elsewhere", "## Parent\n\n#30\n", []),
 }
 
 
-def assert_map_family(tickets, map_url, spec_url):
+def assert_lane_family(tickets, map_url):
+    """On every store: the spec and its tickets are on the map, tagged, blocked by their bodies, in its lane."""
     by_number = {t.number: t for t in tickets}
-    assert {1, 2, 3, 4, 5} <= set(by_number) and 7 not in by_number
+    assert {1, 2, 3, 4, 5} <= set(by_number) and not {6, 7} & set(by_number)
+    for n in (3, 4, 5):
+        assert (by_number[n].map_number, by_number[n].map_url) == (1, map_url), n
+    assert [by_number[n].spec_kind for n in (2, 3, 4, 5)] == [None, "spec", "impl", "impl"]
+    # The body's blockers, after any native ones.
+    assert (by_number[4].blocked_by[-1:], by_number[5].blocked_by[-1:]) == (("#2",), ("#4",))
+    assert lanes(tickets) == {1: {"BLOCKED": [4, 5], "FRONTIER": [2, 3]}}
+
+
+def assert_map_family(tickets, map_url, spec_url):
+    assert_lane_family(tickets, map_url)
+    by_number = {t.number: t for t in tickets}
     assert (by_number[3].parent_number, by_number[3].parent_url, by_number[3].parent_labels) == (1, map_url, ("wayfinder:map",))
     for n in (4, 5):
         assert (by_number[n].parent_number, by_number[n].parent_url) == (3, spec_url)
@@ -701,6 +729,37 @@ def test_github_reads_each_maps_spec_and_its_implementation_tickets(monkeypatch)
     assert_map_family(tickets, "https://gh/1", "https://gh/3")
     assert [t.number for t in tickets] == [1, 2, 3, 4, 5]  # the map, its order, then the spec, then its tickets
     assert sorted(asked) == [1, 3]  # the decision ticket is not a spec, so its children are not asked for
+
+
+def family_labels(n, scoped=False):
+    return [label.replace("wayfinder:", "wayfinder::") if scoped else label for label in FAMILY[n][2]]
+
+
+def test_gitlab_reads_each_maps_spec_and_its_implementation_tickets_by_their_bodies(monkeypatch):
+    issues = [gl_issue(n, family_labels(n, scoped=True), FAMILY[n][1]) for n in FAMILY]
+    asked = gitlab_board(monkeypatch, ["wayfinder::map", "wayfinder::grilling"], issues)
+    tickets = gitlab.GitLabProvider("g/p").fetch(Query())
+    assert_lane_family(tickets, "https://gl/g/p/-/issues/1")
+    assert asked[-2:] == [("search", "Part of"), ("search", "Parent")]
+
+
+def test_gitea_reads_each_maps_spec_and_its_implementation_tickets_with_no_sub_issues(monkeypatch):
+    # Gitea has no sub-issues: the decision ticket and the spec name the map by `Part of #<map>` alone, the
+    # implementation tickets their spec by `## Parent`, and #5 also has a native dependency on the decision ticket.
+    issues = [gt_issue(n, family_labels(n), FAMILY[n][1]) for n in FAMILY]
+    gitea_board(monkeypatch, ["wayfinder:map", "wayfinder:grilling"], None, issues,
+                dependencies={5: [{"number": 2, "state": "open", "repository": {"full_name": "o/r"}}]})
+    tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+    by_number = {t.number: t for t in tickets}
+    assert by_number[2].parent_number == 1 and by_number[2].is_wayfinder_ticket  # child → map by `Part of #1`
+    assert by_number[5].blocked_by == ("#2", "#4")  # native first, then the body's
+    assert_lane_family(tickets, "https://gt/o/r/issues/1")
+
+
+def test_trackers_without_sub_issues_search_for_specs_only_with_a_map_on_the_board(monkeypatch):
+    asked = gitlab_board(monkeypatch, ["wayfinder::map"], [gl_issue(3, [], "Part of #1")])
+    assert gitlab.GitLabProvider("g/p").fetch(Query()) == []
+    assert not any(kind == "search" for kind, _ in asked)
 
 
 def test_github_map_order_is_the_maps_sub_issue_order(monkeypatch):
