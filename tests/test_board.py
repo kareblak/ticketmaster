@@ -1,5 +1,6 @@
 import json
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -758,6 +759,10 @@ def test_help_explains_lanes_and_the_four_column_rules():
             assert "is a line of the map card, ▣ #<spec> open or closed" in text
             assert ("s on the lane's header card, while its open spec has no tickets (open or closed), starts "
                     "to_tickets_command (default /mattpocock-skills:to-tickets)") in text
+            assert ("standalone spec s on a spec lane's header card (▣), while the spec has no tickets (open or "
+                    "closed), starts to_tickets_command") in text
+            assert "s refuses it: s starts /implement on its tickets" in text
+            assert "impl ticket an impl card, in a map lane or a spec lane: implement_command" in text
 
     run(scenario())
 
@@ -2592,5 +2597,65 @@ def test_the_map_named_on_the_command_line_hides_the_spec_lanes(tmp_path):
             await pilot.press("escape")
             await pilot.pause()
             assert headers(app) == [9, 20, 40, 70, 85]
+
+    run(scenario())
+
+
+def test_s_on_a_ticketless_standalone_spec_starts_to_tickets_focused():
+    async def scenario():
+        bench = FakeBench()
+        app = BoardApp(FakeProvider(SPEC_LANES), Query(), interval=60, workbench=bench, describe_start=build_prompt)
+        async with app.run_test(size=(200, 80)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 85)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert notifications(app)[-1][0] == "#85 has no session here; s starts /mattpocock-skills:to-tickets u85"
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Start /to-tickets on #85 Fresh spec in a new worktree?"
+            assert app.screen.detail == "/mattpocock-skills:to-tickets u85"  # focused: no AFK note
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 85)]
+
+    run(scenario())
+
+
+def test_s_on_a_standalone_spec_with_tickets_is_refused_after_closed_blocked_and_claimed():
+    async def scenario(spec, children, refusal):
+        bench = FakeBench()
+        app = BoardApp(FakeProvider([*TICKETS, spec, *children]), Query(), interval=60, workbench=bench)
+        async with app.run_test(size=(200, 80)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 60)
+            await pilot.press("s")
+            await pilot.pause()
+            assert not is_confirm(app) and bench.calls == []
+            assert notifications(app)[-1][0] == refusal
+
+    spec = standalone(60, "With tickets", has_tickets=True)
+    has_tickets = "#60 has tickets: s starts /implement on its tickets"
+    run(scenario(spec, [ticket_of(spec, 61)], has_tickets))
+    run(scenario(spec, [ticket_of(spec, 61, **CLOSED_NOW)], has_tickets))
+    run(scenario(standalone(60, open_blockers=1, blocked_by=("#9",)), [], "#60 is blocked by #9"))
+    run(scenario(replace(spec, assignees=("bob",)), [ticket_of(spec, 61)], "#60 is claimed by @bob"))
+    run(scenario(replace(spec, **CLOSED_NOW), [ticket_of(spec, 61)], "#60 is closed"))
+
+
+def test_s_on_a_spec_lane_ticket_starts_implement_unfocused():
+    async def scenario():
+        bench = FakeBench()
+        app = BoardApp(FakeProvider(SPEC_LANES), Query(), interval=60, workbench=bench, describe_start=build_prompt)
+        async with app.run_test(size=(200, 80)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 71)
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Start /implement on #71 Ticket 71 in a new worktree?"
+            assert app.screen.detail == "/mattpocock-skills:implement u71\nunfocused (AFK)"
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 71)]
 
     run(scenario())

@@ -176,12 +176,32 @@ def test_a_task_is_hitl_or_afk_by_the_first_of_those_words_in_its_body():
     assert ticket(labels=task, body="the HITLER and AFKs").mode is None
 
 
-def test_start_refusal_names_a_ticket_that_is_not_wayfinder_work_last():
-    assert ticket().start_refusal("me") == "#1 is not wayfinder work: the board only starts work on a map"
+def test_start_refusal_names_a_ticket_that_is_not_board_work_last():
+    assert ticket().start_refusal("me") == (
+        "#1 is not board work: the board starts work on wayfinder maps and standalone specs")
     assert ticket(open_blockers=1).start_refusal("me") == "#1 is blocked by 1 open issue"
     assert ticket(labels=("wayfinder:map",)).start_refusal("me") is None
     assert ticket(**DECISION, labels=("wayfinder:grilling",)).start_refusal("me") is None
     assert ticket(labels=("wayfinder:task",)).start_refusal("me") is None  # map not found: warned elsewhere
+
+
+STANDALONE = "## Problem Statement\n\nx\n\n## Solution\n\ny"
+STANDALONE_TICKET = "## Parent\n\n#7\n\n## What to build\n\nx\n\n## Acceptance criteria\n\n- [ ] y"
+
+
+def test_standalone_specs_and_their_tickets_are_board_work():
+    assert ticket(number=7, body=STANDALONE).start_refusal("me") is None
+    assert ticket(number=8, body=STANDALONE_TICKET, parent_number=7, lane_spec=7).start_refusal("me") is None
+    assert ticket(number=8, body=STANDALONE_TICKET).start_refusal("me") == (  # a loose ticket
+        "#8 is not board work: the board starts work on wayfinder maps and standalone specs")
+
+
+def test_a_spec_with_tickets_is_refused_after_closed_blocked_and_claimed():
+    spec = ticket(number=7, body=STANDALONE, has_tickets=True)
+    assert spec.start_refusal("me") == "#7 has tickets: s starts /implement on its tickets"
+    assert replace(spec, is_open=False).start_refusal("me") == "#7 is closed"
+    assert replace(spec, blocked_by=("#3",)).start_refusal("me") == "#7 is blocked by #3"
+    assert replace(spec, assignees=("bob",)).start_refusal("me") == "#7 is claimed by @bob"
 
 
 def test_triage_labels_never_hold_a_start():

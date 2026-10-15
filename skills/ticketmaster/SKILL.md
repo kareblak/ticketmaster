@@ -36,4 +36,5 @@ If it fails:
 
 On the board, `Enter` goes to the session working a ticket (or its worktree, with a shell), or says it has
 none and what `s` would do; it never starts Claude. `s` starts (or continues) `/wayfinder` for the ticket,
-or a map's next frontier ticket, in its own git worktree and herdr workspace, or says why it refuses.
+or a map's next frontier ticket, `/to-tickets` on a spec without tickets, or `/implement` on a spec's ticket, in its
+own git worktree and herdr workspace, or says why it refuses.

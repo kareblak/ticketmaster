@@ -19,17 +19,17 @@ class MapNotFound(ValueError):
     """A `wayfinder:<type>` ticket belongs to wayfinder, but the board could not find its map."""
 
 
-class NotWayfinderWork(ValueError):
-    """A ticket with no map: the board starts /wayfinder or /implement only on a map, so it does not start this one."""
+class NotBoardWork(ValueError):
+    """Neither wayfinder work nor standalone work: the board starts work on maps and standalone specs alone."""
 
 
 def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND,
                  implement_command: str = DEFAULT_IMPLEMENT_COMMAND,
                  to_tickets_command: str = DEFAULT_TO_TICKETS_COMMAND) -> str:
     """Exactly `<wayfinder_command> <map-url> [<ticket-url>]`: wayfinder claims and resolves map tickets itself.
-    The spec a map led to gets /to-tickets on the spec alone, and an implementation ticket /implement on the ticket
-    alone. Without a map there is nothing to start: a typed wayfinder ticket raises MapNotFound, anything else
-    NotWayfinderWork.
+    A spec, a map's or a standalone one, gets /to-tickets on the spec alone, and an implementation ticket /implement
+    on the ticket alone. Anything else needs a map: a typed wayfinder ticket without one raises MapNotFound, anything
+    else NotBoardWork.
     """
     if ticket.spec_kind == "impl":
         return f"{implement_command} {ticket.url}"
@@ -43,7 +43,7 @@ def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMM
         raise MapNotFound(f"{ticket.ref} {ticket.map_warning}")
     if ticket.map_url:
         return f"{wayfinder_command} {ticket.map_url} {ticket.url}"
-    raise NotWayfinderWork(ticket.not_wayfinder_work)
+    raise NotBoardWork(ticket.not_board_work)
 
 
 def worktree_name(ticket: Ticket) -> str:
