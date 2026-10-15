@@ -1,7 +1,7 @@
 ---
 name: ticketmaster
 description: Open a live, read-only swimlane board of the current repo's wayfinder maps and, on GitHub, GitLab, Gitea/Forgejo and Linear, standalone /to-spec specs (a lane per open map or spec, its tickets in Blocked, Frontier, Claimed, Decided) in a herdr pane beside this Claude session, from which a wayfinder ticket starts /wayfinder, a spec without tickets /to-tickets and a spec's ticket /implement, each in its own worktree. Works with GitHub, GitLab, Gitea/Forgejo and Linear. Use when the user wants to see or track wayfinder work, start a map's tickets, or log in to the tracker for the board.
-argument-hint: "[map] | login | cleanup <map> --dry-run"
+argument-hint: "[map] | login | cleanup <map> [--dry-run]"
 ---
 
 Run the plugin's `ticketmaster` command with the user's arguments, then reply with its one-line result:
@@ -19,6 +19,9 @@ ticketmaster $ARGUMENTS
   other trackers it names their own login (`gh auth login`, `glab auth login`, `tea login add`).
 - `cleanup <map> --dry-run`: lists the map's and its tickets' worktrees, branches and herdr workspaces, each
   marked removable or kept with the reason; it changes nothing. Relay the list as printed.
+- `cleanup <map>`: removes what the dry run marks removable (worktree, herdr workspace and agents, merged
+  branch), never forcing anything; it refuses an open map. Run it only when the user asks for the cleanup itself,
+  not just the list, and relay the summary as printed.
 
 The first run, and the first after a plugin update, builds the plugin's venv, which takes a minute.
 
