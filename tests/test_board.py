@@ -1921,6 +1921,32 @@ def test_a_linear_maps_lane_shows_keys_display_names_and_key_blockers():
     run(scenario())
 
 
+def test_a_linear_board_shows_a_standalone_spec_lane():
+    from fake_linear import FakeLinear
+    from ticketmaster.providers.linear import LinearProvider
+
+    fake = FakeLinear()
+    spec = fake.add_issue("Board shows standalone work", "## Problem Statement\n\nP.\n\n## Solution\n\nS.\n",
+                          assignee="kaare.blakstad")  # TM-1
+    signature = "## What to build\n\nShow the lane.\n\n## Acceptance criteria\n\n- [ ] done\n"
+    fake.add_issue("Slice A", signature, parent=spec)  # TM-2
+    fake.add_issue("Slice B", f"## Parent\n\nTM-1\n\nBlocked by: TM-2\n\n{signature}")  # TM-3
+    fake.add_issue("Slice C", f"## Parent\n\nTM-1\n\n{signature}", state="Done")  # TM-4
+
+    async def scenario():
+        app = BoardApp(LinearProvider("TM", transport=fake), Query(), interval=30)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert shown_lanes(app) == {1: {"BLOCKED": [3], "FRONTIER": [2], "DECIDED": [4]}}
+            header = card_text(app, 1).split("\n")
+            assert header[:2] == ["▣ TM-1 Board shows standalone work  @kaare.blakstad",
+                                  "spec · 1 done · 2 open · 1 blocked"]
+            assert chips_of(app, 3).startswith("impl ") and "⛔ TM-2" in chips_of(app, 3)
+            assert "Show the lane." in card_text(app, 2)
+
+    run(scenario())
+
+
 FILTER_SPEC = spec_of(20, 30, author="dana")
 FILTERED = [
     MAP,

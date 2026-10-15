@@ -3,7 +3,7 @@
 A live, read-only swimlane board of [wayfinder](https://github.com/mattpocock/skills) maps and
 standalone specs for [herdr](https://herdr.dev), packaged as a Claude Code plugin. Run `/ticketmaster` in a
 Claude session inside herdr and the board opens in a pane beside it. Every open map is a lane, and its
-decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub, so is every standalone spec
+decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub and Linear, so is every standalone spec
 written by `/to-spec`, with its `/to-tickets` tickets. `s` starts `/wayfinder` for a ticket in its
 own git worktree, opened as a herdr workspace with Claude running in it as a herdr agent, and each
 card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
@@ -81,7 +81,7 @@ from unpushed commits, which a squash merge with its remote branch deleted leave
 and runs inside herdr.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
-its spec and the spec's implementation tickets, and on GitHub every standalone spec written by `/to-spec`
+its spec and the spec's implementation tickets, and on GitHub and Linear every standalone spec written by `/to-spec`
 as a lane of its own, with its `/to-tickets` tickets (see [Lanes and columns](#lanes-and-columns)).
 Other issues are not shown. `map` (`42`, `#42`, the issue's URL, or a tracker
 key like `TM-1` or a Linear issue URL) opens the full board with the [map filter](#filters) preset to
@@ -274,14 +274,16 @@ is no card: the map card shows it on a line of its own, `▣ #<spec> open` (or `
 tickets' counts, `N done · N open · N blocked` (done is closed, less canceled), or `no tickets yet`,
 and the badges of the spec's sessions. The map card's own counts are of its decision tickets only.
 
-On GitHub, each standalone spec is a spec lane. A standalone spec carries the spec **signature**, the
+On GitHub and Linear, each standalone spec is a spec lane. A standalone spec carries the spec **signature**, the
 headings `/to-spec` writes, `## Problem Statement` and `## Solution`, has no `Part of #<map>` line naming a
-map and no `wayfinder:` label. Both headings must be there, at `##` level, in any case; an issue that
+map and no `wayfinder:` label. Both headings must be there, at `##` level, in any case (on Linear, whose
+search matches the heading exactly, as `/to-spec` writes it); an issue that
 only mentions them in prose does not count, and one that also carries the ticket signature is a spec.
 Its header is the spec card (`▣`, magenta): `▣ #<n> <title>`, `spec closed` once it is closed, its
 assignees, and `spec · N done · N open · N blocked` (done is closed, less canceled). Its tickets are the
 issues with the ticket signature `/to-tickets` writes, `## What to build` and `## Acceptance criteria`,
-whose sub-issue parent, else first `## Parent` reference (`#<n>` or the issue's URL), is the spec. They
+whose sub-issue parent, else first `## Parent` reference (`#<n>` or the issue's URL; on Linear `TM-<n>`, a
+mention or the issue's URL), is the spec. They
 fill the same four columns, every closed one in Decided however old. The lane stays while the spec or any
 of its tickets is open, so a closed spec with an open ticket keeps its lane; it leaves once all are
 closed. A ticket whose parent is a map spec stays in the map's lane.
@@ -357,7 +359,7 @@ refuses and names both options. The key goes bare in `Authorization`, the token 
 | GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | a search for open `wayfinder:map` issues, then per map its sub-issues in order and the typed tickets and spec whose `Part of #<map>` line names it, then the spec's sub-issues and the issues whose `## Parent` names it |
 | GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | the project's `wayfinder:` labels (`wayfinder:map` or `wayfinder::map`, and the four types), one query per label; a typed ticket joins the map its `Part of #<map>` line names; a description search for `Part of` and `Parent` finds the specs and their implementation tickets |
 | Gitea / Forgejo | REST through `tea api`, with the `tea` login (token or OAuth) whose URL matches the repo host | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names; an issue search (`q`) for `Part of` and `Parent` finds the specs and their implementation tickets |
-| Linear          | GraphQL with the API key (`Authorization: <key>`) or the `login` token (`Bearer`) | `blocks` relations (`inverseRelations`) | the team's open `wayfinder:map` issues, then per map its sub-issues in sub-issue order; one description search for `Part of` and `Parent` finds the typed tickets and spec linked by `Part of`, and the spec's sub-issues and `## Parent` tickets |
+| Linear          | GraphQL with the API key (`Authorization: <key>`) or the `login` token (`Bearer`) | `blocks` relations (`inverseRelations`) | the team's open `wayfinder:map` issues, then per map its sub-issues in sub-issue order; one description search for `Part of`, `Parent` and the spec and ticket signatures finds the typed tickets and spec linked by `Part of`, the spec's sub-issues and `## Parent` tickets, and the standalone specs and their tickets, then per open standalone spec its sub-issues |
 
 On Linear only the workflow state's type counts, never its team-renamable name: `completed` is
 closed, `canceled` and `duplicate` closed as not planned. Only the assignee claims a ticket; the
@@ -384,8 +386,9 @@ once, with the next scheduled fetch one paced interval after it. The rate-limit 
 the pace while it lasts.
 
 A Linear API key allows 2,500 requests an hour, shared by everything using its user's key, which is why
-the board polls Linear every 30 s. Every refresh lists the maps, then makes one query per open map and
-one search for specs and implementation tickets; each stays under half of Linear's 10,000-point
+the board polls Linear every 30 s. Every refresh lists the maps, then makes one query per open map, one
+search for specs and implementation tickets, standalone ones included, and one query per open standalone
+spec; each stays under half of Linear's 10,000-point
 complexity cap per query.
 
 When the tracker rate-limits the board (GitHub's primary or secondary limit, an HTTP 429 from

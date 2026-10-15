@@ -1,12 +1,13 @@
 import io
 import json
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 
 import pytest
 
 from fake_linear import FakeLinear
+from ticketmaster import providers
 from ticketmaster.model import Column, build_board
 from ticketmaster.providers import ProviderError, Query, RateLimited
 from ticketmaster.providers import linear
@@ -293,3 +294,98 @@ def test_linear_reports_no_quota():
     provider = LinearProvider("TM", transport=fake)
     provider.fetch(Query())
     assert getattr(provider, "quota", None) is None
+
+
+# --- standalone specs and their tickets on Linear ------------------------------------------------------------------
+
+SPEC_SIG = "## Problem Statement\n\nIt hurts.\n\n## Solution\n\nFix it.\n"
+TICKET_SIG = "## What to build\n\nA slice.\n\n## Acceptance criteria\n\n- [ ] done\n"
+
+
+def ago(days):
+    return datetime.now(timezone.utc) - timedelta(days=days)
+
+
+def ticket_of(spec_ref, body=TICKET_SIG):
+    """A `/to-tickets` ticket whose `## Parent` section is `spec_ref`."""
+    return f"## Parent\n\n{spec_ref}\n\n{body}"
+
+
+def test_a_standalone_spec_takes_its_tickets_by_parent_link_key_mention_and_url():
+    fake = FakeLinear()
+    spec = fake.add_issue("Board shows standalone work", SPEC_SIG, labels=["ready-for-agent"])  # TM-1
+    by_link = fake.add_issue("By link", TICKET_SIG, parent=spec)
+    by_key = fake.add_issue("By key", ticket_of("TM-1"))
+    by_mention = fake.add_issue("By mention", ticket_of("[TM-1](https://linear.app/fabricskill/issue/TM-1/board)"))
+    by_url = fake.add_issue("By URL", ticket_of("https://linear.app/fabricskill/issue/TM-1/board"))
+    fake.add_issue("Hand-made", "No signature", parent=spec)
+    fake.add_issue("Loose", ticket_of("TM-99"))
+
+    tickets = board(fake)
+
+    linked = (by_link, by_key, by_mention, by_url)
+    assert set(tickets) == {spec["number"], *(n["number"] for n in linked)}
+    assert tickets[spec["number"]].spec_kind == "spec" and tickets[spec["number"]].has_tickets
+    for issue in linked:
+        ticket = tickets[issue["number"]]
+        assert (ticket.parent_number, ticket.lane_spec, ticket.spec_kind) == (1, 1, "impl"), issue["title"]
+    assert lanes(tickets.values()) == {1: {"FRONTIER": [n["number"] for n in linked]}}
+
+
+def test_half_signatures_wayfinder_labels_and_map_specs_are_not_standalone():
+    fake = FakeLinear()
+    the_map = fake.add_issue("Map", labels=["wayfinder:map"])  # TM-1
+    map_spec = fake.add_issue("Map spec", "Part of TM-1\n\n" + SPEC_SIG)  # TM-2
+    fake.add_issue("Half spec", "## Problem Statement\n\nOnly half.\n")
+    both = fake.add_issue("Both signatures", SPEC_SIG + TICKET_SIG)  # TM-4: a spec
+    fake.add_issue("Typed", SPEC_SIG, labels=["wayfinder:task"])
+    fake.add_issue("Half ticket", ticket_of("TM-4", "## What to build\n\nOnly half.\n"))
+    fake.add_issue("Typed ticket", ticket_of("TM-4"), labels=["wayfinder:research"])
+    of_map_spec = fake.add_issue("Map spec's ticket", ticket_of("TM-2"))  # TM-8
+
+    tickets = board(fake)
+
+    assert set(tickets) == {n["number"] for n in (the_map, map_spec, both, of_map_spec)}
+    assert tickets[both["number"]].spec_kind == "spec" and not tickets[both["number"]].has_tickets
+    assert tickets[of_map_spec["number"]].lane_spec is None
+    assert lanes(tickets.values()) == {1: {"SPECS": [2], "FRONTIER": [8]}, 4: {}}
+
+
+def test_the_closed_window_applies_except_to_an_open_specs_tickets_which_come_in_full():
+    fake = FakeLinear()
+    spec = fake.add_issue("Open spec", SPEC_SIG)  # TM-1
+    old = fake.add_issue("Old", ticket_of("TM-1"), state="Done", closed_at=ago(400))
+    old_sub = fake.add_issue("Old sub-issue", TICKET_SIG, parent=spec, state="Canceled", closed_at=ago(400))
+    open_one = fake.add_issue("Open", ticket_of("TM-1"))
+    # TM-5: closed before the window, so no hit, but an open ticket names it: its lane shows.
+    closed_spec = fake.add_issue("Closed spec", SPEC_SIG, state="Done", closed_at=ago(60))
+    named = fake.add_issue("Names it", ticket_of("TM-5"))
+    recent = fake.add_issue("Recent", ticket_of("TM-5"), state="Done", closed_at=ago(2))
+    fake.add_issue("Before the window", ticket_of("TM-5"), state="Done", closed_at=ago(30))
+    sub = fake.add_issue("Sub-issue of the closed spec", TICKET_SIG, parent=closed_spec)
+    # TM-10 and its ticket are hits, but all closed: no lane, so neither comes back.
+    fake.add_issue("Done spec", SPEC_SIG, state="Done", closed_at=ago(1))
+    fake.add_issue("Done ticket", ticket_of("TM-10"), state="Done", closed_at=ago(1))
+    fake.add_issue("Long done spec", SPEC_SIG, state="Done", closed_at=ago(30))  # TM-12
+    fake.add_issue("Long done ticket", ticket_of("TM-12"), state="Done", closed_at=ago(30))
+
+    tickets = board(fake)
+
+    shown = (spec, old, old_sub, open_one, closed_spec, named, recent, sub)
+    assert set(tickets) == {n["number"] for n in shown}
+    assert lanes(tickets.values()) == {1: {"FRONTIER": [4], "DECIDED": [3, 2]},  # the sub-issue first
+                                       5: {"FRONTIER": [6, 9], "DECIDED": [7]}}
+    assert [v["number"] for op, v in fake.calls if op == "TicketmasterIssue"] == [5]
+    # The open spec's children, all of them; a closed spec's tickets are its hits, so no call per closed spec.
+    assert fake.ops().count("TicketmasterChildren") == 1
+
+
+def test_the_signature_hits_ride_on_the_linked_query_capped_at_the_limit():
+    fake = FakeLinear(page_size=50)
+    for n in range(providers.LIMIT + 1):
+        fake.add_issue(f"Spec {n}", SPEC_SIG)
+    provider = LinearProvider("TM", transport=fake)
+    tickets = provider.fetch(Query())
+    assert len(tickets) == providers.LIMIT and provider.cut_off == ["specs and tickets"]
+    assert min(t.number for t in tickets) == 2  # the newest are kept
+    assert "TicketmasterSigned" not in fake.ops() and fake.ops().count("TicketmasterLinked") == 7
