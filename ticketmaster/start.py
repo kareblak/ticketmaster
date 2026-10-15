@@ -74,7 +74,7 @@ class Workbench:
         return f"Started #{ticket.number} in {where}"
 
     def go_to(self, ticket: Ticket, session: Session) -> str:
-        return f"#{ticket.number}: " + self.herdr.go_to(self.cwd, session, session_label(ticket), self.claude)
+        return f"#{ticket.number}: " + self.herdr.go_to(self.cwd, session, session_label(ticket))
 
 
 def workbench_for(cwd: Path, config: dict) -> Workbench:

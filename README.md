@@ -76,7 +76,7 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 
 | Key            | Column            | Effect                                                              |
 | -------------- | ----------------- | ------------------------------------------------------------------- |
-| `Enter` / double-click | any       | go to the ticket's herdr workspace; with none, the status line says what `s` would do. It never starts a session |
+| `Enter` / double-click | any       | go to the card's most urgent session, else its worktree with a shell; with neither, the status line says so. It never starts or resumes Claude |
 | `s`            | all but Decided   | start `/wayfinder` for the ticket in a **new** worktree (always new; asks first); refused while it is blocked or assigned to someone else, and on a closed map |
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | filter, clear both filters, refresh now, quit                       |
@@ -108,11 +108,19 @@ press `s`; else issue number). That ticket gets its own `issue-<n>` worktree, ca
 `/mattpocock-skills:wayfinder <map-url> <ticket-url>` session, so a second press starts the next
 frontier ticket. With an empty frontier the board says so and starts nothing.
 
-The board finds a ticket's sessions through its worktrees: any checkout named `issue-<n>` or
-`issue-<n>-<k>`, including `claude -w issue-<n>` ones under `.claude/worktrees`. Each card lists
-them with the state of the agent in their workspace: `● working`, `⚠ needs you`, `◌ idle`,
-`✓ done`, or `○ no agent` when the workspace is closed or Claude has exited. `Enter` on such a card
-focuses the workspace, reopening it and resuming Claude with `claude --continue` when needed.
+The board finds the sessions working a ticket, including ones it did not start. A herdr agent works
+ticket `<n>` when its worktree path or branch is `issue-<n>` or `tm-<n>` (optionally `worktree-`
+first, as `claude -w` names it, and `-<k>` after), or when its terminal title starts with the key
+(`TM-<n> …` or `#<n> …`, as `claude -n` sets it). Only agents whose working directory lies in one of
+the repo's checkouts count, and each is matched to the checkout its foreground process runs in, so a
+`claude -w tm-<n>` session in another workspace's pane shows its real state. Transcripts are not read.
+
+Each card lists one badge per session: `⚠ needs you`, `● working`, `◌ idle` (or `✓ done`), and
+`○ no agent` for a ticket worktree with no Claude running. A claimed ticket with no session found
+says `claimed, no session here`. `Enter` on any card, closed, blocked or claimed by someone else
+included, focuses its most urgent session (needs you, then working, then idle). For a worktree with
+no Claude running it focuses, or opens, that worktree's workspace with a shell; Claude is not
+resumed. A map card goes only to the map's own session or worktree, never to one of its tickets'.
 
 `f` opens a picker listing every label and every author on the board's tickets; `Enter` (or space,
 or a click) cycles a label through include, exclude and off, and selects or deselects an author. The
