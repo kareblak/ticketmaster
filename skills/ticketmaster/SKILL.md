@@ -1,6 +1,6 @@
 ---
 name: ticketmaster
-description: Open a live, read-only swimlane board of the current repo's wayfinder maps and, on GitHub and Linear, standalone /to-spec specs (a lane per open map or spec, its tickets in Blocked, Frontier, Claimed, Decided) in a herdr pane beside this Claude session, from which a wayfinder ticket starts /wayfinder, a spec without tickets /to-tickets and a spec's ticket /implement, each in its own worktree. Works with GitHub, GitLab, Gitea/Forgejo and Linear. Use when the user wants to see or track wayfinder work, start a map's tickets, or log in to the tracker for the board.
+description: Open a live, read-only swimlane board of the current repo's wayfinder maps and, on GitHub, GitLab, Gitea/Forgejo and Linear, standalone /to-spec specs (a lane per open map or spec, its tickets in Blocked, Frontier, Claimed, Decided) in a herdr pane beside this Claude session, from which a wayfinder ticket starts /wayfinder, a spec without tickets /to-tickets and a spec's ticket /implement, each in its own worktree. Works with GitHub, GitLab, Gitea/Forgejo and Linear. Use when the user wants to see or track wayfinder work, start a map's tickets, or log in to the tracker for the board.
 argument-hint: "[map] | login | cleanup <map> --dry-run"
 ---
 

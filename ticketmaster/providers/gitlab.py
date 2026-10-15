@@ -5,17 +5,25 @@ GitLab issues have no sub-issue list in the Issue API, so the board reads the pr
 ticket whose description's first line is `Part of #<map>` for one of them. A map's spec is an untyped issue with
 that first line, and the spec's implementation tickets name it in a `## Parent` section; both are found by a
 description search.
+
+Then every standalone spec with its tickets, from two description searches per signature, the open specs and tickets
+and those closed within a week, and per open spec one `Parent <spec>` search, which also finds its older tickets.
 """
 
 from __future__ import annotations
 
 import functools
 import json
+from datetime import datetime
 
 from ..model import Ticket, parse_time
 from . import (LABEL_LIMIT, LIMIT, OPEN_MAPS, SPEC_SEARCHES, IssueStates, ProviderError, Query, blocker_ref,
-               cap_lanes, capped, closed_map_refs, map_board, resolve_maps, run_json, tracker_error,
+               cap_lanes, capped, closed_map_refs, map_board, resolve_maps, run_json, standalone_lanes, tracker_error,
                wayfinder_labels, with_body_blockers, with_spec_tickets, with_specs)
+
+# What the signature searches ask for, a signature each. Full text search drops `##` and the English stop words
+# (`what`, `to`) and stems the rest, so each search names only the words that survive; the body check is exact.
+SIGNATURE_SEARCHES = ("problem statement solution", "build acceptance criteria")
 
 ISSUE_FIELDS = """
   iid title webUrl description state closedAt
@@ -27,9 +35,9 @@ ISSUE_FIELDS = """
 """
 
 ISSUES = """
-query($path: ID!, $state: IssuableState, $after: String, $labels: [String], $search: String) {
+query($path: ID!, $state: IssuableState, $after: String, $labels: [String], $search: String, $closedAfter: Time) {
   project(fullPath: $path) {
-    issues(state: $state, after: $after, first: 100, labelName: $labels, search: $search) {
+    issues(state: $state, after: $after, first: 100, labelName: $labels, search: $search, closedAfter: $closedAfter) {
       pageInfo { hasNextPage endCursor }
       nodes { %s }
     }
@@ -78,6 +86,7 @@ class GitLabProvider:
         self.repo = repo
         self.host = host
         self.states = IssueStates(self._issue_states)
+        self.not_specs: set[int] = set()  # parents an open ticket names that are no standalone spec
         self.cut_off: list[str] = []
 
     def viewer(self) -> str | None:
@@ -110,11 +119,22 @@ class GitLabProvider:
         tickets = map_board(maps, named, children)
         if any(t.is_wayfinder_map for t in tickets):
             tickets = with_specs(tickets, found)
+        tickets += standalone_lanes(tickets, self._signature_search, SIGNATURE_SEARCHES, self._spec_children,
+                                    self._named, self.not_specs, limit, cut)
         # A spec has tickets by its whole family, also when the lane is cut before them.
         tickets = cap_lanes(with_spec_tickets(resolve_maps(tickets, functools.cache(self._issue))), limit, cut)
         tickets = with_body_blockers(tickets, self.states)
         self.cut_off = cut
         return tickets
+
+    def _signature_search(self, words: str, closed_since: datetime | None) -> list[Ticket]:
+        state = {"state": "opened"} if closed_since is None else {"state": "closed", "closedAfter": closed_since.isoformat()}
+        return self._issues({"search": words, **state}, LIMIT + 1)
+
+    def _spec_children(self, iid: int) -> list[Ticket]:
+        """The issues, open or closed, a `Parent <iid>` search finds. Prefix matching also finds `Parent 400`, so the
+        search reads past the lane's limit; the lane is capped after the body check."""
+        return self._issues({"search": f"Parent {iid}"}, LABEL_LIMIT)
 
     def _named(self, iid: int) -> Ticket | None:
         issue = (self._graphql(NAMED, {"path": self.repo, "named": str(iid)}).get("project") or {}).get("issue")
