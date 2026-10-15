@@ -23,9 +23,9 @@ esac
 
 FAKE_VENV_PYTHON = """#!/usr/bin/env bash
 echo "venv $*" >> "$FAKE_LOG"
-case "$2" in
-  pip) sleep "${FAKE_PIP_SECONDS:-0}"; exit "${FAKE_PIP_EXIT:-0}" ;;
-  ticketmaster) echo "ran $* wrapper=$TICKETMASTER_WRAPPER data=$CLAUDE_PLUGIN_DATA" ;;
+case " $* " in
+  *" -m pip "*) sleep "${FAKE_PIP_SECONDS:-0}"; exit "${FAKE_PIP_EXIT:-0}" ;;
+  *" -m ticketmaster "*) echo "ran $* wrapper=$TICKETMASTER_WRAPPER data=$CLAUDE_PLUGIN_DATA" ;;
 esac
 """
 
@@ -87,7 +87,24 @@ def test_first_run_builds_the_venv_from_the_plugin_source_and_runs_the_cli(tmp_p
         f"python3 -m venv {venv}",
         f"venv -m pip install --quiet --disable-pip-version-check {plugin.root}",
     ]
-    assert done.stdout.startswith("ran -m ticketmaster open 42 ")
+    assert done.stdout.startswith("ran -P -m ticketmaster open 42 ")
+
+
+def test_a_checkout_in_the_current_directory_does_not_shadow_the_venvs_package(tmp_path):
+    """`python -m` puts the current directory first on sys.path; `-P` keeps a checkout's ticketmaster/ out of it."""
+    checkout = tmp_path / "checkout"
+    (checkout / "ticketmaster").mkdir(parents=True)
+    (checkout / "ticketmaster" / "__init__.py").write_text('__version__ = "0.0.0"\n')
+    venv = tmp_path / "venv"
+    subprocess.run(["python3", "-m", "venv", "--without-pip", str(venv)], check=True)
+    site = next((venv / "lib").glob("python*/site-packages"))
+    (site / "ticketmaster").mkdir()
+    (site / "ticketmaster" / "__main__.py").write_text("import ticketmaster\nprint(ticketmaster.__file__)\n")
+    (site / "ticketmaster" / "__init__.py").write_text("")
+    argv = WRAPPER.read_text().splitlines()[-1].split()[2:]  # the exec line's arguments to the venv's python
+    assert argv[:3] == ["-P", "-m", "ticketmaster"]
+    ran = subprocess.run([str(venv / "bin" / "python"), *argv[:3]], cwd=checkout, capture_output=True, text=True)
+    assert ran.stdout.strip() == str(site / "ticketmaster" / "__init__.py"), ran.stderr
 
 
 def test_the_next_run_reuses_the_venv(tmp_path):
@@ -95,7 +112,7 @@ def test_the_next_run_reuses_the_venv(tmp_path):
     plugin.run()
     plugin.calls()
     assert plugin.run("--version").returncode == 0
-    assert plugin.calls() == ["venv -m ticketmaster --version"]
+    assert plugin.calls() == ["venv -P -m ticketmaster --version"]
 
 
 def test_a_new_version_rebuilds_the_venv(tmp_path):
@@ -163,7 +180,7 @@ def test_two_first_runs_at_once_build_the_venv_once(tmp_path):
     ]
     outcomes = [(run.wait(timeout=30), run.stdout.read()) for run in runs]
     assert [code for code, _ in outcomes] == [0, 0]
-    assert all(out.startswith("ran -m ticketmaster open") for _, out in outcomes)
+    assert all(out.startswith("ran -P -m ticketmaster open") for _, out in outcomes)
     assert len([c for c in builds(plugin.calls()) if c.startswith("python3 -m venv")]) == 1
 
 
