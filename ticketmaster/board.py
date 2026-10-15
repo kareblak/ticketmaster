@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import time
 import webbrowser
 from collections.abc import Callable
@@ -20,7 +21,7 @@ from textual.widgets import Button, Footer, Input, Label, Static
 
 from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
-from .model import COLUMN_ORDER, Board, Column, Lane, Ticket, build_board, frontier
+from .model import COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, Ticket, build_board, frontier
 from .providers import ErrorNotice, Provider, ProviderError, Query, RateLimited, error_notice
 from .start import branch_name, worktree_name
 
@@ -116,29 +117,71 @@ def matches(ticket: Ticket, needle: str) -> bool:
     return all(word in haystack for word in needle.lower().split())
 
 
-INCLUDE, EXCLUDE = "include", "exclude"
-MODE_CYCLE = {None: INCLUDE, INCLUDE: EXCLUDE, EXCLUDE: None}  # a label option cycles include → exclude → off
-SELECT_CYCLE = {None: INCLUDE, INCLUDE: None}  # an author option is selected or not
+INCLUDE = "include"  # a selected picker value
+TYPE, MODE, ASSIGNEE, MAP, AUTHOR = "Type", "HITL/AFK", "Assignee", "Map", "Author"  # the picker's sections
+CARD_FILTERS = (TYPE, MODE, ASSIGNEE, AUTHOR)  # narrow a lane's cards; MAP narrows the lanes
+SAVED_KEYS = {TYPE: "types", MODE: "modes", ASSIGNEE: "assignee", MAP: "maps", AUTHOR: "authors"}  # settings.json
+CARD_TYPES = (*WAYFINDER_TYPES, "spec", "impl")
+MODES = ("HITL", "AFK")
+ASSIGNEES, ANYONE = ("me", "unassigned", "anyone"), "anyone"  # one at a time; anyone narrows nothing
 
 
-def passes_labels(ticket: Ticket, modes: dict[str, str], known: set[str]) -> bool:
-    """Any included label (OR) and no excluded one; included labels missing from the board (`known`) are ignored."""
-    included = {label for label, mode in modes.items() if mode == INCLUDE and label in known}
-    if included and not included.intersection(ticket.labels):
-        return False
-    return not any(modes.get(label) == EXCLUDE for label in ticket.labels)
+def card_type(ticket: Ticket) -> str | None:
+    """The type a card is filtered by: its wayfinder type, else spec or impl."""
+    return ticket.wayfinder_type or ticket.spec_kind
 
 
-def passes_authors(ticket: Ticket, selected: dict[str, str], known: set[str]) -> bool:
-    """Opened by any selected author (OR); selected authors missing from the board (`known`) are ignored."""
-    authors = {author for author in selected if author in known}
-    return not authors or ticket.author in authors
+def passes_filters(ticket: Ticket, filters: dict[str, dict[str, str]], known: dict[str, set[str]],
+                   viewer: str | None) -> bool:
+    """A card passes every section with a selection, and a section when it matches any selected value. A selected type,
+    mode or author missing from the board (`known`) is ignored; `me` is the tracker login, nobody while it is unknown."""
+    for section, value in ((TYPE, card_type(ticket)), (MODE, ticket.mode), (AUTHOR, ticket.author)):
+        chosen = known.get(section, set()).intersection(filters.get(section, {}))
+        if chosen and value not in chosen:
+            return False
+    assignee = next(iter(filters.get(ASSIGNEE, {})), ANYONE)
+    if assignee == "unassigned":
+        return not ticket.assignees
+    if assignee == "me":
+        return viewer is not None and viewer.lower() in (a.lower() for a in ticket.assignees)
+    return True
 
 
-def describe_modes(modes: dict[str, str], known: set[str]) -> str:
-    """`+bug -wontfix` for the status line, leaving out labels that are not on the board."""
-    return " ".join(("+" if mode == INCLUDE else "-") + label
-                    for label, mode in sorted(modes.items()) if label in known)
+def known_values(board: Board) -> dict[str, set[str]]:
+    """The types, modes and authors the lanes' cards carry, which the picker offers."""
+    cards = [ticket for lane in board.lanes for ticket in lane.tickets()]
+    return {
+        TYPE: {kind for t in cards if (kind := card_type(t))},
+        MODE: {t.mode for t in cards if t.mode},
+        AUTHOR: {t.author for t in cards if t.author},
+    }
+
+
+_MAP_KEY = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")  # a map picked by its tracker key, e.g. Linear's `TM-1`
+
+
+def map_value(ticket: Ticket) -> str:
+    """How the map filter names a map: its tracker key, else its number."""
+    return ticket.key.upper() if ticket.key else str(ticket.number)
+
+
+def map_ids(ticket: Ticket) -> set[str]:
+    """Every map filter value that selects this map: its number, and its tracker key when it has one."""
+    return {str(ticket.number), map_value(ticket)}
+
+
+def load_filters(saved: dict) -> dict[str, dict[str, str]]:
+    """A repo's saved selection; a value that cannot be one (a map that is no number or key, an unknown assignee) is
+    dropped."""
+    filters = {}
+    for section, key in SAVED_KEYS.items():
+        values = [str(v) for v in saved.get(key, [])] if isinstance(saved.get(key), list) else []
+        if section == MAP:
+            values = [v for v in values if v.isdigit() or _MAP_KEY.match(v)]
+        elif section == ASSIGNEE:
+            values = [v for v in values if v in ASSIGNEES and v != ANYONE][:1]
+        filters[section] = dict.fromkeys(values, INCLUDE)
+    return filters
 
 
 class Pacer:
@@ -263,19 +306,19 @@ class Confirm(ModalScreen[bool]):
 
 
 class PickerOption(Static, can_focus=True):
-    """One value of a FilterPicker section; Enter, space or a click moves it along `cycle`."""
+    """One value of a FilterPicker section, shown as `label`; Enter, space or a click selects or deselects it."""
 
-    def __init__(self, section: str, value: str, mode: str | None, cycle: dict = MODE_CYCLE):
+    def __init__(self, section: str, value: str, mode: str | None, label: str = ""):
         super().__init__(classes="option")
         self.section = section
         self.value = value
+        self.label = label or value
         self.mode = mode
-        self.cycle = cycle
         self._paint()
 
     def _paint(self) -> None:
-        mark, style = {INCLUDE: ("[+]", "bold green"), EXCLUDE: ("[-]", "bold red")}.get(self.mode, ("[ ]", "grey50"))
-        self.update(Text.assemble((mark, style), " ", (self.value, style if self.mode else "")))
+        mark, style = ("[x]", "bold green") if self.mode else ("[ ]", "grey50")
+        self.update(Text.assemble((mark, style), " ", (self.label, style if self.mode else "")))
 
     def set_mode(self, mode: str | None) -> None:
         self.mode = mode
@@ -287,11 +330,12 @@ class PickerOption(Static, can_focus=True):
 
 
 class FilterPicker(ModalScreen[None]):
-    """Narrows the board live from sections of values (labels, authors).
+    """Narrows the board live from sections of values (type, HITL/AFK, assignee, map, author).
 
-    `sections` maps a section title to its values, `modes` a title to {value: include|exclude}; the picker
-    edits `modes` in place and calls `changed` after every edit. Values cycle include → exclude → off, or
-    only on/off for the sections in `cycles`. Esc, f or q closes it, c clears it.
+    `sections` maps a section title to its (value, label) pairs, `modes` a title to {value: include}; the picker
+    edits `modes` in place and calls `changed` after every edit. A value is selected or not; a section in `single`
+    holds one value at a time, and its default value (`single[title]`) stands for none. Esc, f or q closes it,
+    c clears it.
     """
 
     DEFAULT_CSS = """
@@ -304,31 +348,36 @@ class FilterPicker(ModalScreen[None]):
     """
     BINDINGS = [
         Binding("escape,f,q", "dismiss", "Close"),
-        Binding("enter,space", "cycle", "Include/exclude/off"),
+        Binding("enter,space", "cycle", "Select/deselect"),
         Binding("c", "clear", "Clear"),
         Binding("up,k", "step(-1)", show=False),
         Binding("down,j", "step(1)", show=False),
     ]
 
-    def __init__(self, sections: dict[str, list[str]], modes: dict[str, dict[str, str]], changed: Callable[[], None],
-                 cycles: dict[str, dict] | None = None):
+    def __init__(self, sections: dict[str, list[tuple[str, str]]], modes: dict[str, dict[str, str]],
+                 changed: Callable[[], None], single: dict[str, str] | None = None):
         super().__init__()
         self.sections = sections
         self.modes = modes
         self.changed = changed
-        self.cycles = cycles or {}
+        self.single = single or {}
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="picker"):
-            yield Static("Enter/space: labels include → exclude → off, authors on/off · c clears · Esc closes",
+            yield Static("Enter/space selects; a card shows when it matches every section · c clears · Esc closes",
                          id="picker-help")
             for title, values in self.sections.items():
                 yield Static(title, classes="section-title")
                 if not values:
                     yield Static(Text("  none on this board", style="dim"))
-                current = self.modes.get(title, {})
-                for value in values:
-                    yield PickerOption(title, value, current.get(value), self.cycles.get(title, MODE_CYCLE))
+                for value, label in values:
+                    yield PickerOption(title, value, self._mode(title, value), label)
+
+    def _mode(self, section: str, value: str) -> str | None:
+        current = self.modes.get(section, {})
+        if not current and self.single.get(section) == value:
+            return INCLUDE
+        return current.get(value)
 
     def on_mount(self) -> None:
         options = list(self.query(PickerOption))
@@ -347,20 +396,27 @@ class FilterPicker(ModalScreen[None]):
             self.cycle(self.focused)
 
     def cycle(self, option: PickerOption) -> None:
-        option.set_mode(option.cycle[option.mode])
         current = self.modes.setdefault(option.section, {})
-        if option.mode:
-            current[option.value] = option.mode
-        else:
+        if option.section in self.single:
+            current.clear()
+            if option.value != self.single[option.section]:
+                current[option.value] = INCLUDE
+        elif option.mode:
             current.pop(option.value, None)
+        else:
+            current[option.value] = INCLUDE
+        self._paint()
         self.changed()
 
     def action_clear(self) -> None:
         for current in self.modes.values():
             current.clear()
-        for option in self.query(PickerOption):
-            option.set_mode(None)
+        self._paint()
         self.changed()
+
+    def _paint(self) -> None:
+        for option in self.query(PickerOption):
+            option.set_mode(self._mode(option.section, option.value))
 
 
 KEY_DETAILS = {
@@ -370,7 +426,8 @@ KEY_DETAILS = {
              "continue Claude in it when it has no agent; not when closed, blocked, claimed by someone else or live "
              "(press Enter), never for a spec or an issue that is not wayfinder work",
     "open": "open the issue in the browser",
-    "pick_filter": "include or exclude labels, select authors (Enter cycles); combines with /, Esc on the board clears all",
+    "pick_filter": "narrow by type, HITL/AFK, assignee (me, unassigned, anyone), map and author; combines with /, "
+                   "Esc on the board clears all, saved per repo",
 }
 
 
@@ -406,8 +463,10 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
 
     heading("Lanes")
     text.append("  Each open wayfinder map is a lane, headed by its map card: its decided (closed, not out\n"
-                "  of scope), open and blocked tickets. A closed map shows only when named\n"
-                f"  (ticketmaster <map>), as its header card alone.{'  ← this board' if query.named_map else ''}\n"
+                "  of scope), open and blocked tickets. Naming a map (ticketmaster <map>, a number or a\n"
+                "  tracker key) filters this run's board to it, unsaved; Esc shows every open map again.\n"
+                "  A map named by number shows also when closed, as its header card\n"
+                f"  alone.{'  ← this board' if query.named_map else ''}\n"
                 "  A spec whose first line is `Part of #<map>` and its implementation tickets (sub-issues,\n"
                 "  or a `## Parent` section naming the spec) sit in the map's lane, tagged spec and impl.\n"
                 "  Other issues are not shown. PR open: an open pull request will close the card's issue.\n")
@@ -508,7 +567,7 @@ class BoardApp(App):
         Binding("q", "quit", "Quit"),
         Binding("r", "refresh", "Refresh"),
         Binding("slash", "filter", "Filter"),
-        Binding("f", "pick_filter", "Labels/authors"),
+        Binding("f", "pick_filter", "Filters"),
         Binding("enter", "primary", "Go to session"),
         Binding("s", "start", "Start session"),
         Binding("o", "open", "Browser"),
@@ -532,7 +591,9 @@ class BoardApp(App):
         columns: str = "auto",
         settings_path: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
+        map_key: str | None = None,
     ):
+        """`query.named_map`, or `map_key` (a tracker key such as `TM-1`), presets the map filter for this run."""
         super().__init__()
         self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
         self.single = False
@@ -557,10 +618,14 @@ class BoardApp(App):
         self.needle = ""
         self.repo_key = f"{provider.name}:{provider.repo}"
         saved = self.settings.get("filters", {}).get(self.repo_key, {})
-        self.filters: dict[str, dict[str, str]] = {
-            "Labels": dict(saved.get("labels", {})),
-            "Authors": dict.fromkeys(saved.get("authors", []), INCLUDE),
-        }
+        self.filters = load_filters(saved if isinstance(saved, dict) else {})
+        self.saved_maps = dict(self.filters[MAP])  # what the map section saves while the preset stands
+        named = map_key.upper() if map_key else str(query.named_map) if query.named_map is not None else None
+        # `ticketmaster <map>`: the full board, filtered to that map for this run only; never saved
+        self.map_preset = {named: INCLUDE} if named else None
+        if self.map_preset:
+            self.filters[MAP] = dict(self.map_preset)
+        self.known: dict[str, set[str]] = {}  # the filter values on the board, see known_values
         self.last_error: str | None = None
         self.notice: ErrorNotice | None = None  # the tracker error standing since the last good fetch
         self.last_ok: datetime | None = None
@@ -659,6 +724,7 @@ class BoardApp(App):
         if board is not None:
             changed = board.lanes != self.board.lanes or self.last_ok is None
             self.board = board
+            self.known = known_values(board)
             self.last_ok = datetime.now()
         if sessions is not None and sessions != self.sessions:
             self.starting -= {n for n in self.starting if any(s.status is not None for s in sessions.get(n, []))}
@@ -673,17 +739,32 @@ class BoardApp(App):
     def _tickets(self) -> list[Ticket]:
         return self.board.tickets()
 
-    def _board_labels(self) -> set[str]:
-        return {label for ticket in self._tickets() for label in ticket.labels}
-
-    def _board_authors(self) -> set[str]:
-        return {ticket.author for ticket in self._tickets() if ticket.author}
-
     def _visible(self, lane: Lane, column: Column) -> list[Ticket]:
-        labels, authors = self._board_labels(), self._board_authors()
         return [t for t in lane.columns[column]
-                if matches(t, self.needle) and passes_labels(t, self.filters["Labels"], labels)
-                and passes_authors(t, self.filters["Authors"], authors)]
+                if matches(t, self.needle) and passes_filters(t, self.filters, self.known, self.viewer)]
+
+    def _chosen(self, section: str) -> list[str]:
+        """The section's selected values that are on the board, in the picker's order. The preset map counts even
+        when no lane is that map, so a map that is not on the board shows an empty board, not every map."""
+        if section == ASSIGNEE:
+            return list(self.filters[ASSIGNEE])
+        selected = self.filters[section]
+        chosen = [value for value, _ in self._picker_values(section) if value in selected]
+        if section == MAP:
+            on_board = {value for lane in self.board.lanes for value in map_ids(lane.map)}
+            preset = self.map_preset is not None and selected == self.map_preset
+            chosen += [value for value in selected if value not in chosen and (preset or value in on_board)]
+        return chosen
+
+    def _shown_lanes(self) -> list[Lane]:
+        """The lanes the map filter keeps; while cards are filtered, only those with a card that passes, and a named
+        closed map, which has no cards to pass."""
+        maps = set(self._chosen(MAP))
+        lanes = [lane for lane in self.board.lanes if not maps or maps & map_ids(lane.map)]
+        if self.needle or any(self.filters[section] for section in CARD_FILTERS):
+            lanes = [lane for lane in lanes
+                     if lane.collapsed or any(self._visible(lane, column) for column in COLUMN_ORDER)]
+        return lanes
 
     def _render_board(self) -> None:
         container = self.query_one("#lanes", VerticalScroll)
@@ -691,7 +772,7 @@ class BoardApp(App):
         focused = focused_widget.ticket.number if isinstance(focused_widget, Card) else None
         container.remove_children()
         self.grid, lanes = [], []
-        for lane in self.board.lanes:
+        for lane in self._shown_lanes():
             header = Card(lane.map, None, render_map(lane, self.sessions.get(lane.map.number, []),
                                                      lane.map.number in self.starting, self._claimed(lane.map)))
             cells = [[Card(t, column, render_card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
@@ -706,7 +787,9 @@ class BoardApp(App):
                 cell.display = self._shown(cell.column)
             lanes.append(Vertical(header, Horizontal(*row, classes="lane-row"), classes="lane"))
         if not lanes and self.last_ok:
-            lanes.append(Static(f"No open wayfinder maps in {self.provider.repo}.", id="empty"))
+            empty = ("No cards match the filters; Esc clears them." if self.board.lanes
+                     else f"No open wayfinder maps in {self.provider.repo}.")
+            lanes.append(Static(empty, id="empty"))
         container.mount_all(lanes)
         for column in COLUMN_ORDER:
             head = self.query_one(f"#head-{column.name}", Static)
@@ -747,10 +830,10 @@ class BoardApp(App):
             status.append(f" · {slow} · next fetch in {self.pacer.wait(self.clock())}s{reason}", style="bold yellow")
         if self.needle:
             status.append(f" · filter: {self.needle}", style="yellow")
-        if labels := describe_modes(self.filters["Labels"], self._board_labels()):
-            status.append(f" · labels: {labels}", style="yellow")
-        if authors := sorted(self._board_authors().intersection(self.filters["Authors"]), key=str.lower):
-            status.append(f" · authors: {', '.join(authors)}", style="yellow")
+        for section in SAVED_KEYS:
+            if chosen := self._chosen(section):
+                values = [f"#{v}" if v.isdigit() else v for v in chosen] if section == MAP else chosen
+                status.append(f" · {section.lower()}: {', '.join(values)}", style="yellow")
         for error in (self.last_error, self.herdr_error):
             if error:
                 status.append(f"  ⚠ {error}", style="bold red")
@@ -788,7 +871,7 @@ class BoardApp(App):
         self.query_one("#tabs", Static).update(tabs)
 
     def _visible_count(self, column: Column) -> int:
-        return sum(len(self._visible(lane, column)) for lane in self.board.lanes)
+        return sum(len(self._visible(lane, column)) for lane in self._shown_lanes())
 
     def action_toggle_view(self) -> None:
         self.view = "all" if self.single else "one"
@@ -995,23 +1078,37 @@ class BoardApp(App):
         box.cursor_position = len(self.needle)
         box.focus()
 
-    def action_pick_filter(self) -> None:
-        labels = sorted(self._board_labels(), key=str.lower)
-        authors = sorted(self._board_authors(), key=str.lower)
+    def _picker_values(self, section: str) -> list[tuple[str, str]]:
+        """(value, label) for each of the section's options, from the board's tickets."""
+        if section == ASSIGNEE:
+            return [(value, value) for value in ASSIGNEES]
+        if section == MAP:
+            return [(map_value(lane.map), f"{lane.map.ref} {lane.map.title}") for lane in self.board.lanes]
+        known = self.known.get(section, set())
+        if section == AUTHOR:
+            return [(author, author) for author in sorted(known, key=str.lower)]
+        order = CARD_TYPES if section == TYPE else MODES
+        return [(value, value) for value in order if value in known]
 
+    def action_pick_filter(self) -> None:
         def changed() -> None:
             self._save_filters()
             self._render_board()
 
-        self.push_screen(FilterPicker({"Labels": labels, "Authors": authors}, self.filters, changed,
-                                      {"Authors": SELECT_CYCLE}),
+        sections = {section: self._picker_values(section) for section in SAVED_KEYS}
+        self.push_screen(FilterPicker(sections, self.filters, changed, {ASSIGNEE: ANYONE}),
                          lambda _: self.call_after_refresh(self.action_move, 0, 0))
 
     def _save_filters(self) -> None:
-        """Saves the picker's selection per repo; a saved label or author no longer on the board stays saved."""
+        """Saves the picker's selection per repo; a saved value no longer on the board stays saved. While the map
+        preset stands, the map section keeps what was saved before; a map number is saved as a number."""
+        if self.map_preset is None or self.filters[MAP] != self.map_preset:
+            self.saved_maps = dict(self.filters[MAP])
+        selection = {**self.filters, MAP: self.saved_maps}
         filters = self.settings.setdefault("filters", {})
-        filters[self.repo_key] = {"labels": dict(sorted(self.filters["Labels"].items())),
-                                  "authors": sorted(self.filters["Authors"])}
+        filters[self.repo_key] = {
+            key: [int(v) if v.isdigit() else v for v in sorted(selection[section], key=lambda v: (len(v), v))]
+            if section == MAP else sorted(selection[section]) for section, key in SAVED_KEYS.items()}
         if self.settings_path:
             try:
                 save_settings(self.settings_path, self.settings)

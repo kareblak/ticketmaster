@@ -42,6 +42,27 @@ def test_cli_accepts_bare_map_and_explicit_command():
     assert parse_args([]).command == "open"
 
 
+@pytest.mark.parametrize("value, number", [
+    ("#42", 42), ("42", 42), ("TM-1", "TM-1"), ("tm-1", "TM-1"), ("https://github.com/o/r/issues/42", 42),
+    ("https://gitlab.com/g/p/-/issues/42", 42), ("https://linear.app/team/issue/TM-1/pick-a-stack", "TM-1"),
+    ("https://gitlab.com/g/p/-/work_items/42", 42),
+])
+def test_cli_parses_each_map_form_as_the_map_argument(value, number):
+    from ticketmaster.cli import parse_args
+
+    assert (parse_args([value]).command, parse_args([value]).map) == ("open", number)
+    assert parse_args(["open", value, "--columns", "one"]).map == number
+
+
+@pytest.mark.parametrize("value", ["TM-", "pick-a-stack", "https://github.com/o/r", "#x"])
+def test_cli_refuses_a_map_that_names_no_issue(value, capsys, monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    from ticketmaster.cli import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["open", value])
+
+
 @pytest.mark.parametrize("command", ["snapshot", "adopt", "setup", "install-skill", "upgrade"])
 def test_removed_commands_get_argparses_invalid_choice_error(command, capsys, monkeypatch):
     monkeypatch.setenv("NO_COLOR", "1")
@@ -124,8 +145,14 @@ def test_the_default_interval_is_30_seconds_on_linear_and_5_elsewhere():
     assert passthrough(parse_args(["--interval", "12"]))[-2:] == ["--interval", "12"]
 
 
-def test_cli_takes_a_linear_key_or_url_as_the_map():
-    from ticketmaster.cli import parse_args
+def test_a_key_of_the_linear_team_asks_linear_for_that_map_also_when_closed():
+    from types import SimpleNamespace
 
-    assert parse_args(["TM-1"]).map == 1
-    assert parse_args(["open", "https://linear.app/w/issue/TM-14/read-only-ticketmaster"]).map == 14
+    from ticketmaster.cli import named_number, parse_args
+
+    linear, github = SimpleNamespace(name="linear", team="TM"), SimpleNamespace(name="github", repo="o/r")
+    assert named_number(parse_args(["TM-1"]).map, linear) == 1
+    assert named_number(parse_args(["https://linear.app/w/issue/TM-14/slug"]).map, linear) == 14
+    assert named_number(parse_args(["ENG-1"]).map, linear) is None  # another team's key: the board filter alone
+    assert named_number(parse_args(["TM-1"]).map, github) is None
+    assert named_number(parse_args(["#7"]).map, github) == 7 and named_number(None, linear) is None
