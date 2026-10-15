@@ -207,6 +207,15 @@ def in_spec_lane(tickets: list[Ticket], spec: Ticket) -> list[Ticket]:
     return [replace(with_map(t, spec), lane_spec=spec.number) for t in tickets]
 
 
+def spec_lane(spec: Ticket, family: list[Ticket], limit: int, cut: list[str], more: bool = False) -> list[Ticket]:
+    """The standalone spec, then the first `limit` of its tickets in `family`, `order` that position. A spec with
+    more, or `more` past `family`, goes on `cut`."""
+    if more or len(family) > limit:
+        cut.append(lane_cut(spec))
+    family = [replace(t, order=index) for index, t in enumerate(in_spec_lane(family[:limit], spec))]
+    return with_spec_tickets([spec, *family])
+
+
 def lane_cut(map_ticket: Ticket) -> str:
     return f"{map_ticket.ref}'s tickets"
 

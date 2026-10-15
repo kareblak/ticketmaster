@@ -375,9 +375,10 @@ def test_the_closed_window_applies_except_to_an_open_specs_tickets_which_come_in
     assert set(tickets) == {n["number"] for n in shown}
     assert lanes(tickets.values()) == {1: {"FRONTIER": [4], "DECIDED": [3, 2]},  # the sub-issue first
                                        5: {"FRONTIER": [6, 9], "DECIDED": [7]}}
-    assert [v["number"] for op, v in fake.calls if op == "TicketmasterIssue"] == [5]
-    # The open spec's children, all of them; a closed spec's tickets are its hits, so no call per closed spec.
-    assert fake.ops().count("TicketmasterChildren") == 1
+    assert [v["numbers"] for op, v in fake.calls if op == "TicketmasterNumbers"] == [[5.0]]
+    # The open spec's sub-issues, all of them, in one query; a closed spec's tickets are its hits.
+    assert [v["numbers"] for op, v in fake.calls if op == "TicketmasterSubIssues"] == [[1.0]]
+    assert "TicketmasterChildren" not in fake.ops() and "TicketmasterIssue" not in fake.ops()
 
 
 def test_the_signature_hits_ride_on_the_linked_query_capped_at_the_limit():
@@ -388,4 +389,5 @@ def test_the_signature_hits_ride_on_the_linked_query_capped_at_the_limit():
     tickets = provider.fetch(Query())
     assert len(tickets) == providers.LIMIT and provider.cut_off == ["specs and tickets"]
     assert min(t.number for t in tickets) == 2  # the newest are kept
-    assert "TicketmasterSigned" not in fake.ops() and fake.ops().count("TicketmasterLinked") == 7
+    # The signatures add no query of their own, and the 300 open specs' sub-issues come in one.
+    assert fake.ops().count("TicketmasterLinked") == 7 and fake.ops().count("TicketmasterSubIssues") == 1

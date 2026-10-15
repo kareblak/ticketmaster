@@ -1922,6 +1922,7 @@ def test_a_linear_maps_lane_shows_keys_display_names_and_key_blockers():
 
 
 def test_a_linear_board_shows_a_standalone_spec_lane():
+    """The Linear provider over a fake Linear: a standalone spec's lane, its tickets by sub-issue and `## Parent`."""
     from fake_linear import FakeLinear
     from ticketmaster.providers.linear import LinearProvider
 
