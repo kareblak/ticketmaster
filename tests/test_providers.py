@@ -1307,18 +1307,21 @@ def test_github_takes_a_ticket_without_a_spec_parent_as_loose_and_keeps_a_map_sp
         ticket(78, "#404"),  # no such issue
         ticket(79, "#83"),  # a ticket, no spec
         ticket(83),
+        ticket(84, "#85"),  # a plain issue whose `Part of` names no map
     ]
     fake = FakeGitHub(monkeypatch, maps=[gh_issue(1, MAP_LABELS)], specs=[map_spec],
-                      issues=[gh_issue(80, [], "Plain."), gh_issue(82, [], "Plain too."), question],
+                      issues=[gh_issue(80, [], "Plain."), gh_issue(82, [], "Plain too."), question,
+                              gh_issue(85, [], "Part of #80\n\nAn epic's child.")],
                       subs={1: [question]}, refs={1: [map_spec], 34: [on_map_spec]}, signed=signed)
     tickets = github.GitHubProvider("o/r").fetch(Query())
     assert lanes(tickets) == {1: {"SPECS": [34], "FRONTIER": [81, 74]},
-                              "loose": {"FRONTIER": [71, 72, 73, 75, 78, 79, 83], "DECIDED": [76]}}
+                              "loose": {"FRONTIER": [71, 72, 73, 75, 78, 79, 83, 84], "DECIDED": [76]}}
     by_number = {t.number: t for t in tickets}
-    assert {by_number[n].spec_kind for n in (71, 72, 73, 75, 76, 78, 79, 83)} == {"impl"}
+    assert {by_number[n].spec_kind for n in (71, 72, 73, 75, 76, 78, 79, 83, 84)} == {"impl"}
     assert by_number[74].map_number == 1 and not by_number[74].loose
     assert by_number[71].start_refusal("me") is None
     # The loose tickets and the parents no search answered come in the one full fetch.
     assert fake.asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
                           ("search", 'repo:o/r is:issue is:open in:body "Part of"'), signature_search(),
-                          ("issues", [1, 80, 81, 82, 404, 72, 73, 75, 78, 71, 76, 79, 83]), ("children", [1, 34])]
+                          ("issues", [1, 80, 81, 82, 404, 85, 72, 73, 75, 78, 84, 71, 76, 79, 83]),
+                          ("children", [1, 34])]

@@ -16,8 +16,8 @@ from datetime import datetime, timezone
 from typing import NamedTuple
 
 from ..model import Ticket, has_spec_signature, has_ticket_signature, parse_time, part_of, wayfinder_kinds
-from . import (LIMIT, LOOSE_TICKETS, OPEN_MAPS, RECENTLY_CLOSED, SIGNATURE_HITS, IssueStates, NotFound, ProviderError, Query, Quota,
-               RateLimited, as_spec, blocker_ref, capped, closed_map_refs, in_spec_lane, is_signature_hit, is_spec,
+from . import (LIMIT, LOOSE_TICKETS, OPEN_MAPS, RECENTLY_CLOSED, SIGNATURE_HITS, IssueStates, NotFound, ProviderError,
+               Query, Quota, RateLimited, as_spec, blocker_ref, capped, closed_map_refs, in_spec_lane, is_signature_hit, is_spec,
                is_spec_ticket, is_standalone_candidate, lane_cut, names_parent, resolve_maps, run_cli, run_json,
                tracker_error, under_spec, with_body_blockers, with_spec_tickets)
 
@@ -183,7 +183,7 @@ class GitHubProvider:
         tickets = resolve_maps(tickets, self._issue, tuple(full.values()))
         taken = {t.number for t in tickets}
         found = [replace(full[n], loose=True) for n in loose
-                 if n in full and n not in taken and not has_spec_parent(full[n], {**known, **full})]
+                 if n in full and n not in taken and not has_spec_parent(full[n], {**known, **full}, any_map)]
         tickets += capped(found, limit, LOOSE_TICKETS, cut)
         tickets = with_body_blockers(tickets, self.states)
         self.cut_off = cut
@@ -424,18 +424,18 @@ def loose_wanted(hits: dict[int, Ticket], known: dict[int, Ticket], open_maps: s
     spec a search answered, and the parents of theirs that neither a search answered nor the full fetch reads already,
     which the full fetch reads to tell whether they are specs."""
     candidates = [n for n, t in hits.items() if has_ticket_signature(t.body) and not has_spec_signature(t.body)
-                  and t.spec_number not in specs.open and not has_spec_parent(t, known)]
+                  and t.spec_number not in specs.open and not has_spec_parent(t, known, open_maps)]
     read = set(known) | open_maps | set(specs.all())
     parents = [p for n in candidates if (p := hits[n].spec_number) is not None and p not in read]
     return candidates, list(dict.fromkeys(parents))
 
 
-def has_spec_parent(ticket: Ticket, issues: dict[int, Ticket]) -> bool:
+def has_spec_parent(ticket: Ticket, issues: dict[int, Ticket], maps: set[int]) -> bool:
     """The ticket's parent, among `issues`, is a spec: a standalone spec (the spec signature) or a map's spec (a
-    `Part of` line), with no `wayfinder:` label. A parent not found is none."""
+    `Part of` line naming one of `maps`), with no `wayfinder:` label. A parent not found is none."""
     parent = issues.get(ticket.spec_number) if ticket.spec_number is not None else None
     return (parent is not None and not wayfinder_kinds(parent.labels)
-            and (has_spec_signature(parent.body) or part_of(parent.body) is not None))
+            and (has_spec_signature(parent.body) or part_of(parent.body) in maps))
 
 
 def new_tickets(nodes: list[dict], taken: set[int], repo: str, links=lambda node: True) -> list[Ticket]:

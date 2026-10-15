@@ -160,7 +160,8 @@ def render_loose_lane(lane: Lane, text: Text) -> Text:
     progress = lane.progress
     text.append(f"{LANE_GLYPHS[LaneKind.LOOSE]} {LOOSE_TITLE}", style=f"bold {LOOSE_COLOR}")
     text.append("  to-tickets output with no parent", style="grey62")
-    text.append(f"\n{progress.done} done · {progress.open} open · {progress.blocked} blocked", style=f"bold {LOOSE_COLOR}")
+    text.append(f"\n{progress.done} done · {progress.open} open · {progress.blocked} blocked",
+                style=f"bold {LOOSE_COLOR}")
     return text
 
 

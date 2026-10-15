@@ -148,8 +148,8 @@ class Ticket:
             return "spec" if part_of(self.body, self.team_key) == self.map_number else "impl"
         if self.is_standalone_spec:
             return "spec"
-        standalone = self.lane_spec is not None or self.loose
-        return "impl" if standalone and has_ticket_signature(self.body) else None
+        off_map = self.lane_spec is not None or self.loose
+        return "impl" if off_map and has_ticket_signature(self.body) else None
 
     @property
     def is_loose(self) -> bool:
@@ -379,6 +379,11 @@ class Lane:
     def is_map(self) -> bool:
         return self.kind is LaneKind.MAP
 
+    def fill(self, tickets) -> None:
+        """Puts each ticket in the column its classification names."""
+        for ticket in tickets:
+            self.columns[classify(ticket)].append(ticket)
+
     def tickets(self) -> list[Ticket]:
         """A map lane's specs, then the lane's cards column by column."""
         return [*self.specs, *self.columns_tickets()]
@@ -440,25 +445,20 @@ def build_board(tickets: list[Ticket], named_map: int | None = None, now: dateti
                     collapsed=map_ticket.number not in live, specs=specs,
                     spec_counts={spec.number: spec_progress(spec, tickets) for spec in specs})
         if not lane.collapsed:
-            for ticket in children:
-                if ticket.spec_kind != "spec":
-                    lane.columns[classify(ticket)].append(ticket)
+            lane.fill(t for t in children if t.spec_kind != "spec")
         board.lanes.append(lane)
     for spec in sorted((t for t in tickets if t.is_standalone_spec), key=lambda t: t.number):
         children = standalone_tickets(spec, tickets)
         if not (spec.is_open or any(t.is_open for t in children)):
             continue
         lane = Lane(spec, LaneKind.SPEC, progress=spec_progress(spec, tickets))
-        for ticket in children:
-            lane.columns[classify(ticket)].append(ticket)
+        lane.fill(children)
         board.lanes.append(lane)
     since = (now or datetime.now(timezone.utc)) - RECENTLY_CLOSED
-    loose = sorted((t for t in tickets if t.is_loose and (t.is_open or t.closed_at is not None and t.closed_at >= since)),
-                   key=lambda t: (t.order, t.number))
-    if loose:
+    recent = [t for t in tickets if t.is_loose and (t.is_open or t.closed_at is not None and t.closed_at >= since)]
+    if loose := sorted(recent, key=lambda t: (t.order, t.number)):
         lane = Lane(None, LaneKind.LOOSE, progress=ticket_progress(loose))
-        for ticket in loose:
-            lane.columns[classify(ticket)].append(ticket)
+        lane.fill(loose)
         board.lanes.append(lane)
     return board
 
