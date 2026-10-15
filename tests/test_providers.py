@@ -734,10 +734,10 @@ def test_spec_is_part_of_the_map_without_a_wayfinder_label():
     def spec(body, labels=()):
         return Ticket(number=3, title="Spec", url="u", is_open=True, body=body, labels=labels)
 
-    assert providers.is_spec(spec("Part of #5\n\n## Problem Statement", ("ready-for-agent",)), 5)
-    assert not providers.is_spec(spec("Part of #50"), 5)
-    assert not providers.is_spec(spec("Part of #5", ("wayfinder:task",)), 5)  # a decision ticket
-    assert not providers.is_spec(spec("Part of #5", ("wayfinder::grilling",)), 5)
+    assert spec("Part of #5\n\n## Problem Statement", ("ready-for-agent",)).is_spec_of(5)
+    assert not spec("Part of #50").is_spec_of(5)
+    assert not spec("Part of #5", ("wayfinder:task",)).is_spec_of(5)  # a decision ticket
+    assert not spec("Part of #5", ("wayfinder::grilling",)).is_spec_of(5)
 
 
 def test_implementation_ticket_names_its_spec_in_the_parent_section():
@@ -1444,3 +1444,56 @@ def test_a_parent_that_is_no_standalone_spec_is_looked_up_once_per_board_run(mon
     asked.clear()
     assert lanes(provider.fetch(Query())) == STANDALONE_LANES
     assert [call for call in asked if call[0] == "issue"] == [("issue", 50)]  # the closed spec, not #7 again
+
+
+# --- a map's spec linked as a native sub-issue on GitHub -----------------------------------------------------------
+
+def test_github_takes_a_spec_signature_sub_issue_of_a_map_as_its_spec_without_a_part_of_line(monkeypatch):
+    spec = gh_issue(10, [], SPEC_SIG, parent=1)
+    plain = gh_issue(11, [], TICKET_SIG, parent=1)  # no spec signature: no spec
+    decision = gh_issue(12, ["wayfinder:grilling"], SPEC_SIG, parent=1)  # a `wayfinder:` label: a decision ticket
+    native = gh_issue(13, [], TICKET_SIG, parent=10, parent_labels=())
+    by_parent = gh_issue(14, [], "## Parent\n\n#10\n\n" + TICKET_SIG)
+    subs = {1: [spec, plain, decision], 10: [native]}
+    refs = {10: [by_parent]}
+    fake = FakeGitHub(monkeypatch, maps=[gh_issue(1, MAP_LABELS)], subs=subs, refs=refs,
+                      signed=[spec, plain, native, by_parent])
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    by_number = {t.number: t for t in tickets}
+    assert [by_number[n].spec_kind for n in (10, 11, 12, 13, 14)] == ["spec", None, None, "impl", "impl"]
+    assert (by_number[10].map_number, by_number[10].has_tickets) == (1, True)
+    assert by_number[12].is_wayfinder_ticket
+    assert not any(t.is_standalone_spec for t in tickets)
+    assert lanes(tickets) == {1: {"SPECS": [10], "FRONTIER": [12, 13, 14]}}
+    # The spec's children come in the batch after the map's, as a `Part of` spec the open search missed does.
+    assert [a for a in fake.asked if a[0] == "children"] == [("children", [1]), ("children", [10])]
+
+
+def test_github_lists_a_spec_linked_both_as_a_sub_issue_and_by_part_of_once(monkeypatch):
+    spec = gh_issue(10, [], "Part of #1\n\n" + SPEC_SIG, parent=1)
+    FakeGitHub(monkeypatch, maps=[gh_issue(1, MAP_LABELS)], specs=[spec], subs={1: [spec]}, refs={1: [spec]},
+               signed=[spec])
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert [t.number for t in tickets].count(10) == 1
+    assert lanes(tickets) == {1: {"SPECS": [10]}}
+
+
+def test_github_shows_a_closed_map_whose_sub_issue_spec_is_still_open(monkeypatch):
+    closed_map = gh_issue(1, MAP_LABELS, state="CLOSED")
+    spec = gh_issue(10, [], SPEC_SIG, parent=1)
+    subs = {1: [gh_issue(2, ["wayfinder:grilling"], parent=1, state="CLOSED"), spec],
+            10: [gh_issue(11, [], TICKET_SIG, parent=10, parent_labels=())]}
+    FakeGitHub(monkeypatch, issues=[closed_map], subs=subs, signed=[spec])
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert lanes(tickets) == {1: {"SPECS": [10], "FRONTIER": [11], "DECIDED": [2]}}
+
+
+def test_github_takes_a_closed_sub_issue_spec_of_a_closed_map_for_no_standalone_spec(monkeypatch):
+    # As a closed `Part of #1` spec of a closed map is: the open ticket keeps neither lane.
+    closed_map = gh_issue(1, MAP_LABELS, state="CLOSED")
+    spec = gh_issue(10, [], SPEC_SIG, parent=1, state="CLOSED", closed_at=ago(1))
+    impl = gh_issue(11, [], TICKET_SIG, parent=10, parent_labels=())
+    FakeGitHub(monkeypatch, issues=[closed_map], subs={1: [spec], 10: [impl]}, signed=[spec, impl])
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert not any(t.is_standalone_spec for t in tickets)
+    assert lanes(tickets) == {}

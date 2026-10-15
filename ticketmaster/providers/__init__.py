@@ -165,10 +165,14 @@ def with_specs(tickets: list[Ticket], candidates: list[Ticket]) -> list[Ticket]:
 
 
 def closed_map_refs(candidates: list[Ticket], shown: set[int], key: str | None = None) -> list[int]:
-    """The maps named by an open, untyped candidate's `Part of` line (an open spec) that are not `shown`: closed
-    maps whose spec is still being worked, which the board shows too. The caller checks each one is a map."""
+    """The maps named by an open, untyped candidate's `Part of` line, or by the sub-issue parent of one with the spec
+    signature (an open spec), that are not `shown`: closed maps whose spec is still being worked, which the board
+    shows too. The caller checks each one is a map."""
+    def named(t: Ticket) -> int | None:
+        return part_of(t.body, key) or (t.parent_number if has_spec_signature(t.body) else None)
+
     refs = {n for t in candidates if t.is_open and not wayfinder_kinds(t.labels)
-            and (n := part_of(t.body, key)) is not None and n != t.number}
+            and (n := named(t)) is not None and n != t.number}
     return sorted(refs - shown)
 
 
@@ -188,9 +192,10 @@ def is_signature_hit(ticket: Ticket, since: datetime) -> bool:
 
 
 def is_standalone_candidate(ticket: Ticket, maps: set[int]) -> bool:
-    """The spec signature, no `wayfinder:` label, and no `Part of` line naming one of `maps`."""
+    """The spec signature, no `wayfinder:` label, no `Part of` line naming one of `maps` and no sub-issue parent among
+    them."""
     return (has_spec_signature(ticket.body) and not wayfinder_kinds(ticket.labels)
-            and part_of(ticket.body, ticket.team_key) not in maps)
+            and part_of(ticket.body, ticket.team_key) not in maps and ticket.parent_number not in maps)
 
 
 def is_spec_ticket(ticket: Ticket, spec: int | None) -> bool:
@@ -444,12 +449,6 @@ def names_parent(body: str, parent: int, key: str | None = None) -> bool:
 
 def is_map(found: Ticket | None) -> bool:
     return found is not None and found.is_wayfinder_map
-
-
-def is_spec(ticket: Ticket, map_number: int) -> bool:
-    """The spec a map led to: `Part of #<map>` (`Part of TM-<map>` on Linear) and no `wayfinder:` label, so it is no
-    decision ticket."""
-    return part_of(ticket.body, ticket.team_key) == map_number and not wayfinder_kinds(ticket.labels)
 
 
 def as_spec(ticket: Ticket, map_ticket: Ticket) -> Ticket:

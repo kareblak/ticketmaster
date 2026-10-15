@@ -147,14 +147,14 @@ class Ticket:
 
     @property
     def spec_kind(self) -> str | None:
-        """`spec` for the spec a map led to (`Part of #<map>`) and for a standalone spec, `impl` for an implementation
+        """`spec` for the spec a map led to (see `is_spec_of`) and for a standalone spec, `impl` for an implementation
         ticket of either and for a loose ticket, else None. A map's are untyped and have a map the provider resolved; a
         standalone spec's ticket carries the ticket signature and the spec the provider resolved as `lane_spec`, a loose
         ticket the signature and `loose`."""
         if wayfinder_kinds(self.labels):
             return None
         if self.map_number is not None:
-            return "spec" if part_of(self.body, self.team_key) == self.map_number else "impl"
+            return "spec" if self.is_spec_of(self.map_number) else "impl"
         if self.is_standalone_spec:
             return "spec"
         off_map = self.lane_spec is not None or self.loose
@@ -164,6 +164,14 @@ class Ticket:
     def is_loose(self) -> bool:
         """A loose ticket: the ticket signature, no map, no standalone spec, and the provider found no spec parent."""
         return self.loose and self.map_number is None and self.lane_spec is None and self.spec_kind == "impl"
+
+    def is_spec_of(self, map_number: int | None) -> bool:
+        """The spec map #<map_number> led to: no `wayfinder:` label, and `Part of #<map>` as its first line
+        (`Part of TM-<map>` on Linear), or the spec signature as a sub-issue of the map (GitHub, Linear)."""
+        if map_number is None or wayfinder_kinds(self.labels):
+            return False
+        return (part_of(self.body, self.team_key) == map_number
+                or self.parent_number == map_number and has_spec_signature(self.body))
 
     @property
     def is_standalone_spec(self) -> bool:

@@ -3,12 +3,13 @@
 
 The board is every open `wayfinder:map` issue of the configured team, and every closed one an open spec still names,
 and, per map, its sub-issues in sub-issue order, plus the team's issues whose first line is `Part of <map>`: a typed ticket linked only that way, or the map's
-spec. Linear stores a typed `Part of TM-1` as a mention, `[TM-1](<issue URL>)`, so the line may hold the key, the
-mention or the URL. A spec's implementation tickets are its sub-issues and the issues whose `## Parent` section
-names it. Then every standalone spec with its tickets, found by their signatures on the same linked-issues query:
-an open spec's tickets are its sub-issues and the issues whose `## Parent` section names it, of any age; a closed
-one's the open and recently closed tickets naming it. Blockers are the `blocks` relations pointing at an issue, then
-the `TM-<n>` its `Blocked by:` line or `## Blocked by` section lists.
+spec. A sub-issue of the map with the spec signature and no `wayfinder:` label is its spec too. Linear stores a
+typed `Part of TM-1` as a mention, `[TM-1](<issue URL>)`, so the line may hold the key, the mention or the URL. A
+spec's implementation tickets are its sub-issues and the issues whose `## Parent` section names it. Then every
+standalone spec with its tickets, found by their signatures on the same linked-issues query: an open spec's tickets
+are its sub-issues and the issues whose `## Parent` section names it, of any age; a closed one's the open and
+recently closed tickets naming it. Blockers are the `blocks` relations pointing at an issue, then the `TM-<n>` its
+`Blocked by:` line or `## Blocked by` section lists.
 
 Only `state.type` is read, never the team's renamable state names: `completed` is done, `canceled` and `duplicate`
 are closed as not planned. Only the assignee claims; the delegate is ignored. Users are their `displayName`.
@@ -32,7 +33,7 @@ from typing import TYPE_CHECKING
 
 from ..model import Ticket, parse_time, part_of, wayfinder_kinds
 from . import (LIMIT, OPEN_MAPS, RECENTLY_CLOSED, SIGNATURE_HITS, IssueStates, ProviderError, Query, RateLimited,
-               as_spec, cap_lanes, capped, closed_map_refs, is_map, is_signature_hit, is_spec, is_spec_ticket,
+               as_spec, cap_lanes, capped, closed_map_refs, is_map, is_signature_hit, is_spec_ticket,
                is_standalone_candidate, parent_ref, spec_lane, under_spec, with_body_blockers, with_map,
                with_spec_tickets)
 
@@ -267,11 +268,11 @@ class LinearProvider:
 
     def fetch(self, query: Query) -> list[Ticket]:
         """Every open map, every closed map an open spec's `Part of` names, and the named one when it is a closed map;
-        per map its sub-issues in sub-issue order,
-        then the team's tickets linked to it by `Part of` and the spec's implementation tickets. Then every standalone
-        spec that is open or named by an open ticket, with its tickets. At most the query's limit of open maps, and of
-        tickets per map or spec; paging stops one past it. The signature hits, which the linked-issues query brings,
-        keep the default cap, the newest first."""
+        per map its sub-issues in sub-issue order, where one with the spec signature is the map's spec, then the
+        team's tickets linked to it by `Part of` and the specs' implementation tickets. Then every standalone spec that
+        is open or named by an open ticket, with its tickets. At most the query's limit of open maps, and of tickets
+        per map or spec; paging stops one past it. The signature hits, which the linked-issues query brings, keep the
+        default cap, the newest first."""
         limit, cut = query.limit, []
         open_maps = self._issues("TicketmasterMaps", {"label": MAP_LABEL}, limit + 1)
         found = {int(node["number"]): node for node in capped(open_maps, limit, OPEN_MAPS, cut)}
@@ -287,11 +288,23 @@ class LinearProvider:
             found |= {int(node["number"]): node for node in self._issues("TicketmasterIssue", {"number": number})
                       if to_ticket(node).is_wayfinder_map}
         maps = {number: to_ticket(node) for number, node in found.items()}
-        tickets = list(maps.values())
+        tickets, specs = list(maps.values()), {}
         for number, map_ticket in maps.items():
-            tickets += [with_map(child, map_ticket) for child in self._children(found[number]["id"], limit + 1)]
+            for child, child_id in self._children(found[number]["id"], limit + 1):
+                if child.is_spec_of(number):
+                    spec = as_spec(child, map_ticket)
+                    specs[child.number] = (spec, child_id)
+                    tickets.append(spec)
+                else:
+                    tickets.append(with_map(child, map_ticket))
+        for spec, spec_id in specs.values():  # a map spec's own sub-issues are its implementation tickets
+            seen = {t.number for t in tickets}
+            subs = under_spec([child for child, _ in self._children(spec_id, limit + 1) if child.number not in seen],
+                              spec)
+            tickets += [replace(t, order=len(tickets) + index) for index, t in enumerate(subs)]
         if maps:
-            tickets += self._linked(maps, candidates, {t.number for t in tickets}, len(tickets))
+            tickets += self._linked(maps, candidates, {t.number for t in tickets}, len(tickets),
+                                    {spec.number: spec for spec, _ in specs.values()})
         taken = {t.number for t in tickets}
         # A spec has tickets by its whole family, also when the lane is cut before them.
         tickets = cap_lanes(with_spec_tickets(tickets), limit, cut)
@@ -327,11 +340,12 @@ class LinearProvider:
 
     def _closed_specs(self, numbers: list[int], nodes: dict[int, dict], maps: set[int]) -> dict[int, Ticket]:
         """The issues of `numbers` that are closed standalone specs: the spec signature, no `wayfinder:` label and no
-        `Part of` line naming a map. Each is read from `nodes` when there, else looked up, and so is the issue its
-        `Part of` names; each lookup is one query for all of them."""
+        `Part of` line naming a map, nor a map as their sub-issue parent. Each is read from `nodes` when there, else
+        looked up, and so is the issue its `Part of` names, else its parent; each lookup is one query for all of
+        them."""
         found = self._by_number(numbers, nodes)
         specs = {n: t for n, t in found.items() if not t.is_open and is_standalone_candidate(t, maps)}
-        named = {n: ref for n, t in specs.items() if (ref := part_of(t.body, t.team_key)) not in (None, n)}
+        named = {n: ref for n, t in specs.items() if (ref := part_of(t.body, t.team_key) or t.parent_number) not in (None, n)}
         targets = self._by_number(list(dict.fromkeys(named.values())), nodes)
         return {n: t for n, t in specs.items() if not (n in named and is_map(targets.get(named[n])))}
 
@@ -355,9 +369,9 @@ class LinearProvider:
             by_parent.setdefault(ticket.parent_number, []).append(ticket)
         return by_parent
 
-    def _children(self, issue_id: str, limit: int) -> list[Ticket]:
-        """The issue's first `limit` sub-issues as Linear pages them, in sub-issue order, then by number; `order` is
-        that position."""
+    def _children(self, issue_id: str, limit: int) -> list[tuple[Ticket, str]]:
+        """The issue's first `limit` sub-issues as Linear pages them, in sub-issue order, then by number, each with
+        its id; `order` is that position."""
 
         def page(after: str | None) -> dict:
             issue = self._query("TicketmasterChildren", {"id": issue_id, "after": after}).get("issue")
@@ -367,14 +381,16 @@ class LinearProvider:
 
         nodes = sorted((self._complete(node) for node in self._pages(page, "a map's sub-issues", limit=limit)),
                        key=sub_issue_order)
-        return [to_ticket(node, order) for order, node in enumerate(nodes)]
+        return [(to_ticket(node, order), node["id"]) for order, node in enumerate(nodes)]
 
-    def _linked(self, maps: dict[int, Ticket], candidates: list[Ticket], seen: set[int], order: int) -> list[Ticket]:
+    def _linked(self, maps: dict[int, Ticket], candidates: list[Ticket], seen: set[int], order: int,
+                sub_specs: dict[int, Ticket]) -> list[Ticket]:
         """The tickets whose `Part of` line names a map: a typed ticket goes on it, an untyped one is its spec; then
-        each spec's implementation tickets, its sub-issues and those whose `## Parent` section names it. Their
-        `order` follows the maps' sub-issues."""
+        each spec's implementation tickets, its sub-issues and those whose `## Parent` section names it, and those
+        naming a spec that is a sub-issue of its map (`sub_specs`, already on the board). Their `order` follows the
+        maps' sub-issues."""
         candidates = [t for t in candidates if t.number not in seen]
-        linked, specs = [], {}
+        linked, specs = [], dict(sub_specs)
         for ticket in candidates:
             map_number = part_of(ticket.body, self.team)
             map_ticket = maps.get(map_number) if map_number is not None else None
@@ -382,7 +398,7 @@ class LinearProvider:
                 continue
             if ticket.wayfinder_type is not None:
                 linked.append(with_map(ticket, map_ticket))
-            elif is_spec(ticket, map_ticket.number):
+            elif ticket.is_spec_of(map_ticket.number):
                 specs[ticket.number] = as_spec(ticket, map_ticket)
                 linked.append(specs[ticket.number])
         for ticket in candidates:
