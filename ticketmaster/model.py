@@ -173,9 +173,9 @@ def _part_of_key(key: str) -> re.Pattern[str]:
                       rf"|<?https?://\S+?/issue/{k}-(?P<url>\d+)(?:/\S*?)?>?)\.?$")
 
 
-# How a map's spec and the spec's implementation tickets link back: the
-# spec's first line is `Part of #<map>`, an implementation ticket's `## Parent` section names the spec, as `#<n>`,
-# by issue URL, or with the tracker's key as Linear's `TM-<n>` (a mention links it, `[TM-<n>](…/issue/TM-<n>/…)`).
+# How a map's spec and the spec's implementation tickets link back: the spec's first line is `Part of #<map>`, an
+# implementation ticket's `## Parent` section names the spec, as `#<n>`, by issue URL, or with the tracker's key as
+# Linear's `TM-<n>` (a mention links it, `[TM-<n>](…/issue/TM-<n>/…)`).
 _PARENT_SECTION = re.compile(r"^##\s*Parent\s*$(?P<text>.*?)(?=^#{1,2}\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
 _PARENT_REF = re.compile(r"(?<![\w&])#(\d+)\b|/issues/(\d+)\b")
 
@@ -243,12 +243,18 @@ def spec_tickets(spec: Ticket, tickets: list[Ticket]) -> list[Ticket]:
     return [t for t in tickets if t.spec_kind == "impl" and t.spec_number == spec.number]
 
 
-def spec_progress(spec: Ticket, tickets: list[Ticket]) -> MapProgress:
+class SpecProgress(NamedTuple):
+    done: int  # closed tickets, less those canceled
+    open: int
+    blocked: int
+
+
+def spec_progress(spec: Ticket, tickets: list[Ticket]) -> SpecProgress:
     """The spec's implementation tickets: done (closed, less canceled), open and blocked."""
     children = spec_tickets(spec, tickets)
     still_open = [t for t in children if t.is_open]
     done = sum(not t.is_open and not t.not_planned for t in children)
-    return MapProgress(done, len(still_open), sum(t.is_blocked for t in still_open))
+    return SpecProgress(done, len(still_open), sum(t.is_blocked for t in still_open))
 
 
 def map_progress(map_ticket: Ticket, tickets: list[Ticket]) -> MapProgress:
@@ -302,7 +308,7 @@ class Lane:
     out_of_scope: set[int] = field(default_factory=set)
     collapsed: bool = False
     specs: list[Ticket] = field(default_factory=list)
-    spec_progress: dict[int, MapProgress] = field(default_factory=dict)
+    spec_counts: dict[int, SpecProgress] = field(default_factory=dict)
 
     def tickets(self) -> list[Ticket]:
         """The map's specs, then its cards column by column."""
@@ -310,9 +316,9 @@ class Lane:
 
     @property
     def ticketless_spec(self) -> Ticket | None:
-        """The first spec without an implementation ticket, open or closed: the one s on the map card breaks into
-        tickets."""
-        return next((spec for spec in self.specs if not spec.has_tickets), None)
+        """The first open spec without an implementation ticket, open or closed: the one s on the map card breaks into
+        tickets. A spec closed without tickets is passed over."""
+        return next((spec for spec in self.specs if spec.is_open and not spec.has_tickets), None)
 
 
 @dataclass
@@ -345,7 +351,7 @@ def build_board(tickets: list[Ticket], named_map: int | None = None) -> Board:
         lane = Lane(map_ticket, progress=map_progress(map_ticket, tickets),
                     out_of_scope={t.number for t in children if is_out_of_scope(t, map_ticket)},
                     collapsed=map_ticket.number not in live, specs=specs,
-                    spec_progress={spec.number: spec_progress(spec, tickets) for spec in specs})
+                    spec_counts={spec.number: spec_progress(spec, tickets) for spec in specs})
         if not lane.collapsed:
             for ticket in children:
                 if ticket.spec_kind != "spec":

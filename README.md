@@ -122,11 +122,12 @@ in a `tm-<n>` worktree. `s` also refuses an `impl` card with an open PR that clo
 claimed starts, even while its spec is open. The session owns review, push and PR; the board starts
 nothing else.
 
-`s` on a lane's map card whose spec has no implementation ticket yet, open or closed, breaks the spec
-into tickets: it starts `/mattpocock-skills:to-tickets <spec-url>`, focused, in the spec's own
+`s` on a lane's map card whose open spec has no implementation ticket yet, open or closed, breaks the
+spec into tickets: it starts `/mattpocock-skills:to-tickets <spec-url>`, focused, in the spec's own
 `issue-<spec>` worktree (`tm-<spec>` on Linear, on the issue's branch name), also when the map is
-closed. It refuses a closed spec, one assigned to someone else, and one with a live session (`Enter`
-on the map card goes to the map's session, else the spec's). The board never removes the spec's
+closed. It refuses a blocked spec, one assigned to someone else, and one with a live session (`Enter`
+on the map card goes to the map's session, else the spec's); a spec closed without tickets is passed
+over. The board never removes the spec's
 worktree. Otherwise `s` on a lane's map card starts the map's first **frontier** ticket: open, unblocked, unassigned, not
 being started from this board and with no live session, in map order (GitHub's sub-issue order,
 asked for when you press `s`; else issue number). That ticket gets its own `issue-<n>` worktree,

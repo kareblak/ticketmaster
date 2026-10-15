@@ -752,7 +752,7 @@ def test_help_explains_lanes_and_the_four_column_rules():
             for gone in ("Review", "Done", "In progress", "Ready"):
                 assert gone not in text
             assert "is a line of the map card, ▣ #<spec> open or closed" in text
-            assert ("s on the lane's header card, while its spec has no tickets (open or closed), starts "
+            assert ("s on the lane's header card, while its open spec has no tickets (open or closed), starts "
                     "to_tickets_command (default /mattpocock-skills:to-tickets)") in text
 
     run(scenario())
@@ -1566,11 +1566,11 @@ def test_s_on_a_map_card_takes_to_tickets_command_from_ticketmaster_toml(tmp_pat
     run(scenario())
 
 
-def test_s_on_a_map_card_whose_spec_has_tickets_or_with_no_spec_starts_the_frontier_ticket():
+def test_s_on_a_map_card_whose_spec_has_tickets_is_closed_or_is_missing_starts_the_frontier_ticket():
     with_open = spec_of(9, 80, has_tickets=True)
     with_closed = spec_of(9, 80, has_tickets=True)
     cases = [(with_open, [impl_of(with_open, 81)]), (with_closed, [impl_of(with_closed, 81, is_open=False)]),
-             (None, [])]
+             (spec_of(9, 80, is_open=False), []), (None, [])]  # a spec closed without tickets is passed over
 
     async def scenario(spec, impls):
         bench = FakeBench()
@@ -1590,7 +1590,7 @@ def test_s_on_a_map_card_whose_spec_has_tickets_or_with_no_spec_starts_the_front
         run(scenario(spec, impls))
 
 
-def test_s_on_a_map_card_refuses_a_closed_or_someone_elses_spec_or_one_with_a_live_session():
+def test_s_on_a_map_card_refuses_a_blocked_or_someone_elses_spec_or_one_with_a_live_session():
     live = {80: [Session(80, "/w/issue-80", "issue-80", "wA", "working", "wA:p1")]}
 
     async def scenario(spec, sessions, refusal):
@@ -1604,7 +1604,7 @@ def test_s_on_a_map_card_refuses_a_closed_or_someone_elses_spec_or_one_with_a_li
             assert not is_confirm(app) and bench.calls == []
             assert notifications(app)[-1][0] == refusal
 
-    run(scenario(spec_of(9, 80, is_open=False), {}, "#80 is closed"))
+    run(scenario(spec_of(9, 80, open_blockers=1, blocked_by=("#3",)), {}, "#80 is blocked by #3"))
     run(scenario(spec_of(9, 80, assignees=("bob",)), {}, "#80 is claimed by @bob"))
     run(scenario(spec_of(9, 80), live, "#80 has a live session: press Enter to go to it"))
 

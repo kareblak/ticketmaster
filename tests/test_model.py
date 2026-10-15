@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from ticketmaster.model import (Column, Ticket, build_board, classify, frontier, is_out_of_scope, map_progress,
@@ -366,8 +367,10 @@ def test_a_maps_spec_is_a_line_of_its_lane_with_its_tickets_progress():
     lane = build_board(tickets).lanes[0]
     assert [t.number for t in lane.specs] == [40, 50]
     assert not any(t.spec_kind == "spec" for t in lane.tickets()[2:])  # no spec card in a column
-    assert lane.spec_progress == {40: (1, 2, 1), 50: (0, 0, 0)}  # done less canceled · open · blocked
+    assert lane.spec_counts == {40: (1, 2, 1), 50: (0, 0, 0)}  # done less canceled · open · blocked
     assert lane.ticketless_spec is bare
+    closed = build_board([MAP_TICKET, child(2), replace(bare, is_open=False)]).lanes[0]
+    assert closed.ticketless_spec is None  # closed without tickets: passed over
     assert spec_tickets(spec, tickets) == tickets[4:]
 
 

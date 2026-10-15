@@ -21,7 +21,7 @@ from textual.widgets import Button, Footer, Input, Label, Static
 
 from .config import load_settings, save_settings
 from .herdr import HerdrError, Session
-from .model import COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, Ticket, build_board, frontier
+from .model import COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, SpecProgress, Ticket, build_board, frontier
 from .providers import ErrorNotice, Provider, ProviderError, Query, RateLimited, error_notice
 from .start import branch_name, worktree_name
 
@@ -111,9 +111,9 @@ def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False,
                 style=f"bold {MAP_COLOR}")
     for spec in lane.specs:
         text.append(f"\n▣ {spec.ref} {'open' if spec.is_open else 'closed'}", style="bold")
-        done, still_open, blocked = counts = lane.spec_progress.get(spec.number, (0, 0, 0))
-        tickets = f"{done} done · {still_open} open · {blocked} blocked" if spec.has_tickets or any(counts) \
-            else "no tickets yet"
+        counts = lane.spec_counts.get(spec.number, SpecProgress(0, 0, 0))
+        tickets = f"{counts.done} done · {counts.open} open · {counts.blocked} blocked" \
+            if spec.has_tickets or any(counts) else "no tickets yet"
         text.append(f"  {tickets}", style="grey62")
         badges = session_lines((spec_sessions or {}).get(spec.number, []), spec.number in spec_starting)
         badges.rstrip()
@@ -506,8 +506,8 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  When the ticket's worktree exists without an agent, it runs claude --continue there instead;\n"
                 "  it never makes a second worktree. What it starts depends on the card:\n")
     for kind, prompt in [
-        ("wayfinder map", "s on the lane's header card, while its spec has no tickets (open or\n"
-                          + " " * 22 + "closed), starts to_tickets_command (default\n"
+        ("wayfinder map", "s on the lane's header card, while its open spec has no tickets (open\n"
+                          + " " * 22 + "or closed), starts to_tickets_command (default\n"
                           + " " * 22 + "/mattpocock-skills:to-tickets) with the spec's URL, focused, in the\n"
                           + " " * 22 + "spec's own worktree, also on a closed map. Else the map's first\n"
                           + " " * 22 + "frontier ticket (open, unblocked, unclaimed, no live session) in\n"
@@ -521,7 +521,8 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                         + " " * 22 + "gitBranchName. Not with an open PR that closes it. The session owns\n"
                         + " " * 22 + "review, push and PR; the board starts nothing else"),
         ("refused", "a closed, blocked or someone else's ticket or ticketless spec, and\n"
-                    + " " * 22 + "one with a live session (press Enter instead)"),
+                    + " " * 22 + "one with a live session (press Enter instead); a spec closed\n"
+                    + " " * 22 + "without tickets is passed over"),
     ]:
         row(kind, 18, prompt)
     text.append("  A wayfinder ticket's card says who it needs: HITL (you at the keyboard) for grilling and\n"
@@ -1049,9 +1050,9 @@ class BoardApp(App):
             self._confirm_start(plan.ticket, plan.via)
 
     def _start_plan(self, ticket: Ticket, order: list[int] | None = None) -> StartPlan | str:
-        """What s does on a card, or why it refuses. A map whose spec has no tickets yet breaks the spec into tickets,
-        open or closed; else an open map is worked through its first frontier ticket without a live session, else,
-        with an empty frontier, itself."""
+        """What s does on a card, or why it refuses. A map whose open spec has no tickets yet breaks the spec into
+        tickets, the map open or closed; else an open map is worked through its first frontier ticket without a live
+        session, else, with an empty frontier, itself."""
         if (lane := self._lane(ticket)) is not None and (spec := lane.ticketless_spec) is not None:
             if refusal := spec.start_refusal(self.viewer):
                 return refusal

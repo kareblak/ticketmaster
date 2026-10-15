@@ -597,3 +597,16 @@ def test_to_tickets_starts_focused_in_the_specs_own_worktree_with_the_exact_prom
     start = fake.first("agent", "start")
     assert start[-3:] == ["-n", "#686 Attach a deviation reason", "/to-tickets https://gh/686"]
     assert message == "Started /to-tickets on #686 in new worktree issue-686 as agent issue-686"
+
+
+def test_to_tickets_on_a_linear_spec_uses_the_key_and_branches_on_gitbranchname(monkeypatch):
+    monkeypatch.setattr(herdr.Path, "home", lambda: Path("/home/me"))
+    spec = Ticket(number=26, title="Attach a  deviation reason", url="https://linear/TM-26", is_open=True,
+                  body="Part of TM-1", map_number=1, map_url="https://linear/TM-1", **LINEAR)
+    fake = implement_fake()
+    bench(fake).start(spec)
+    assert fake.first("worktree", "create") == [
+        "worktree", "create", "--cwd", "/code/shiplog", "--branch", "kb/tm-26-start-implement",
+        "--path", "/home/me/.herdr/worktrees/shiplog/tm-26", "--label", "TM-26 Attach a deviation reason", "--focus"]
+    start = fake.first("agent", "start")
+    assert start[2] == "tm-26" and start[-1] == "/mattpocock-skills:to-tickets https://linear/TM-26"
