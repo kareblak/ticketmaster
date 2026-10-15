@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
 
     from .board import BoardApp
     from .config import load_config, settings_path
-    from .start import build_prompt, workbench_for
+    from .start import build_prompt, workbench_for, worktree_name
 
     workbench = workbench_for(cwd, load_config(cwd))
     BoardApp(
@@ -108,7 +108,7 @@ def main(argv: list[str] | None = None) -> int:
         interval=args.interval,
         workbench=workbench,
         describe_start=lambda ticket: build_prompt(ticket, workbench.wayfinder_command)
-        + f"\nworktree: issue-{ticket.number}, in its own herdr workspace",
+        + f"\nworktree: {worktree_name(ticket)}, in its own herdr workspace",
         columns=args.columns,
         settings_path=settings_path(),
     ).run()

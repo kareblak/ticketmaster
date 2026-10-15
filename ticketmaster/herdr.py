@@ -1,10 +1,10 @@
 """Herdr (herdr.dev): the board lives in a herdr pane, and every ticket session in a worktree workspace.
 
-Starting a ticket always creates a new git worktree (`herdr worktree create`) with Claude started in it
-as a named herdr agent. The board finds every session working a ticket, including ones it did not start:
-a worktree named after the ticket (`issue-<n>`/`tm-<n>`, from herdr or `claude -w`), or an agent in the
-repo whose terminal title starts with the ticket's key. It shows each agent's state and jumps to it, but
-never starts or resumes Claude there, and never removes or adopts a worktree.
+Starting a ticket creates its git worktree (`herdr worktree create`) with Claude started in it as a named
+herdr agent, or continues Claude in that worktree when it has no agent. The board finds every session
+working a ticket, including ones it did not start: a worktree named after the ticket (`issue-<n>`/`tm-<n>`,
+from herdr or `claude -w`), or an agent in the repo whose terminal title starts with the ticket's key. It
+shows each agent's state and jumps to it, and never removes or adopts a worktree.
 """
 
 from __future__ import annotations
@@ -26,7 +26,7 @@ BOARD_ENV = "TICKETMASTER_BOARD"  # set on the `open` a board pane runs, so it k
 WRAPPER_ENV = "TICKETMASTER_WRAPPER"  # the plugin's bin/ticketmaster, exported by the wrapper itself
 DATA_ENV = "CLAUDE_PLUGIN_DATA"  # the wrapper's venv lives here; exported with WRAPPER_ENV
 BOARD_RATIO = 0.7  # share the caller keeps; leaves the board ~1/3, i.e. single-column mode
-# `issue-12`, `tm-12` (the lowercased Linear key), `worktree-issue-12` (claude -w), `issue-12-2` (a second start).
+# `issue-12`, `tm-12` (the lowercased Linear key), `worktree-issue-12` (claude -w), `issue-12-2` (an older copy).
 WORKTREE_NAME = re.compile(r"^(?:worktree-)?(?:issue|tm)-(?P<number>\d+)(?:-\d+)?$", re.IGNORECASE)
 # A terminal title starting with the key, `TM-12 …` or `#12 …`, after any spinner glyph Claude puts first.
 TITLE_KEY = re.compile(r"^[^\w#]*(?:#|tm-)(?P<number>\d+)(?!\w)", re.IGNORECASE)
@@ -217,22 +217,32 @@ class Herdr:
                 found.setdefault(number, []).append(Session(number, wt["path"], wt.get("branch"), wt.get("open_workspace_id")))
         return {number: sorted(sessions, key=lambda s: s.urgency) for number, sessions in found.items()}
 
-    def free_branch(self, cwd: Path, name: str) -> str:
-        """`name`, or `name-2`, `name-3`… when a worktree or local branch already has it."""
-        worktrees = self.worktrees(cwd)
-        taken = {w.get("branch") for w in worktrees} | {Path(w["path"]).name for w in worktrees} | set(local_branches(cwd))
-        return next(n for n in [name, *(f"{name}-{i}" for i in range(2, 100))] if n not in taken and f"worktree-{n}" not in taken)
+    def start_in_new_worktree(self, cwd: Path, name: str, label: str, claude_args: list[str], claude: str = "claude",
+                              focus: bool = True) -> str:
+        """A fresh worktree workspace on branch `name`, with Claude in it; never a `name-2` copy. Returns where it
+        went, for the status line."""
+        result = self.call("worktree", "create", "--cwd", str(cwd), "--branch", name, "--label", label, focus_flag(focus))
+        note = self.start_claude(result["root_pane"]["pane_id"], name, claude, claude_args)
+        return f"new worktree {name}{note}"
 
-    def start_in_new_worktree(self, cwd: Path, name: str, label: str, claude_args: list[str], claude: str = "claude") -> str:
-        """A fresh worktree workspace with Claude in it. Returns where it went, for the status line."""
-        branch = self.free_branch(cwd, name)
-        result = self.call("worktree", "create", "--cwd", str(cwd), "--branch", branch, "--label", label, "--no-focus")
-        note = self.start_claude(result["root_pane"]["pane_id"], branch, claude, claude_args)
-        return f"new worktree {branch}{note}"
+    def continue_in_worktree(self, cwd: Path, worktree: Session, name: str, label: str, claude_args: list[str],
+                             claude: str = "claude", focus: bool = True) -> str:
+        """Claude in a ticket's worktree that has no agent: in its open workspace's first pane, else in the
+        worktree opened as a workspace. Returns where it went, for the status line."""
+        if worktree.workspace:
+            panes = self.call("pane", "list").get("panes", [])
+            pane = next(p["pane_id"] for p in panes if pane_workspace(p) == worktree.workspace)
+            if focus:
+                self.call("workspace", "focus", worktree.workspace)
+        else:
+            pane = self.call("worktree", "open", "--cwd", str(cwd), "--path", worktree.path, "--label", label,
+                             focus_flag(focus))["root_pane"]["pane_id"]
+        note = self.start_claude(pane, name, claude, claude_args)
+        return f"worktree {Path(worktree.path).name}{note}"
 
     def go_to(self, cwd: Path, session: Session, label: str) -> str:
         """Focuses a live session's agent; for a worktree without one, its herdr workspace, opened with a shell
-        when none is open. It never starts or resumes Claude."""
+        when none is open. Going there never starts or resumes Claude."""
         name = Path(session.path).name
         if session.status is not None and session.pane:
             self.call("agent", "focus", session.pane)
@@ -266,9 +276,8 @@ def repo_root(cwd: Path) -> Path:
     return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else cwd.resolve()
 
 
-def local_branches(cwd: Path) -> list[str]:
-    result = subprocess.run(["git", "branch", "--format=%(refname:short)"], cwd=cwd, capture_output=True, text=True)
-    return result.stdout.split() if result.returncode == 0 else []
+def focus_flag(focus: bool) -> str:
+    return "--focus" if focus else "--no-focus"
 
 
 def error_code(stderr: str) -> str | None:

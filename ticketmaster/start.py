@@ -1,4 +1,5 @@
-"""What the board's keys do in herdr: start a ticket's /wayfinder session in a new worktree, or go to its session."""
+"""What the board's keys do in herdr: start or continue a ticket's /wayfinder session in its worktree, or go to
+its session."""
 
 from __future__ import annotations
 
@@ -21,9 +22,9 @@ class NotWayfinderWork(ValueError):
 
 
 def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND) -> str:
-    """Wayfinder claims and resolves map tickets itself, and drives a ticket that has a map (the spec a map
-    led to, and its implementation tickets). Without a map there is nothing to start: a typed wayfinder
-    ticket raises MapNotFound, anything else NotWayfinderWork.
+    """Exactly `<wayfinder_command> <map-url> [<ticket-url>]`: wayfinder claims and resolves a map's decision
+    tickets itself. A typed wayfinder ticket without its map raises MapNotFound; a spec or impl card, or a
+    ticket on no map, NotWayfinderWork.
     """
     if ticket.is_wayfinder_map:
         return f"{wayfinder_command} {ticket.url}"
@@ -31,18 +32,23 @@ def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMM
         return f"{wayfinder_command} {ticket.parent_url} {ticket.url}"
     if ticket.map_missing:
         raise MapNotFound(f"#{ticket.number} {ticket.map_warning}")
-    if ticket.map_url:
-        return f"{wayfinder_command} {ticket.map_url} {ticket.url}"
+    if ticket.card_kind:
+        raise NotWayfinderWork(ticket.not_startable)
     raise NotWayfinderWork(ticket.not_wayfinder_work)
 
 
 def worktree_name(ticket: Ticket) -> str:
-    return f"issue-{ticket.number}"
+    return ticket.slug
 
 
 def session_label(ticket: Ticket) -> str:
     title = re.sub(r"\s+", " ", ticket.title)[:60]
-    return f"#{ticket.number} {title}"
+    return f"{ticket.key} {title}"
+
+
+def takes_focus(ticket: Ticket) -> bool:
+    """HITL tickets and maps pull the developer over; research runs AFK and starts unfocused."""
+    return ticket.wayfinder_type != "research"
 
 
 def claude_args(ticket: Ticket, prompt: str) -> list[str]:
@@ -66,15 +72,23 @@ class Workbench:
     def sessions(self) -> dict[int, list[Session]]:
         return self.herdr.sessions(self.cwd)
 
-    def start(self, ticket: Ticket) -> str:
-        where = self.herdr.start_in_new_worktree(
-            self.cwd, worktree_name(ticket), session_label(ticket),
-            claude_args(ticket, build_prompt(ticket, self.wayfinder_command)), self.claude,
-        )
-        return f"Started #{ticket.number} in {where}"
+    def start(self, ticket: Ticket, worktree: Session | None = None) -> str:
+        """Starts /wayfinder in a new worktree named by the ticket's key, or, given the ticket's worktree
+        without an agent, continues Claude's last conversation there; never a second worktree."""
+        label, focus = session_label(ticket), takes_focus(ticket)
+        if worktree is None:
+            args = claude_args(ticket, build_prompt(ticket, self.wayfinder_command))
+            where = self.herdr.start_in_new_worktree(self.cwd, worktree_name(ticket), label, args, self.claude, focus)
+            message = f"Started {ticket.key} in {where}"
+        else:
+            args = ["-n", label, "--continue"]
+            where = self.herdr.continue_in_worktree(self.cwd, worktree, worktree_name(ticket), label, args,
+                                                    self.claude, focus)
+            message = f"Continued {ticket.key} in {where}"
+        return message if focus else f"{message}, unfocused: research runs AFK"
 
     def go_to(self, ticket: Ticket, session: Session) -> str:
-        return f"#{ticket.number}: " + self.herdr.go_to(self.cwd, session, session_label(ticket))
+        return f"{ticket.key}: " + self.herdr.go_to(self.cwd, session, session_label(ticket))
 
 
 def workbench_for(cwd: Path, config: dict) -> Workbench:

@@ -76,8 +76,8 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 
 | Key            | Column            | Effect                                                              |
 | -------------- | ----------------- | ------------------------------------------------------------------- |
-| `Enter` / double-click | any       | go to the card's most urgent session, else its worktree with a shell; with neither, the status line says so. It never starts or resumes Claude |
-| `s`            | all but Decided   | start `/wayfinder` for the ticket in a **new** worktree (always new; asks first); refused while it is blocked or assigned to someone else, and on a closed map |
+| `Enter` / double-click | any       | go to the card's most urgent session, else its worktree with a shell; with neither, the status line says what `s` would do there or why it refuses. It never starts or resumes Claude |
+| `s`            | all but Decided   | start `/wayfinder` for the ticket in its `issue-<n>` worktree, or continue Claude in it when it has no agent (asks first); refused when closed, blocked, assigned to someone else or live (press `Enter`), and on a spec or impl card |
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | filter, clear both filters, refresh now, quit                       |
 | `f`            | any               | filter picker: labels cycle include → exclude → off, authors on/off (see below; saved per repo) |
@@ -88,25 +88,30 @@ current column, on into the next lane; left and right change column within the l
 
 ## Sessions in herdr
 
-`s` runs `herdr worktree create --branch issue-<n>` (or `issue-<n>-2`, `-3`… when that branch
-already exists, so a start never reuses an old checkout), then starts Claude in the new workspace
-as herdr agent `issue-<n>`:
+`s` runs `herdr worktree create --branch issue-<n>` (`tm-<n>` on Linear), labelled `#<n> <title>`
+(`TM-<n> <title>`), then starts Claude in the new workspace as herdr agent `issue-<n>`:
 
 ```
 claude -n "#<n> <title>" "<prompt>"
 ```
 
-| Ticket                                                        | Prompt                                         |
+| Card                                                          | Prompt                                         |
 | ------------------------------------------------------------- | ---------------------------------------------- |
-| a map (`wayfinder:map`)                                       | never started itself; see below                |
+| a map (`wayfinder:map`)                                       | its first frontier ticket's; with an empty frontier `/mattpocock-skills:wayfinder <map-url>`; see below |
 | has a `wayfinder:<type>` label (`research`, `prototype`, `grilling`, `task`; GitLab's `wayfinder::<type>` too) | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
-| closed (Decided, or a closed map)                             | never started                                  |
+| closed, blocked, assigned to someone else, a live session, a spec or impl card | never started; the status line says why |
 
-`s` on a lane's map card starts the map's first **frontier** ticket: open, unblocked, unassigned, not already started
-from this board or holding a session, in map order (GitHub's sub-issue order, asked for when you
-press `s`; else issue number). That ticket gets its own `issue-<n>` worktree, card and
-`/mattpocock-skills:wayfinder <map-url> <ticket-url>` session, so a second press starts the next
-frontier ticket. With an empty frontier the board says so and starts nothing.
+The skill is `wayfinder_command` in `.ticketmaster.toml`. A start never makes a second worktree:
+when the ticket's worktree exists without an agent, `s` opens it and runs `claude -n "#<n> <title>"
+--continue` there. Maps and HITL tickets (grilling, prototype, task) take focus; research starts
+unfocused, and the status line says so.
+
+`s` on a lane's map card starts the map's first **frontier** ticket: open, unblocked, unassigned, not
+being started from this board and with no live session, in map order (GitHub's sub-issue order,
+asked for when you press `s`; else issue number). That ticket gets its own `issue-<n>` worktree,
+card and `/mattpocock-skills:wayfinder <map-url> <ticket-url>` session, so a second press starts the
+next frontier ticket. With an empty frontier it starts `/mattpocock-skills:wayfinder <map-url>` in
+the map's own worktree, so wayfinder can graduate fog or finish the map.
 
 The board finds the sessions working a ticket, including ones it did not start. A herdr agent works
 ticket `<n>` when its worktree path or branch is `issue-<n>` or `tm-<n>` (optionally `worktree-`

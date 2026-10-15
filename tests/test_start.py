@@ -30,14 +30,22 @@ def test_typed_ticket_without_a_map_is_never_started():
             build_prompt(t)
 
 
-def test_ticket_with_a_map_runs_wayfinder_on_that_map():
+SPEC = ticket(parent_number=680, parent_url="https://gh/680", parent_labels=MAP, map_number=680, map_url="https://gh/680")
+IMPL = ticket(parent_number=690, parent_url="https://gh/690", map_number=680, map_url="https://gh/680")
+
+
+@pytest.mark.parametrize("t, card", [(SPEC, "a spec"), (IMPL, "an impl")])
+def test_a_spec_or_impl_card_never_starts_wayfinder(t, card):
     # The spec (its parent is the map) and a spec's implementation ticket (its parent is the spec).
-    spec = ticket(parent_number=680, parent_url="https://gh/680", parent_labels=MAP,
-                  map_number=680, map_url="https://gh/680")
-    slice_ = ticket(parent_number=690, parent_url="https://gh/690", map_number=680, map_url="https://gh/680")
-    for t in (spec, slice_):
-        assert build_prompt(t) == "/mattpocock-skills:wayfinder https://gh/680 https://gh/686"
-    assert build_prompt(slice_, "/wayfinder") == "/wayfinder https://gh/680 https://gh/686"
+    with pytest.raises(NotWayfinderWork, match=f"#686 is {card} card: s starts /wayfinder only on maps"):
+        build_prompt(t)
+
+
+def test_the_issue_key_names_the_worktree_and_leads_the_label():
+    assert (ticket().key, start.worktree_name(ticket())) == ("#686", "issue-686")
+    linear = ticket(team_key="TM")
+    assert (linear.key, start.worktree_name(linear)) == ("TM-686", "tm-686")
+    assert start.session_label(linear) == "TM-686 Attach a deviation reason"
 
 
 @pytest.mark.parametrize("t", [ticket(), ticket(parent_number=690, parent_url="https://gh/690"),

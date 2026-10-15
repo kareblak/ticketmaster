@@ -55,6 +55,18 @@ class Ticket:
     # The map a spec, or a spec's implementation ticket, leads to; the parent stays the spec for those tickets.
     map_number: int | None = None
     map_url: str | None = None
+    # Linear's team key (`TM`); trackers that number issues per repo leave it empty.
+    team_key: str = ""
+
+    @property
+    def key(self) -> str:
+        """`#12`, or `TM-12` on Linear: what labels and `claude -n` start with."""
+        return f"{self.team_key}-{self.number}" if self.team_key else f"#{self.number}"
+
+    @property
+    def slug(self) -> str:
+        """`issue-12`, or `tm-12` on Linear: the worktree and branch name."""
+        return f"{self.team_key.lower()}-{self.number}" if self.team_key else f"issue-{self.number}"
 
     @property
     def is_blocked(self) -> bool:
@@ -62,6 +74,8 @@ class Ticket:
 
     def start_refusal(self, viewer: str | None) -> str | None:
         """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart."""
+        if not self.is_open:
+            return f"#{self.number} is closed"
         if self.blocked_by:
             return f"#{self.number} is blocked by {', '.join(self.blocked_by)}"
         if self.open_blockers:
@@ -70,7 +84,21 @@ class Ticket:
             return f"#{self.number} is claimed by {', '.join('@' + a for a in self.assignees)}"
         if not (self.is_wayfinder_work or self.map_missing):  # a typed ticket without its map is warned about apart
             return self.not_wayfinder_work
+        if self.card_kind:
+            return self.not_startable
         return None
+
+    @property
+    def card_kind(self) -> str | None:
+        """`spec` for the spec a map led to, `impl` for one of the spec's implementation tickets, else None."""
+        if self.map_url is None or self.is_wayfinder_map or self.is_wayfinder_ticket:
+            return None
+        return "spec" if self.parent_is_map else "impl"
+
+    @property
+    def not_startable(self) -> str:
+        article = "an" if self.card_kind == "impl" else "a"
+        return f"#{self.number} is {article} {self.card_kind} card: s starts /wayfinder only on maps and decision tickets"
 
     @property
     def not_wayfinder_work(self) -> str:

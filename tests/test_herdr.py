@@ -38,7 +38,6 @@ class FakeHerdr:
 
 @pytest.fixture(autouse=True)
 def no_git(monkeypatch):
-    monkeypatch.setattr(herdr, "local_branches", lambda cwd: [])
     monkeypatch.setattr(herdr, "repo_root", lambda cwd: cwd)
 
 
@@ -235,76 +234,122 @@ def test_open_board_from_the_board_pane_itself_leaves_the_pane_alone():
     assert fake.verbs() == [("pane", "list")]
 
 
-def test_start_creates_a_worktree_workspace_with_a_named_agent():
-    fake = FakeHerdr({
-        ("worktree", "list"): worktrees(),
+def decision(kind="grilling", **kw):
+    """A decision ticket of map #680."""
+    base = dict(number=686, title="Attach a  deviation reason", url="https://gh/686", is_open=True,
+                labels=(f"wayfinder:{kind}",), parent_number=680, parent_url="https://gh/680",
+                parent_labels=("wayfinder:map",))
+    return Ticket(**{**base, **kw})
+
+
+def starting(agents=(), trees=(), **answers):
+    return FakeHerdr({
+        ("worktree", "list"): worktrees(*trees),
         ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
-        ("agent", "list"): {"agents": []},
+        ("agent", "list"): {"agents": list(agents)},
+        **{tuple(verb.split()): answer for verb, answer in answers.items()},
     })
+
+
+def claude_argv(fake):
+    start = fake.first("agent", "start")
+    return start[start.index("--", 7) + 1:]
+
+
+def test_start_creates_a_worktree_workspace_named_by_the_issue_key_with_a_named_agent():
+    fake = starting()
     message = bench(fake).start(ticket())
     assert fake.first("worktree", "create") == ["worktree", "create", "--cwd", "/code/shiplog", "--branch", "issue-686",
-                                                "--label", "#686 Attach a deviation reason", "--no-focus"]
+                                                "--label", "#686 Attach a deviation reason", "--focus"]
     start = fake.first("agent", "start")
     assert start[2:7] == ["issue-686", "--kind", "claude", "--pane", "w9:p1"]
-    args = start[start.index("--", 7) + 1:]
-    assert "-w" not in args and args[:2] == ["-n", "#686 Attach a deviation reason"]
+    assert claude_argv(fake) == ["-n", "#686 Attach a deviation reason", "/mattpocock-skills:wayfinder https://gh/686"]
     assert message == "Started #686 in new worktree issue-686 as agent issue-686"
 
 
-def test_start_passes_the_configured_wayfinder_command_to_claude():
-    fake = FakeHerdr({
-        ("worktree", "list"): worktrees(),
-        ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
-        ("agent", "list"): {"agents": []},
-    })
+def test_a_linear_issue_is_keyed_tm_n_and_labelled_with_its_team_key():
+    fake = starting()
+    message = bench(fake).start(decision(number=21, team_key="TM"))
+    create = fake.first("worktree", "create")
+    assert create[create.index("--branch") + 1] == "tm-21"
+    assert create[create.index("--label") + 1] == "TM-21 Attach a deviation reason"
+    assert claude_argv(fake)[:2] == ["-n", "TM-21 Attach a deviation reason"]
+    assert message.startswith("Started TM-21 in new worktree tm-21")
+
+
+def test_the_prompt_is_exactly_the_command_the_map_url_and_the_ticket_url():
+    fake = starting()
+    bench(fake, wayfinder_command="/wayfinder").start(decision())
+    assert claude_argv(fake)[-1] == "/wayfinder https://gh/680 https://gh/686"
+    fake = starting()
     bench(fake, wayfinder_command="/wayfinder").start(ticket())
-    assert fake.first("agent", "start")[-1] == "/wayfinder https://gh/686"
+    assert claude_argv(fake)[-1] == "/wayfinder https://gh/686"
 
 
-def test_start_always_makes_a_new_worktree_even_when_one_exists(monkeypatch):
-    monkeypatch.setattr(herdr, "local_branches", lambda cwd: ["main", "issue-686-2"])
-    old = {"path": "/code/shiplog/.claude/worktrees/issue-686", "branch": "worktree-issue-686", "is_linked_worktree": True}
-    fake = FakeHerdr({
-        ("worktree", "list"): worktrees(old),
-        ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
-        ("agent", "list"): {"agents": []},
-    })
+@pytest.mark.parametrize("kind", ["grilling", "prototype", "task"])
+def test_hitl_tickets_take_focus(kind):
+    fake = starting()
+    message = bench(fake).start(decision(kind))
+    assert fake.first("worktree", "create")[-1] == "--focus" and "unfocused" not in message
+
+
+def test_research_starts_unfocused_and_the_message_names_it():
+    fake = starting()
+    message = bench(fake).start(decision("research"))
+    assert fake.first("worktree", "create")[-1] == "--no-focus"
+    assert message == "Started #686 in new worktree issue-686 as agent issue-686, unfocused: research runs AFK"
+
+
+def test_start_never_creates_a_suffixed_worktree_or_branch():
+    fake = starting(trees=[tree("/code/shiplog/.claude/worktrees/issue-686-2")])
     bench(fake).start(ticket())
-    assert ("worktree", "open") not in fake.verbs()
-    assert fake.first("worktree", "create")[5] == "issue-686-3"  # issue-686 and issue-686-2 are taken
+    create = fake.first("worktree", "create")
+    assert create[create.index("--branch") + 1] == "issue-686"
+
+
+def test_an_agentless_worktree_is_reopened_and_claude_continues_there():
+    fake = starting(**{"worktree open": {"root_pane": {"pane_id": "wD:p1"}}})
+    message = bench(fake).start(decision(), Session(686, "/w/issue-686", "issue-686"))
+    assert ("worktree", "create") not in fake.verbs()
+    assert fake.first("worktree", "open") == ["worktree", "open", "--cwd", "/code/shiplog", "--path", "/w/issue-686",
+                                              "--label", "#686 Attach a deviation reason", "--focus"]
+    assert fake.first("agent", "start")[2:7] == ["issue-686", "--kind", "claude", "--pane", "wD:p1"]
+    assert claude_argv(fake) == ["-n", "#686 Attach a deviation reason", "--continue"]
+    assert message == "Continued #686 in worktree issue-686 as agent issue-686"
+
+
+def test_an_agentless_worktree_open_in_a_workspace_continues_in_its_pane():
+    fake = starting(**{"pane list": {"panes": [pane("wX:p1"), pane("wA:p2"), pane("wA:p3")]}})
+    message = bench(fake).start(decision("research"), Session(686, "/w/issue-686", workspace="wA"))
+    assert ("worktree", "open") not in fake.verbs() and ("workspace", "focus") not in fake.verbs()
+    assert fake.first("agent", "start")[6] == "wA:p2"
+    assert claude_argv(fake)[-1] == "--continue"
+    assert message.endswith(", unfocused: research runs AFK")
+
+
+def test_continuing_a_hitl_ticket_in_an_open_workspace_focuses_it():
+    fake = starting(**{"pane list": {"panes": [pane("wA:p2")]}})
+    bench(fake).start(decision(), Session(686, "/w/issue-686", workspace="wA"))
+    assert ["workspace", "focus", "wA"] in fake.calls
 
 
 def test_a_taken_agent_name_gets_a_suffix():
-    fake = FakeHerdr({
-        ("worktree", "list"): worktrees(),
-        ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
-        ("agent", "list"): {"agents": [{"name": "issue-686"}]},
-    })
+    fake = starting(agents=[{"name": "issue-686"}])
     assert bench(fake).start(ticket()) == "Started #686 in new worktree issue-686 as agent issue-686-2"
 
 
 def test_startup_prompt_is_reported_not_failed():
-    fake = FakeHerdr({
-        ("worktree", "list"): worktrees(),
-        ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
-        ("agent", "list"): {"agents": []},
-        ("agent", "start"): HerdrError("agent_not_ready"),
-    })
+    fake = starting(**{"agent start": HerdrError("agent_not_ready")})
     assert bench(fake).start(ticket()).endswith("(waiting at a startup prompt)")
 
 
 def test_readiness_timeout_is_reported_not_failed():
-    fake = FakeHerdr({
-        ("worktree", "list"): worktrees(),
-        ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}},
-        ("agent", "list"): {"agents": []},
-        ("agent", "start"): HerdrError("timeout"),
-    })
+    fake = starting(**{"agent start": HerdrError("timeout")})
     assert bench(fake).start(ticket()).endswith("(still starting)")
 
 
 def test_custom_claude_binary_runs_as_a_plain_command():
-    fake = FakeHerdr({("worktree", "list"): worktrees(), ("worktree", "create"): {"root_pane": {"pane_id": "w9:p1"}}})
+    fake = starting()
     bench(fake, claude="/opt/my-claude").start(ticket())
     assert fake.calls[-1][:3] == ["pane", "run", "w9:p1"] and fake.calls[-1][3].startswith("/opt/my-claude -n")
 
