@@ -7,12 +7,12 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from http import HTTPStatus
 from typing import Literal, Protocol
 
-from ..model import (WAYFINDER_TYPES, Ticket, has_spec_signature, has_ticket_signature, lane_tickets, parent_ref,
-                     parent_refs, parse_blockers, part_of, wayfinder_kinds)
+from ..model import (RECENTLY_CLOSED, WAYFINDER_TYPES, Ticket, has_spec_signature, has_ticket_signature, lane_tickets,
+                     parent_ref, parent_refs, parse_blockers, part_of, wayfinder_kinds)
 
 TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo", "linear": "Linear"}
 
@@ -173,12 +173,10 @@ def closed_map_refs(candidates: list[Ticket], shown: set[int], key: str | None =
 
 
 # What a fetch cut off at the limit, as the board's status line names it: the open maps, the signature search's
-# hits, or a map's or spec's tickets.
+# hits, a map's or spec's tickets, or the loose tickets.
 OPEN_MAPS = "open maps"
 SIGNATURE_HITS = "specs and tickets"
-
-# How long a closed spec or ticket stays a signature search hit.
-RECENTLY_CLOSED = timedelta(days=7)
+LOOSE_TICKETS = "loose tickets"
 
 
 def is_signature_hit(ticket: Ticket, since: datetime) -> bool:
@@ -205,6 +203,15 @@ def is_spec_ticket(ticket: Ticket, spec: int | None) -> bool:
 def in_spec_lane(tickets: list[Ticket], spec: Ticket) -> list[Ticket]:
     """The standalone spec is each ticket's parent, and their lane's."""
     return [replace(with_map(t, spec), lane_spec=spec.number) for t in tickets]
+
+
+def spec_lane(spec: Ticket, family: list[Ticket], limit: int, cut: list[str], more: bool = False) -> list[Ticket]:
+    """The standalone spec, then the first `limit` of its tickets in `family`, `order` that position. A spec with
+    more, or `more` past `family`, goes on `cut`."""
+    if more or len(family) > limit:
+        cut.append(lane_cut(spec))
+    family = [replace(t, order=index) for index, t in enumerate(in_spec_lane(family[:limit], spec))]
+    return with_spec_tickets([spec, *family])
 
 
 # A signature search for one signature: the open issues it finds when `closed_since` is None, else those closed since
@@ -242,9 +249,8 @@ def standalone_specs(hits: list[Ticket], board: list[Ticket], lookup: IssueLooku
 
 def spec_lanes(specs: list[Ticket], candidates: list[Ticket], taken: set[int], limit: int,
                cut: list[str]) -> list[Ticket]:
-    """For trackers without sub-issues: each standalone spec not `taken`, then the candidates whose `## Parent`
-    section names it, by number; their order is that position. The first `limit` of them; a spec with more goes on
-    `cut`."""
+    """For trackers without sub-issues: each standalone spec not `taken` as a `spec_lane`, its family the candidates
+    whose `## Parent` section names it, by number."""
     lanes: list[Ticket] = []
     taken = set(taken)
     for spec in specs:
@@ -252,8 +258,7 @@ def spec_lanes(specs: list[Ticket], candidates: list[Ticket], taken: set[int], l
             continue
         family = {t.number: t for t in candidates if t.number not in taken | {spec.number}
                   and is_spec_ticket(t, spec.number)}
-        tickets = in_spec_lane(capped(sorted(family.values(), key=lambda t: t.number), limit, lane_cut(spec), cut), spec)
-        lane = with_spec_tickets([spec, *(replace(t, order=index) for index, t in enumerate(tickets))])
+        lane = spec_lane(spec, sorted(family.values(), key=lambda t: t.number), limit, cut)
         taken |= {t.number for t in lane}
         lanes += lane
     return lanes

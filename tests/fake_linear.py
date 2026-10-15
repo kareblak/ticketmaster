@@ -13,6 +13,7 @@ executes it against a small schema (the slice of Linear's the provider reads), s
 """
 import itertools
 import re
+from datetime import datetime, timedelta, timezone
 
 DEFAULT_STATES = (("Backlog", "backlog"), ("Todo", "unstarted"), ("In Progress", "started"),
                   ("Done", "completed"), ("Canceled", "canceled"), ("Duplicate", "duplicate"))
@@ -213,6 +214,16 @@ def type_ok(value, ref):
     raise GraphQLError(f"unknown type {name}")
 
 
+_DURATION = re.compile(r"-P(\d+)D")
+
+
+def moment(value):
+    """A DateTime filter value: an ISO 8601 time, or a duration back from now as Linear takes it (`-P7D`)."""
+    if m := _DURATION.fullmatch(value):
+        return datetime.now(timezone.utc) - timedelta(days=int(m.group(1)))
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 # ---------- the fake workspace ----------
 
 class FakeLinear:
@@ -244,8 +255,9 @@ class FakeLinear:
         return self.users[user["id"]]
 
     def add_issue(self, title, description="", parent=None, labels=(), state="Backlog", assignee=None,
-                  delegate=None, sort_order=None, team="TM"):
-        """An issue made in Linear by hand; `parent` is the parent issue, `assignee` a display name."""
+                  delegate=None, sort_order=None, team="TM", closed_at=None):
+        """An issue made in Linear by hand; `parent` is the parent issue, `assignee` a display name, `closed_at`
+        when a closed one closed (default 2026-10-15 09:00 UTC)."""
         team = self.team(team)
         team["counter"] += 1
         number = team["counter"]
@@ -257,9 +269,10 @@ class FakeLinear:
                  "delegateId": self.add_user(delegate.title(), delegate)["id"] if delegate else None,
                  "creatorId": self.viewer["id"],
                  "subIssueSortOrder": sort_order if sort_order is not None else (float(number) if parent else None),
-                 "createdAt": f"2026-10-14T10:{number:02d}:00.000Z",
-                 "completedAt": "2026-10-15T09:00:00.000Z" if state == "Done" else None,
-                 "canceledAt": "2026-10-15T09:00:00.000Z" if state in ("Canceled", "Duplicate") else None}
+                 "createdAt": f"2026-10-14T10:{number:02d}:00.000Z"}
+        closed = closed_at.isoformat().replace("+00:00", "Z") if closed_at else "2026-10-15T09:00:00.000Z"
+        issue["completedAt"] = closed if state == "Done" else None
+        issue["canceledAt"] = closed if state in ("Canceled", "Duplicate") else None
         self.issues[issue["id"]] = issue
         return issue
 
@@ -400,7 +413,8 @@ class FakeLinear:
 
     COMPARATORS = {"eq": lambda a, b: a == b, "in": lambda a, b: a in b, "nin": lambda a, b: a not in b,
                    "contains": lambda a, b: a is not None and b in a,
-                   "startsWith": lambda a, b: a is not None and a.startswith(b)}
+                   "startsWith": lambda a, b: a is not None and a.startswith(b),
+                   "gt": lambda a, b: a is not None and moment(a) > moment(b)}
 
     def _compare(self, cond, actual):
         unknown = sorted(set(cond) - set(self.COMPARATORS))
@@ -409,13 +423,20 @@ class FakeLinear:
         return all(self.COMPARATORS[op](actual, value) for op, value in cond.items())
 
     def _matches(self, issue, filt):
-        known = {"team", "number", "labels", "state", "description", "parent", "or"}
+        known = {"team", "number", "labels", "state", "description", "parent", "completedAt", "canceledAt", "or",
+                 "and"}
         unknown = sorted(set(filt) - known)
         if unknown:
             raise GraphQLError(f"unknown filter field(s) {', '.join(unknown)}")
         for key, cond in filt.items():
             if key == "or":
                 if not any(self._matches(issue, f) for f in cond):
+                    return False
+            elif key == "and":
+                if not all(self._matches(issue, f) for f in cond):
+                    return False
+            elif key in ("completedAt", "canceledAt"):
+                if not self._compare(cond, issue[key]):
                     return False
             elif key == "team":
                 if not self._compare(cond["key"], self._team(issue)["key"]):
