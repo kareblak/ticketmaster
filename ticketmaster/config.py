@@ -22,6 +22,8 @@ KNOWN_HOSTS = {"github.com": "github", "gitlab.com": "gitlab", "codeberg.org": "
 CONFIG_FILE = ".ticketmaster.toml"
 # Seconds between refreshes. Linear's key allows 2,500 requests an hour, shared by everything using the key's user.
 DEFAULT_INTERVAL = {"linear": 30.0}
+# GraphQL points an hour a GitHub board aims to spend of the token's 5,000, leaving the rest to agents' `gh` calls.
+DEFAULT_BUDGET = 1000.0
 
 
 @dataclass(frozen=True)
@@ -82,13 +84,22 @@ def default_interval(kind: str) -> float:
 
 def parse_interval(text: str) -> float:
     """Refresh seconds typed in the settings menu: any positive number, no floor; ValueError says what is wrong."""
+    return parse_positive(text, "seconds")
+
+
+def parse_budget(text: str) -> float:
+    """GitHub points an hour typed in the settings menu: any positive number; ValueError says what is wrong."""
+    return parse_positive(text, "points")
+
+
+def parse_positive(text: str, unit: str) -> float:
     try:
-        seconds = float(text)
+        number = float(text)
     except ValueError:
         raise ValueError(f"not a number: {text.strip()!r}") from None
-    if not math.isfinite(seconds) or seconds <= 0:
-        raise ValueError(f"must be a positive number of seconds: {text.strip()!r}")
-    return seconds
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"must be a positive number of {unit}: {text.strip()!r}")
+    return number
 
 
 def seconds_text(seconds: float) -> str:
@@ -108,6 +119,18 @@ def board_interval(flag: float | None, saved: dict, kind: str) -> float:
         except ValueError:
             pass
     return default_interval(kind)
+
+
+def board_budget(saved: dict) -> float:
+    """The repo's saved GitHub budget in points an hour (`saved` is its `repos` entry), else 1,000. A saved value
+    that is no positive number is ignored."""
+    value = saved.get("budget")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return parse_budget(str(value))
+        except ValueError:
+            pass
+    return DEFAULT_BUDGET
 
 
 def git_remote(cwd: Path, name: str) -> str:
