@@ -73,7 +73,8 @@ Issues that are not wayfinder work are not shown. `map` (`42`, `#42`, the issue'
 key like `TM-1` or a Linear issue URL) opens the full board with the [map filter](#filters) preset to
 that map, for this run only; `Esc` clears it and shows every open map. A key matches the map card
 whose tracker key it is, never issue number 1; a key no map carries shows an empty board. A closed map
-shows only when you name it by number or URL, or on Linear by its team's key, as its header card alone.
+whose spec is still open stays on the board in full. Any other closed map shows only when you name it by
+number or URL, or on Linear by its team's key, as its header card alone.
 
 The board refreshes every 5 s, every 30 s on Linear; `--interval` sets another.
 
@@ -205,7 +206,9 @@ implement_command = "/implement"          # default /mattpocock-skills:implement
 
 Each open `wayfinder:map` is a lane, ordered by issue number. Its header is the map card: the map's
 title and its counts, **decided** (closed tickets, less those out of scope), **open** and
-**blocked**. A closed map shows only when named (`ticketmaster <map>`), shrunk to its header card.
+**blocked**. A closed map keeps its full lane while any of its spec or implementation tickets is
+open, since the decisions are made but the work goes on. Otherwise it shows only when named
+(`ticketmaster <map>`), shrunk to its header card.
 The lane holds the map's decision tickets (`wayfinder:research`, `prototype`, `grilling` or `task`),
 then its spec and the spec's implementation tickets, each in the first column whose rule matches.
 The map card's counts are of its decision tickets only.
@@ -279,7 +282,7 @@ refuses and names both options. The key goes bare in `Authorization`, the token 
 | --------------- | ---------------------------------------- | ------------------------- | ----------------------------------- |
 | GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | a search for open `wayfinder:map` issues, then per map its sub-issues in order and the typed tickets and spec whose `Part of #<map>` line names it, then the spec's sub-issues and the issues whose `## Parent` names it |
 | GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | the project's `wayfinder:` labels (`wayfinder:map` or `wayfinder::map`, and the four types), one query per label; a typed ticket joins the map its `Part of #<map>` line names; a description search for `Part of` and `Parent` finds the specs and their implementation tickets |
-| Gitea / Forgejo | REST with the `tea` login token, or `GITEA_TOKEN` / `FORGEJO_TOKEN` | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names; an issue search (`q`) for `Part of` and `Parent` finds the specs and their implementation tickets |
+| Gitea / Forgejo | REST through `tea api`, with the `tea` login (token or OAuth) whose URL matches the repo host | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names; an issue search (`q`) for `Part of` and `Parent` finds the specs and their implementation tickets |
 | Linear          | GraphQL with the API key (`Authorization: <key>`) or the `login` token (`Bearer`) | `blocks` relations (`inverseRelations`) | the team's open `wayfinder:map` issues, then per map its sub-issues in sub-issue order; one description search for `Part of` and `Parent` finds the typed tickets and spec linked by `Part of`, and the spec's sub-issues and `## Parent` tickets |
 
 On Linear only the workflow state's type counts, never its team-renamable name: `completed` is

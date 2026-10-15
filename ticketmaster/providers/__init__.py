@@ -97,7 +97,8 @@ def error_notice(tracker: str, error: ProviderError) -> ErrorNotice:
 
 @dataclass(frozen=True)
 class Query:
-    """What a board shows: every open wayfinder map with its tickets, plus `named_map` when that map is closed."""
+    """What a board shows: every open wayfinder map with its tickets, every closed map with an open spec, plus
+    `named_map` when that map is closed."""
 
     named_map: int | None = None
 
@@ -144,6 +145,14 @@ def with_specs(tickets: list[Ticket], candidates: list[Ticket]) -> list[Ticket]:
     specs = {n: t for n, t in plain.items() if part_of(t.body) in maps}
     impls = [t for n, t in plain.items() if n not in specs and parent_ref(t.body) in specs]
     return [*tickets, *specs.values(), *impls]
+
+
+def closed_map_refs(candidates: list[Ticket], shown: set[int], key: str | None = None) -> list[int]:
+    """The maps named by an open, untyped candidate's `Part of` line (an open spec) that are not `shown`: closed
+    maps whose spec is still being worked, which the board shows too. The caller checks each one is a map."""
+    refs = {n for t in candidates if t.is_open and not wayfinder_kinds(t.labels)
+            and (n := part_of(t.body, key)) is not None and n != t.number}
+    return sorted(refs - shown)
 
 
 class Provider(Protocol):

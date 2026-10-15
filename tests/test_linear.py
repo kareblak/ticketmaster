@@ -7,7 +7,7 @@ from email.message import Message
 import pytest
 
 from fake_linear import FakeLinear
-from ticketmaster.model import build_board
+from ticketmaster.model import Column, build_board
 from ticketmaster.providers import ProviderError, Query, RateLimited
 from ticketmaster.providers import linear
 from ticketmaster.providers.linear import LinearHTTP, LinearProvider
@@ -132,7 +132,22 @@ def test_a_named_closed_map_is_added_and_a_named_issue_that_is_no_map_is_not():
     assert board(fake) == {}
     assert set(board(fake, named_map=closed["number"])) == {closed["number"], child["number"]}
     assert board(fake, named_map=plain["number"]) == {}
-    assert "TicketmasterLinked" not in fake.ops()[:3]  # no map, no search for its specs
+
+
+def test_a_closed_map_whose_spec_is_still_open_is_shown_in_full():
+    fake = FakeLinear()
+    closed = fake.add_issue("Map", labels=["wayfinder:map"], state="Done")
+    decided = fake.add_issue("Asked", parent=closed, labels=["wayfinder:grilling"], state="Done")
+    spec = fake.add_issue("Spec", description=f"Part of [TM-{closed['number']}](https://linear.app/w/issue/TM-"
+                                              f"{closed['number']}/map)\n\n## Problem")
+    impl = fake.add_issue("Build it", parent=spec)
+    fake.add_issue("Stray", description="Part of TM-404")  # names no issue: brings no map in
+
+    tickets = LinearProvider("TM", transport=fake).fetch(Query())
+    lane = build_board(tickets).lanes[0]
+    assert lane.map.number == closed["number"] and not lane.collapsed
+    assert [t.number for t in lane.columns[Column.DECIDED]] == [decided["number"]]
+    assert [t.number for t in lane.columns[Column.FRONTIER]] == [spec["number"], impl["number"]]
 
 
 def test_the_viewer_is_the_keys_display_name():

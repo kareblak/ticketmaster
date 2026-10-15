@@ -45,4 +45,6 @@ fi
 
 # A herdr board pane does not have plugin bin/ on PATH or the plugin's env, so `open` launches it with these.
 export CLAUDE_PLUGIN_DATA="$data" TICKETMASTER_WRAPPER="$self"
-exec "$venv/bin/python" -m ticketmaster "$@"
+# -P keeps the current directory off sys.path, so a board opened in a checkout of this repo runs the venv's package,
+# not the checkout's ticketmaster/ at whatever commit it is on.
+exec "$venv/bin/python" -P -m ticketmaster "$@"

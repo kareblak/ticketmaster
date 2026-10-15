@@ -1,14 +1,13 @@
-import io
 import json
-import urllib.error
+import subprocess
 from datetime import datetime, timezone
+from http import HTTPStatus
 
 import pytest
 
 from ticketmaster import providers
 from ticketmaster.providers import ProviderError, Query, RateLimited, github, gitlab, gitea
 from ticketmaster.model import Ticket
-from ticketmaster.providers.gitea import token_from_tea_config
 
 
 def test_github_node_to_ticket():
@@ -58,15 +57,16 @@ def page(nodes):
     return {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}
 
 
-def github_board(monkeypatch, maps, subs=None, refs=None, named=None):
-    """Fakes `gh api graphql`: the map search, each issue's sub-issues and cross-references, a named issue."""
+def github_board(monkeypatch, maps, subs=None, refs=None, named=None, specs=()):
+    """Fakes `gh api graphql`: the map search, the open `Part of` search (`specs`), each issue's sub-issues and
+    cross-references, a named issue (one issue, or a dict of them by number)."""
     asked = []
 
     def fake_run_json(args, stdin=None):
         variables = json.loads(stdin)["variables"]
         if "q" in variables:
             asked.append(("search", variables["q"]))
-            return {"data": {"search": page(maps)}}
+            return {"data": {"search": page(list(specs) if '"Part of"' in variables["q"] else maps)}}
         if "withSubs" in variables:
             number = variables["number"]
             asked.append(("children", number))
@@ -75,9 +75,10 @@ def github_board(monkeypatch, maps, subs=None, refs=None, named=None):
                      "timelineItems": page([{"source": s} for s in (refs or {}).get(number, [])])}
             return {"data": {"repository": {"issue": issue}}}
         asked.append(("issue", variables["number"]))
-        if named is None:
+        found = named.get(variables["number"]) if named and "number" not in named else named
+        if found is None:
             return {"errors": [{"type": "NOT_FOUND", "message": "Could not resolve"}]}
-        return {"data": {"repository": {"issue": named}}}
+        return {"data": {"repository": {"issue": found}}}
 
     monkeypatch.setattr(github, "run_json", fake_run_json)
     return asked
@@ -100,7 +101,8 @@ def test_github_fetches_every_open_map_with_its_children_in_map_order(monkeypatc
                 gh_issue(5, ["wayfinder:grilling"], parent=1)]}
     asked = github_board(monkeypatch, maps, subs, refs)
     tickets = github.GitHubProvider("o/r").fetch(Query())
-    assert asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'), ("children", 1), ("children", 20)]
+    assert asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
+                     ("search", 'repo:o/r is:issue is:open in:body "Part of"'), ("children", 1), ("children", 20)]
     assert [(t.number, t.order) for t in tickets] == [(1, 0), (20, 0), (5, 0), (3, 1), (4, 2), (21, 0)]
     assert lanes(tickets) == {1: {"FRONTIER": [5, 4], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
 
@@ -204,7 +206,7 @@ def test_gitea_keeps_an_open_maps_tickets_behind_many_of_another_maps(monkeypatc
     crowd = [gt_issue(1000 + n, ["wayfinder:task"], "Part of #30", "closed") for n in range(350)]
     gitea_board(monkeypatch, ["wayfinder:map", "wayfinder:task"], None,
                 [gt_issue(1, ["wayfinder:map"]), *crowd, gt_issue(5, ["wayfinder:task"], "Part of #1")])
-    assert [t.number for t in gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())] == [1, 5]
+    assert [t.number for t in gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query())] == [1, 5]
 
 
 def test_gitlab_adds_a_named_closed_map_with_its_children(monkeypatch):
@@ -271,11 +273,23 @@ GITEA_ISSUES = [
 ]
 
 
+def test_github_shows_a_closed_map_whose_spec_is_still_open(monkeypatch):
+    closed_map = gh_issue(1, MAP_LABELS, state="CLOSED")
+    spec = gh_issue(14, [], "Part of #1")
+    subs = {1: [gh_issue(2, ["wayfinder:grilling"], parent=1, state="CLOSED")], 14: [gh_issue(15, [], parent=14)]}
+    # #7 is an open spec too, but #9 is no map, so it brings nothing in.
+    asked = github_board(monkeypatch, [], subs, {1: [spec]}, named={1: closed_map, 9: gh_issue(9, ["bug"])},
+                         specs=[spec, gh_issue(7, [], "Part of #9")])
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert ("issue", 1) in asked and ("issue", 9) in asked
+    assert lanes(tickets) == {1: {"FRONTIER": [14, 15], "DECIDED": [2]}}
+
+
 def test_gitea_fetches_every_open_map_with_its_children_by_their_part_of_line(monkeypatch):
     # Gitea drops an unknown label filter and lists every issue, so only labels that exist are asked for.
     asked = gitea_board(monkeypatch, ["wayfinder:map", "wayfinder:research", "bug"], ["wayfinder:task"], GITEA_ISSUES,
                         dependencies={5: [{"number": 2, "state": "open", "repository": {"full_name": "o/r"}}]})
-    tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+    tickets = gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query())
     assert asked == [("open", "wayfinder:map"), ("all", "wayfinder:research"), ("all", "wayfinder:task"),
                      ("search", "Part of"), ("search", "Parent")]
     assert [t.number for t in tickets] == [1, 20, 5, 3, 2, 21, 40]
@@ -285,17 +299,51 @@ def test_gitea_fetches_every_open_map_with_its_children_by_their_part_of_line(mo
 
 def test_gitea_adds_a_named_closed_map_without_org_labels(monkeypatch):
     asked = gitea_board(monkeypatch, ["wayfinder:map", "wayfinder:task"], None, GITEA_ISSUES)
-    tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query(named_map=30))
+    tickets = gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query(named_map=30))
     assert ("issue", 30) in asked and {30, 31} <= {t.number for t in tickets}
     asked = gitea_board(monkeypatch, ["bug"], None, GITEA_ISSUES)
-    assert gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query()) == []
+    assert gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query()) == []
     assert asked == []  # no wayfinder labels: no issue listed
 
 
-def test_tea_config_token_lookup():
-    text = "logins:\n  - name: cb\n    url: https://codeberg.org\n    token: abc\n  - url: https://other.io\n    token: zzz\n"
-    assert token_from_tea_config(text, "codeberg.org") == "abc"
-    assert token_from_tea_config(text, "missing.io") is None
+def fake_tea(monkeypatch, answer, logins=()):
+    """Fakes the `tea` CLI: `tea logins list -o json` prints `logins`, and `tea api -i <endpoint>` prints the
+    (status, body[, headers]) that `answer(endpoint)` gives, with the status line and headers on stderr."""
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(args)
+        if args[:3] == ["tea", "logins", "list"]:
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(list(logins)), stderr="")
+        status, body, *headers = answer(args[-1])
+        head = "".join(f"{k}: {v}\n" for k, v in (headers[0] if headers else {}).items())
+        stderr = f"NOTE: a tea notice\nHTTP/2.0 {status} {HTTPStatus(status).phrase}\n{head}\n"
+        return subprocess.CompletedProcess(args, 0, stdout=body, stderr=stderr)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    return calls
+
+
+def test_gitea_uses_the_tea_login_for_the_repo_host(monkeypatch):
+    logins = [{"name": "other", "url": "https://other.io"}, {"name": "cb", "url": "https://codeberg.org"}]
+    calls = fake_tea(monkeypatch, lambda endpoint: (200, '{"login": "me"}'), logins)
+    assert gitea.GiteaProvider("o/r", "codeberg.org").viewer() == "me"
+    assert calls[-1] == ["tea", "api", "--login", "cb", "-i", "/user"]
+
+
+def test_gitea_without_a_tea_login_for_the_host_says_how_to_add_one(monkeypatch):
+    fake_tea(monkeypatch, lambda endpoint: (200, "{}"), [{"name": "other", "url": "https://other.io"}])
+    with pytest.raises(ProviderError, match="tea logins add --url https://codeberg.org"):
+        gitea.GiteaProvider("o/r", "codeberg.org").viewer()
+
+
+def test_gitea_tea_failing_before_any_http_call_is_a_provider_error(monkeypatch):
+    def run(args, **kwargs):
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="Error: login 'x' not found")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(ProviderError, match="login 'x' not found"):
+        gitea.GiteaProvider("o/r", "codeberg.org", login="x").viewer()
 
 
 def test_a_parent_section_names_whole_issue_numbers_only():
@@ -337,17 +385,10 @@ def test_graphql_rate_limit_errors_are_rate_limited(monkeypatch, module, path):
         provider.fetch(Query())
 
 
-def http_error(code, reason):
-    return urllib.error.HTTPError("https://codeberg.org/api/v1/x", code, reason, {}, io.BytesIO(b""))
-
-
 def test_gitea_http_429_is_rate_limited(monkeypatch):
-    def urlopen(request, timeout=None):
-        raise http_error(429, "Too Many Requests")
-
-    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    fake_tea(monkeypatch, lambda endpoint: (429, ""))
     with pytest.raises(RateLimited):
-        gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+        gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query())
 
 
 def test_gitea_rate_limit_on_dependencies_is_not_swallowed(monkeypatch):
@@ -361,16 +402,13 @@ def test_gitea_rate_limit_on_dependencies_is_not_swallowed(monkeypatch):
 
     monkeypatch.setattr(gitea.GiteaProvider, "_get", limited)
     with pytest.raises(RateLimited):
-        gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+        gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query())
 
 
 def test_gitea_other_http_errors_are_not_rate_limited(monkeypatch):
-    def urlopen(request, timeout=None):
-        raise http_error(404, "Not Found")
-
-    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    fake_tea(monkeypatch, lambda endpoint: (404, '{"message": "not found"}'))
     with pytest.raises(ProviderError) as raised:
-        gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+        gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query())
     assert not isinstance(raised.value, RateLimited)
 
 
@@ -502,7 +540,7 @@ def test_gitea_native_and_body_blockers(monkeypatch):
         return []
 
     monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
-    provider = gitea.GiteaProvider("o/r", "codeberg.org", token="x")
+    provider = gitea.GiteaProvider("o/r", "codeberg.org", login="x")
     [t] = provider.fetch(Query())
     assert (t.blocked_by, t.open_blockers) == (("#2", "x/y#3", "#5"), 3)
     assert provider.viewer() == "gt"
@@ -516,7 +554,7 @@ def test_gitea_blocker_lookup_failure_is_not_taken_for_closed(monkeypatch):
 
     monkeypatch.setattr(gitea.GiteaProvider, "_get", fake_get)
     with pytest.raises(ProviderError):
-        gitea.GiteaProvider("o/r", "codeberg.org", token="x")._issue_states([5])
+        gitea.GiteaProvider("o/r", "codeberg.org", login="x")._issue_states([5])
 
 
 MAP_LABELS = ("wayfinder:map",)
@@ -576,11 +614,8 @@ def test_github_missing_map_issue_is_no_map_but_other_errors_surface(monkeypatch
 
 
 def test_gitea_missing_map_issue_is_no_map_but_other_errors_surface(monkeypatch):
-    def urlopen(request, timeout=None):
-        raise http_error(404 if request.full_url.endswith("/9") else 500, "x")
-
-    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
-    provider = gitea.GiteaProvider("o/r", "codeberg.org", token="x")
+    fake_tea(monkeypatch, lambda endpoint: (404 if endpoint.endswith("/9") else 500, ""))
+    provider = gitea.GiteaProvider("o/r", "codeberg.org", login="x")
     assert provider._issue(9) is None
     with pytest.raises(ProviderError):
         provider._issue(8)
@@ -594,30 +629,15 @@ def test_github_not_planned_close_reason_is_read():
     assert "stateReason" in github.ISSUE_FIELDS
 
 
-class FakeResponse(io.BytesIO):
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def test_gitea_only_sends_gets_with_the_token(monkeypatch):
-    requests = []
-
-    def urlopen(request, timeout=None):
-        requests.append(request)
-        return FakeResponse(b'{"login": "me"}')
-
-    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
-    assert gitea.GiteaProvider("o/r", "codeberg.org", token="x").viewer() == "me"
-    [request] = requests
-    assert (request.get_method(), request.full_url, request.data) == ("GET", "https://codeberg.org/api/v1/user", None)
-    assert request.get_header("Authorization") == "token x"
+def test_gitea_only_sends_gets_through_tea(monkeypatch):
+    calls = fake_tea(monkeypatch, lambda endpoint: (200, "[]"))
+    gitea.GiteaProvider("o/r", "codeberg.org", login="x")._get("/repos/o/r/issues", {"state": "open", "page": 2})
+    # No -X, -f, -F or -d: `tea api` sends a GET.
+    assert calls == [["tea", "api", "--login", "x", "-i", "/repos/o/r/issues?state=open&page=2"]]
 
 
 @pytest.mark.parametrize("provider", [github.GitHubProvider("o/r"), gitlab.GitLabProvider("g/p"),
-                                      gitea.GiteaProvider("o/r", "codeberg.org", token="x")])
+                                      gitea.GiteaProvider("o/r", "codeberg.org", login="x")])
 def test_no_provider_can_write(provider):
     assert not any(hasattr(provider, write) for write in ("close", "delete"))
 
@@ -777,17 +797,27 @@ def test_gitea_reads_each_maps_spec_and_its_implementation_tickets_with_no_sub_i
     issues = [gt_issue(n, family_labels(n), FAMILY[n][1]) for n in FAMILY]
     gitea_board(monkeypatch, ["wayfinder:map", "wayfinder:grilling"], None, issues,
                 dependencies={5: [{"number": 2, "state": "open", "repository": {"full_name": "o/r"}}]})
-    tickets = gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+    tickets = gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query())
     by_number = {t.number: t for t in tickets}
     assert by_number[2].parent_number == 1 and by_number[2].is_wayfinder_ticket  # child → map by `Part of #1`
     assert by_number[5].blocked_by == ("#2", "#4")  # native first, then the body's
     assert_lane_family(tickets, "https://gt/o/r/issues/1")
 
 
-def test_trackers_without_sub_issues_search_for_specs_only_with_a_map_on_the_board(monkeypatch):
-    asked = gitlab_board(monkeypatch, ["wayfinder::map"], [gl_issue(3, [], "Part of #1")])
+def test_trackers_without_sub_issues_search_for_specs_only_with_a_map_label(monkeypatch):
+    asked = gitlab_board(monkeypatch, ["bug"], [gl_issue(3, [], "Part of #1")])
     assert gitlab.GitLabProvider("g/p").fetch(Query()) == []
     assert not any(kind == "search" for kind, _ in asked)
+
+
+def test_gitlab_shows_a_closed_map_whose_spec_is_still_open(monkeypatch):
+    # No map is open, so the board finds map #1 only through its open spec #14's `Part of #1` line.
+    issues = [gl_issue(1, ["wayfinder::map"], state="closed"), gl_issue(14, [], "Part of #1"),
+              gl_issue(2, ["wayfinder::grilling"], "Part of #1", "closed"), gl_issue(15, [], "## Parent\n\n#14")]
+    asked = gitlab_board(monkeypatch, ["wayfinder::map", "wayfinder::grilling"], issues, named=issues[0])
+    tickets = gitlab.GitLabProvider("g/p").fetch(Query())
+    assert ("named", "1") in asked
+    assert lanes(tickets) == {1: {"FRONTIER": [14, 15], "DECIDED": [2]}}
 
 
 def test_github_map_order_is_the_maps_sub_issue_order(monkeypatch):
@@ -900,26 +930,18 @@ def test_github_keeps_the_trackers_message_when_the_rate_limit_lookup_fails(monk
     ({}, None),
 ])
 def test_gitea_429_says_when_the_limit_lifts(monkeypatch, headers, resets_at):
-    def urlopen(request, timeout=None):
-        raise urllib.error.HTTPError("https://codeberg.org/api/v1/x", 429, "Too Many Requests", headers,
-                                     io.BytesIO(b""))
-
-    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    fake_tea(monkeypatch, lambda endpoint: (429, "", headers))
     monkeypatch.setattr(gitea, "now", lambda: datetime(2026, 10, 14, 8, 0, tzinfo=timezone.utc))
     with pytest.raises(RateLimited) as raised:
-        gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+        gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query())
     assert raised.value.status == 429 and raised.value.resets_at == resets_at
     assert resets_at is None or raised.value.resets_at.tzinfo is not None
 
 
 def test_gitea_errors_carry_the_trackers_own_message(monkeypatch):
-    def urlopen(request, timeout=None):
-        raise urllib.error.HTTPError("https://codeberg.org/api/v1/x", 403, "Forbidden", {},
-                                     io.BytesIO(b'{"message": "token does not have required scope"}'))
-
-    monkeypatch.setattr(gitea.urllib.request, "urlopen", urlopen)
+    fake_tea(monkeypatch, lambda endpoint: (403, '{"message": "token does not have required scope"}'))
     with pytest.raises(ProviderError) as raised:
-        gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())
+        gitea.GiteaProvider("o/r", "codeberg.org", login="x").fetch(Query())
     assert raised.value.status == 403 and str(raised.value).endswith("HTTP 403 Forbidden: token does not have required scope")
 
 
