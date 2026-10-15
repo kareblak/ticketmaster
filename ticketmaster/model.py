@@ -55,58 +55,46 @@ class Ticket:
     # The map a spec, or a spec's implementation ticket, leads to; the parent stays the spec for those tickets.
     map_number: int | None = None
     map_url: str | None = None
-    # Linear's team key (`TM`); trackers that number issues per repo leave it empty.
-    team_key: str = ""
-
-    @property
-    def key(self) -> str:
-        """`#12`, or `TM-12` on Linear: what labels and `claude -n` start with."""
-        return f"{self.team_key}-{self.number}" if self.team_key else f"#{self.number}"
-
-    @property
-    def slug(self) -> str:
-        """`issue-12`, or `tm-12` on Linear: the worktree and branch name."""
-        return f"{self.team_key.lower()}-{self.number}" if self.team_key else f"issue-{self.number}"
+    # The tracker's own key (`TM-26` on Linear), and the branch it wants a ticket's work on (Linear's
+    # gitBranchName); None on trackers that key issues by number alone.
+    key: str | None = None
+    branch_name: str | None = None
 
     @property
     def is_blocked(self) -> bool:
         return bool(self.open_blockers)
 
+    @property
+    def ref(self) -> str:
+        """How the board names the ticket: its key, else `#<n>`."""
+        return self.key or f"#{self.number}"
+
     def start_refusal(self, viewer: str | None) -> str | None:
-        """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart."""
+        """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart. A live
+        session is the board's to check, since only herdr knows it."""
         if not self.is_open:
-            return f"{self.key} is closed"
+            return f"{self.ref} is closed"
+        if self.spec_kind == "spec":
+            return f"{self.ref} is a spec: s starts /implement on its implementation tickets"
         if self.blocked_by:
-            return f"{self.key} is blocked by {', '.join(self.blocked_by)}"
+            return f"{self.ref} is blocked by {', '.join(self.blocked_by)}"
         if self.open_blockers:
-            return f"{self.key} is blocked by {self.open_blockers} open issue{'s' if self.open_blockers > 1 else ''}"
+            return f"{self.ref} is blocked by {self.open_blockers} open issue{'s' if self.open_blockers > 1 else ''}"
         if viewer and self.assignees and viewer.lower() not in (a.lower() for a in self.assignees):
-            return f"{self.key} is claimed by {', '.join('@' + a for a in self.assignees)}"
+            return f"{self.ref} is claimed by {', '.join('@' + a for a in self.assignees)}"
+        if self.spec_kind == "impl" and self.has_open_change_request:
+            return f"{self.ref} has an open PR that closes it"
         if not (self.is_wayfinder_work or self.map_missing):  # a typed ticket without its map is warned about apart
             return self.not_wayfinder_work
-        if self.card_kind:
-            return self.not_startable
         return None
 
     @property
-    def card_kind(self) -> str | None:
-        """`spec` for the spec a map led to, `impl` for one of the spec's implementation tickets, else None."""
-        if self.map_url is None or self.is_wayfinder_map or self.is_wayfinder_ticket:
-            return None
-        return "spec" if self.parent_is_map else "impl"
-
-    @property
-    def not_startable(self) -> str:
-        article = "an" if self.card_kind == "impl" else "a"
-        return f"{self.key} is {article} {self.card_kind} card: s starts /wayfinder only on maps and decision tickets"
-
-    @property
     def not_wayfinder_work(self) -> str:
-        return f"{self.key} is not wayfinder work: the board only starts /wayfinder"
+        return f"{self.ref} is not wayfinder work: the board only starts work on a map"
 
     @property
     def is_wayfinder_work(self) -> bool:
-        """A map, or a ticket on one: a decision ticket, or a spec or impl card, which s refuses."""
+        """A map, or a ticket on one: the only work the board starts: /wayfinder, or /implement on an impl card."""
         return self.is_wayfinder_map or self.is_wayfinder_ticket or self.map_url is not None
 
     @property
@@ -125,6 +113,14 @@ class Ticket:
     @property
     def parent_is_map(self) -> bool:
         return "map" in wayfinder_kinds(self.parent_labels)
+
+    @property
+    def spec_kind(self) -> str | None:
+        """`spec` for the spec a map led to (`Part of #<map>`), `impl` for one of its implementation tickets, else
+        None; either is untyped and has a map the provider resolved."""
+        if self.map_number is None or wayfinder_kinds(self.labels):
+            return None
+        return "spec" if part_of(self.body) == self.map_number else "impl"
 
     @property
     def map_missing(self) -> bool:
@@ -163,6 +159,12 @@ def map_tickets(map_ticket: Ticket, tickets: list[Ticket]) -> list[Ticket]:
     """The map's typed wayfinder tickets, in map order."""
     children = [t for t in tickets if t.parent_number == map_ticket.number and t.is_wayfinder_ticket]
     return sorted(children, key=lambda t: (t.order, t.number))
+
+
+def lane_tickets(map_ticket: Ticket, tickets: list[Ticket]) -> list[Ticket]:
+    """The map's decision tickets, its specs and their implementation tickets, in map order."""
+    follow_ups = [t for t in tickets if t.spec_kind and t.map_number == map_ticket.number]
+    return sorted(map_tickets(map_ticket, tickets) + follow_ups, key=lambda t: (t.order, t.number))
 
 
 def frontier(map_ticket: Ticket, tickets: list[Ticket], taken: set[int] = frozenset(),
@@ -227,7 +229,8 @@ def classify(ticket: Ticket) -> Column:
 
 @dataclass
 class Lane:
-    """A map and its decision tickets by column; a closed map is collapsed to its header."""
+    """A map and its decision tickets, specs and implementation tickets by column; a closed map is collapsed to its
+    header. `progress` counts the decision tickets only."""
 
     map: Ticket
     columns: dict[Column, list[Ticket]] = field(default_factory=lambda: {c: [] for c in COLUMN_ORDER})
@@ -261,7 +264,7 @@ def build_board(tickets: list[Ticket], named_map: int | None = None) -> Board:
                   key=lambda t: t.number)
     board = Board()
     for map_ticket in maps:
-        children = map_tickets(map_ticket, tickets)
+        children = lane_tickets(map_ticket, tickets)
         lane = Lane(map_ticket, progress=map_progress(map_ticket, tickets),
                     out_of_scope={t.number for t in children if is_out_of_scope(t, map_ticket)})
         if not lane.collapsed:

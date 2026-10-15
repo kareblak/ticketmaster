@@ -1,5 +1,5 @@
-"""What the board's keys do in herdr: start or continue a ticket's /wayfinder session in its worktree, or go to
-its session."""
+"""What the board's keys do in herdr: start or continue a ticket's /wayfinder or /implement session in its own
+worktree, or go to its session."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from .herdr import Herdr, Session
 from .model import Ticket
 
 DEFAULT_WAYFINDER_COMMAND = "/mattpocock-skills:wayfinder"
+DEFAULT_IMPLEMENT_COMMAND = "/mattpocock-skills:implement"
 
 
 class MapNotFound(ValueError):
@@ -18,42 +19,57 @@ class MapNotFound(ValueError):
 
 
 class NotWayfinderWork(ValueError):
-    """A ticket with no map: the board only ever starts /wayfinder, so it does not start this one."""
+    """A ticket with no map: the board starts /wayfinder or /implement only on a map, so it does not start this one."""
 
 
-def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND) -> str:
-    """Exactly `<wayfinder_command> <map-url> [<ticket-url>]`: wayfinder claims and resolves a map's decision
-    tickets itself. A typed wayfinder ticket without its map raises MapNotFound; a spec or impl card, or a
-    ticket on no map, NotWayfinderWork.
+def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND,
+                 implement_command: str = DEFAULT_IMPLEMENT_COMMAND) -> str:
+    """Exactly `<wayfinder_command> <map-url> [<ticket-url>]`: wayfinder claims and resolves map tickets itself,
+    and drives a ticket that has a map (the spec a map led to). An implementation ticket gets /implement on the
+    ticket alone. Without a map there is nothing to start: a typed wayfinder ticket raises MapNotFound, anything
+    else NotWayfinderWork.
     """
+    if ticket.spec_kind == "impl":
+        return f"{implement_command} {ticket.url}"
     if ticket.is_wayfinder_map:
         return f"{wayfinder_command} {ticket.url}"
     if ticket.is_wayfinder_ticket:
         return f"{wayfinder_command} {ticket.parent_url} {ticket.url}"
     if ticket.map_missing:
         raise MapNotFound(f"#{ticket.number} {ticket.map_warning}")
-    if ticket.card_kind:
-        raise NotWayfinderWork(ticket.not_startable)
+    if ticket.map_url:
+        return f"{wayfinder_command} {ticket.map_url} {ticket.url}"
     raise NotWayfinderWork(ticket.not_wayfinder_work)
 
 
 def worktree_name(ticket: Ticket) -> str:
-    return ticket.slug
+    """`tm-<n>` for a Linear key, else `issue-<n>`."""
+    return ticket.key.lower() if ticket.key else f"issue-{ticket.number}"
+
+
+def branch_name(ticket: Ticket) -> str:
+    """The branch the tracker wants (Linear's gitBranchName), else the worktree's name."""
+    return ticket.branch_name or worktree_name(ticket)
 
 
 def session_label(ticket: Ticket) -> str:
     title = re.sub(r"\s+", " ", ticket.title)[:60]
-    return f"{ticket.key} {title}"
+    return f"{ticket.ref} {title}"
 
 
 def takes_focus(ticket: Ticket) -> bool:
-    """HITL tickets and maps pull the developer over; research runs AFK and starts unfocused."""
-    return ticket.wayfinder_type != "research"
+    """HITL tickets and maps pull the developer over; research and implementation run AFK and start unfocused."""
+    return ticket.spec_kind != "impl" and ticket.wayfinder_type != "research"
 
 
 def claude_args(ticket: Ticket, prompt: str) -> list[str]:
     """One line per argument: `herdr agent start` rejects newlines (invalid_agent_argument)."""
     return ["-n", session_label(ticket), one_line(prompt)]
+
+
+def continue_args(ticket: Ticket) -> list[str]:
+    """Reopens the worktree's last conversation; its first prompt is already in it."""
+    return ["-n", session_label(ticket), "--continue"]
 
 
 def one_line(text: str) -> str:
@@ -66,31 +82,33 @@ class Workbench:
 
     cwd: Path
     wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND
+    implement_command: str = DEFAULT_IMPLEMENT_COMMAND
     claude: str = "claude"
     herdr: Herdr = field(default_factory=Herdr)
 
     def sessions(self) -> dict[int, list[Session]]:
         return self.herdr.sessions(self.cwd)
 
-    def start(self, ticket: Ticket, worktree: Session | None = None) -> str:
-        """Starts /wayfinder in a new worktree named by the ticket's key, or, given the ticket's worktree
-        without an agent, continues Claude's last conversation there; never a second worktree."""
-        label, focus = session_label(ticket), takes_focus(ticket)
-        if worktree is None:
-            args = claude_args(ticket, build_prompt(ticket, self.wayfinder_command))
-            where = self.herdr.start_in_new_worktree(self.cwd, worktree_name(ticket), label, args, self.claude, focus)
-            message = f"Started {ticket.key} in {where}"
-        else:
-            args = claude_args(ticket, "--continue")
-            where = self.herdr.continue_in_worktree(self.cwd, worktree, worktree_name(ticket), label, args,
-                                                    self.claude, focus)
-            message = f"Continued {ticket.key} in {where}"
-        return message if focus else f"{message}, unfocused: research runs AFK"
+    def prompt(self, ticket: Ticket) -> str:
+        return build_prompt(ticket, self.wayfinder_command, self.implement_command)
+
+    def start(self, ticket: Ticket) -> str:
+        """In the ticket's own worktree, named by its key: created with the prompt, or reopened with
+        `claude --continue` when it exists without an agent; never a `-2` copy."""
+        focus = takes_focus(ticket)
+        where = self.herdr.start_in_worktree(
+            self.cwd, worktree_name(ticket), branch_name(ticket), session_label(ticket),
+            claude_args(ticket, self.prompt(ticket)), continue_args(ticket), self.claude, focus,
+        )
+        if ticket.spec_kind == "impl":
+            return f"Started {self.implement_command} on {ticket.ref} in {where}, unfocused"
+        return f"Started {ticket.ref} in {where}" + ("" if focus else ", unfocused: research runs AFK")
 
     def go_to(self, ticket: Ticket, session: Session) -> str:
-        return f"{ticket.key}: " + self.herdr.go_to(self.cwd, session, session_label(ticket))
+        return f"{ticket.ref}: " + self.herdr.go_to(self.cwd, session, session_label(ticket))
 
 
 def workbench_for(cwd: Path, config: dict) -> Workbench:
-    """`.ticketmaster.toml` can rename the wayfinder skill the sessions start with."""
-    return Workbench(cwd, wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND))
+    """`.ticketmaster.toml` can rename the wayfinder and implement skills the sessions start with."""
+    return Workbench(cwd, wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND),
+                     implement_command=config.get("implement_command", DEFAULT_IMPLEMENT_COMMAND))

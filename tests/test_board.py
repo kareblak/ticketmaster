@@ -8,6 +8,7 @@ from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, 
 from ticketmaster.herdr import HerdrError, Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
+from ticketmaster.start import build_prompt
 
 
 class FakeProvider:
@@ -254,8 +255,8 @@ class FakeBench:
     def sessions(self):
         return self.current
 
-    def start(self, ticket, worktree=None):
-        self.calls.append(("start", ticket.number) if worktree is None else ("start", ticket.number, worktree.path))
+    def start(self, ticket):
+        self.calls.append(("start", ticket.number))
         return f"Started #{ticket.number}"
 
     def go_to(self, ticket, session):
@@ -1322,7 +1323,7 @@ def test_frontier_continues_a_ticket_whose_worktree_has_no_agent():
             assert app.screen.question == "Continue #5 Question 5 (next on map #1) in its worktree issue-5?"
             await pilot.press("y")
             await loaded(app, pilot)
-            assert bench.calls == [("start", 5, "/w/issue-5")]
+            assert bench.calls == [("start", 5)]
 
     run(scenario())
 
@@ -1359,7 +1360,7 @@ def test_empty_frontier_continues_the_maps_own_agentless_worktree():
             await focus_map(app, pilot)
             await pilot.press("s", "y")
             await loaded(app, pilot)
-            assert bench.calls == [("start", 1, "/w/issue-1")]
+            assert bench.calls == [("start", 1)]
 
     run(scenario())
 
@@ -1406,14 +1407,14 @@ def test_s_on_my_claimed_ticket_with_only_an_agentless_worktree_continues_it():
             assert "claude --continue" in app.screen.detail
             await pilot.press("y")
             await loaded(app, pilot)
-            assert bench.calls == [("start", 2, "/w/issue-2")]
+            assert bench.calls == [("start", 2)]
 
     run(scenario())
 
 
 class FailingBench(FakeBench):
-    def start(self, ticket, worktree=None):
-        super().start(ticket, worktree)
+    def start(self, ticket):
+        super().start(ticket)
         raise HerdrError("agent_start_failed")
 
 
@@ -1459,16 +1460,23 @@ def test_s_stays_refused_while_the_new_worktree_waits_for_its_agent():
     run(scenario())
 
 
-def test_s_continues_the_worktree_named_by_the_key_before_other_copies():
+def test_s_offers_to_continue_only_the_worktree_named_by_the_key():
     async def scenario():
-        bench = FakeBench({1: [Session(1, "/w/issue-1-2"), Session(1, "/w/worktree-issue-1"), Session(1, "/w/issue-1")]})
+        bench = FakeBench({1: [Session(1, "/w/issue-1-2"), Session(1, "/w/issue-1")]})
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             await select(app, pilot, 1)
-            await pilot.press("s", "y")
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Continue #1 Ready one in its worktree issue-1?"
+            bench.current = {1: [Session(1, "/w/issue-1-2")]}  # a copy alone: herdr makes the key's worktree
+            await pilot.press("n", "r")
             await loaded(app, pilot)
-            assert bench.calls == [("start", 1, "/w/issue-1")]
+            await select(app, pilot, 1)
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Start #1 Ready one in a new worktree?"
 
     run(scenario())
 
@@ -1564,3 +1572,167 @@ def test_blocked_card_without_refs_keeps_the_count_and_a_label_only_card_shows_n
     assert "⛔ 2 " in blocked_card(open_blockers=2)
     assert "⛔" not in blocked_card(labels=("blocked",))
     assert "⛔" not in blocked_card(labels=("blocked",), open_blockers=0)
+
+
+def spec_of(map_number, number, title="", **kw):
+    """A spec of map #<map_number>: `Part of #<map>`, no `wayfinder:` label, and the map as its parent."""
+    map_url = f"https://gh/o/r/issues/{map_number}"
+    base = dict(number=number, title=title or f"Spec {number}", url=f"u{number}", is_open=True,
+                body=f"Part of #{map_number}\n\n## Problem Statement", labels=("ready-for-agent",),
+                parent_number=map_number, parent_url=map_url, parent_labels=("wayfinder:map",),
+                map_number=map_number, map_url=map_url)
+    return Ticket(**{**base, **kw})
+
+
+def impl_of(spec, number, title="", **kw):
+    """An implementation ticket of `spec`, linked by its `## Parent` section."""
+    base = dict(number=number, title=title or f"Slice {number}", url=f"u{number}", is_open=True,
+                body=f"## Parent\n\n#{spec.number}\n\n## What to build", map_number=spec.map_number,
+                map_url=spec.map_url)
+    return Ticket(**{**base, **kw})
+
+
+def chips_of(app, number):
+    return card_text(app, number).split("\n")[-1]
+
+
+def test_a_maps_spec_and_its_implementation_tickets_sit_in_its_lane_tagged_and_classified():
+    closed = dict(is_open=False, closed_at=datetime.now(timezone.utc))
+    spec = spec_of(9, 50, assignees=("me",))
+    other_spec = spec_of(20, 60)
+    tickets = [*TICKETS, a_map(20, "Ship billing"), spec, other_spec,
+               impl_of(spec, 51, open_blockers=1, blocked_by=("#52",)), impl_of(spec, 52), impl_of(spec, 53, **closed),
+               impl_of(spec, 54, assignees=("bob",)), impl_of(other_spec, 61),
+               Ticket(number=70, title="Stray", url="u70", is_open=True, body="## Parent\n\n#50\n")]  # no map found
+
+    async def scenario():
+        app = BoardApp(FakeProvider(tickets), Query(), interval=60)
+        async with app.run_test(size=(200, 70)) as pilot:
+            await loaded(app, pilot)
+            assert shown_lanes(app) == {9: {"BLOCKED": [3, 51], "FRONTIER": [1, 52], "CLAIMED": [2, 50, 54],
+                                            "DECIDED": [4, 53]},
+                                        20: {"FRONTIER": [60, 61]}}
+            assert chips_of(app, 50).startswith("spec ") and chips_of(app, 52).startswith("impl ")
+            assert "impl" not in chips_of(app, 50) and "spec" not in chips_of(app, 1)
+            assert "◆ Pick a stack" in chips_of(app, 51) and "⛔ #52" in chips_of(app, 51)
+            assert "1 decided · 3 open · 1 blocked" in card_text(app, 9)  # the counts are the map's decisions
+            assert 70 not in [c.ticket.number for c in app.query(Card)]
+
+    run(scenario())
+
+
+def test_an_open_closing_pr_shows_as_a_badge_and_none_without_one():
+    spec = spec_of(9, 50)
+    tickets = [*TICKETS, spec, impl_of(spec, 51, has_open_change_request=True), impl_of(spec, 52),
+               on(9, 5, has_open_change_request=True),
+               impl_of(spec, 53, has_open_change_request=True, is_open=False)]  # decided: no badge
+
+    async def scenario():
+        app = BoardApp(FakeProvider(tickets), Query(), interval=60)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            assert "PR open" in chips_of(app, 51) and "PR open" in chips_of(app, 5)
+            assert not any("PR open" in card_text(app, n) for n in (1, 2, 50, 52, 53, 9))
+
+    run(scenario())
+
+
+SPEC = spec_of(9, 50, assignees=("me",))
+SLICES = [impl_of(SPEC, 51), impl_of(SPEC, 52, is_open=False, closed_at=datetime.now(timezone.utc)),
+          impl_of(SPEC, 53, open_blockers=1, blocked_by=("#51",)), impl_of(SPEC, 54, assignees=("bob",)),
+          impl_of(SPEC, 55), impl_of(SPEC, 56, has_open_change_request=True), impl_of(SPEC, 57, assignees=("me",))]
+LIVE = {55: [Session(55, "/w/issue-55", "issue-55", "wA", "working", "wA:p1")]}
+
+
+def implement_app(bench):
+    return BoardApp(FakeProvider([MAP, SPEC, *SLICES]), Query(), interval=60, workbench=bench,
+                    describe_start=build_prompt)
+
+
+def test_s_on_an_open_unblocked_unclaimed_impl_card_starts_implement_unfocused():
+    async def scenario():
+        bench = FakeBench()
+        app = implement_app(bench)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 51)
+            await pilot.press("s")
+            await pilot.pause()
+            assert is_confirm(app)
+            assert app.screen.question == "Start /implement on #51 Slice 51 in a new worktree?"
+            assert app.screen.detail == "/mattpocock-skills:implement u51\nunfocused (AFK)"
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 51)]
+            assert notifications(app)[-1][0] == "Started #51"  # the workbench's own report
+
+    run(scenario())
+
+
+def test_s_on_an_impl_card_refuses_and_leaves_the_workbench_untouched():
+    async def scenario():
+        bench = FakeBench(LIVE)
+        app = implement_app(bench)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            for number in (52, 53, 54, 55, 56):
+                await select(app, pilot, number)
+                await pilot.press("s")
+                await pilot.pause()
+                assert not is_confirm(app)
+            assert bench.calls == []
+            assert [m for m, _ in notifications(app)][-5:] == [
+                "#52 is closed", "#53 is blocked by #51", "#54 is claimed by @bob",
+                "#55 has a live session: press Enter to go to it", "#56 has an open PR that closes it"]
+
+    run(scenario())
+
+
+def test_s_on_my_claimed_impl_card_starts_while_its_spec_is_open_and_reuses_an_agentless_worktree():
+    async def scenario():
+        bench = FakeBench({57: [Session(57, "/w/issue-57", "issue-57")]})
+        app = implement_app(bench)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 57)
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Start /implement on #57 Slice 57 in its worktree with claude --continue?"
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 57)]
+
+    run(scenario())
+
+
+def test_s_on_a_spec_card_still_refuses():
+    async def scenario():
+        bench = FakeBench()
+        app = implement_app(bench)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 50)
+            await pilot.press("s")
+            await pilot.pause()
+            assert not is_confirm(app) and bench.calls == []
+            assert notifications(app)[-1][0] == "#50 is a spec: s starts /implement on its implementation tickets"
+
+    run(scenario())
+
+
+def test_enter_on_an_impl_card_without_a_worktree_names_the_implement_start_or_the_refusal():
+    async def scenario():
+        bench = FakeBench()
+        app = implement_app(bench)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            for number in (51, 54):
+                await select(app, pilot, number)
+                await pilot.press("enter")
+                await pilot.pause()
+            assert bench.calls == []
+            assert [m for m, _ in notifications(app)][-2:] == [
+                "#51 has no session here; s starts /mattpocock-skills:implement u51",
+                "#54 has no session here; s refuses: #54 is claimed by @bob"]
+
+    run(scenario())

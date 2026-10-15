@@ -1,10 +1,11 @@
 """Herdr (herdr.dev): the board lives in a herdr pane, and every ticket session in a worktree workspace.
 
-Starting a ticket creates its git worktree (`herdr worktree create`) with Claude started in it as a named
-herdr agent, or continues Claude in that worktree when it has no agent. The board finds every session
-working a ticket, including ones it did not start: a worktree named after the ticket (`issue-<n>`/`tm-<n>`,
-from herdr or `claude -w`), or an agent in the repo whose terminal title starts with the ticket's key. It
-shows each agent's state and jumps to it, and never removes or adopts a worktree.
+Starting a ticket creates its own git worktree (`herdr worktree create`) with Claude started in it as a named
+herdr agent, or continues Claude in that worktree with `claude --continue` when it has no agent; never a `-2`
+copy. The board finds every session working a ticket, including ones it did not start: a worktree named after
+the ticket (`issue-<n>`/`tm-<n>`, from herdr or `claude -w`), or an agent in the repo whose terminal title
+starts with the ticket's key. It shows each agent's state and jumps to it, and never removes or adopts a
+worktree.
 """
 
 from __future__ import annotations
@@ -217,39 +218,46 @@ class Herdr:
                 found.setdefault(number, []).append(Session(number, wt["path"], wt.get("branch"), wt.get("open_workspace_id")))
         return {number: sorted(sessions, key=lambda s: s.urgency) for number, sessions in found.items()}
 
-    def start_in_new_worktree(self, cwd: Path, name: str, label: str, claude_args: list[str], claude: str = "claude",
-                              focus: bool = True) -> str:
-        """A fresh worktree workspace on branch `name`, with Claude in it; never a `name-2` copy. Returns where it
-        went, for the status line. A leftover `name` branch without a worktree is not taken over."""
-        if name in local_branches(cwd):
-            raise HerdrError(f"branch {name} exists without a worktree; check it out in one or delete it, then s again")
-        result = self.call("worktree", "create", "--cwd", str(cwd), "--branch", name, "--label", label, focus_flag(focus))
+    def start_in_worktree(self, cwd: Path, name: str, branch: str, label: str, claude_args: list[str],
+                          continue_args: list[str], claude: str = "claude", focus: bool = False) -> str:
+        """Claude in the ticket's own worktree, never a `-2` copy: an existing one (by its name or branch) is
+        reopened with `continue_args`, else one is created on `branch` and gets `claude_args`. A worktree whose
+        branch is not its name gets the name as its directory, so it is still found. A leftover `branch` without
+        a worktree is not taken over. Returns where it went, for the status line."""
+        existing = next((w for w in self.worktrees(cwd)
+                         if Path(w["path"]).name in (name, f"worktree-{name}") or w.get("branch") == branch), None)
+        if existing is not None:
+            workspace = existing.get("open_workspace_id")
+            pane = self.idle_pane(workspace, existing["path"])
+            if pane is None:
+                pane = self.call("worktree", "open", "--cwd", str(cwd), "--path", existing["path"], "--label", label,
+                                 focus_flag(focus))["root_pane"]["pane_id"]
+            elif focus:
+                self.call("workspace", "focus", workspace)
+            note = self.start_claude(pane, name, claude, continue_args)
+            return f"worktree {Path(existing['path']).name} with claude --continue{note}"
+        if branch in local_branches(cwd):
+            raise HerdrError(f"branch {branch} exists without a worktree; check it out in one or delete it, then s again")
+        place = [] if branch == name else ["--path", str(worktree_home(cwd) / name)]
+        result = self.call("worktree", "create", "--cwd", str(cwd), "--branch", branch, *place, "--label", label,
+                           focus_flag(focus))
         note = self.start_claude(result["root_pane"]["pane_id"], name, claude, claude_args)
         return f"new worktree {name}{note}"
 
-    def continue_in_worktree(self, cwd: Path, worktree: Session, name: str, label: str, claude_args: list[str],
-                             claude: str = "claude", focus: bool = True) -> str:
-        """Claude in a ticket's worktree that has no agent: in its open workspace, else in the worktree opened as
-        a workspace. Returns where it went, for the status line."""
-        pane = self.shell_pane(worktree) if worktree.workspace else None
-        if pane is None:
-            pane = self.call("worktree", "open", "--cwd", str(cwd), "--path", worktree.path, "--label", label,
-                             focus_flag(focus))["root_pane"]["pane_id"]
-        elif focus:
-            self.call("workspace", "focus", worktree.workspace)
-        note = self.start_claude(pane, name, claude, claude_args)
-        return f"worktree {Path(worktree.path).name}{note}"
-
-    def shell_pane(self, worktree: Session) -> str | None:
-        """A pane of the worktree's open workspace at its shell prompt, else a new one split off its first pane;
-        None when herdr lists no pane there (a stale workspace)."""
-        panes = [p["pane_id"] for p in self.call("pane", "list").get("panes", [])
-                 if pane_workspace(p) == worktree.workspace]
+    def idle_pane(self, workspace: str | None, path: str) -> str | None:
+        """A pane of a worktree's open workspace at its shell prompt, else a new one split off its first pane, where
+        Claude is started; None when it has none open (or herdr lists no pane there). An agent that started there
+        since the board last looked is a live session, which gets no second Claude."""
+        if workspace is None:
+            return None
+        if any(a.get("workspace_id") == workspace for a in self.call("agent", "list").get("agents", [])):
+            raise HerdrError("it has a live session now: press Enter")
+        panes = [p["pane_id"] for p in self.call("pane", "list").get("panes", []) if pane_workspace(p) == workspace]
         if not panes:
             return None
         if idle := next((p for p in panes if self.at_prompt(p)), None):
             return idle
-        return self.call("pane", "split", "--pane", panes[0], "--direction", "right", "--cwd", worktree.path,
+        return self.call("pane", "split", "--pane", panes[0], "--direction", "right", "--cwd", path,
                          "--no-focus")["pane"]["pane_id"]
 
     def go_to(self, cwd: Path, session: Session, label: str) -> str:
@@ -286,6 +294,11 @@ class Herdr:
 def repo_root(cwd: Path) -> Path:
     result = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True)
     return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else cwd.resolve()
+
+
+def worktree_home(cwd: Path) -> Path:
+    """Where herdr puts a repo's worktrees by default: `~/.herdr/worktrees/<repo>/`."""
+    return Path.home() / ".herdr" / "worktrees" / repo_root(cwd).name
 
 
 def local_branches(cwd: Path) -> list[str]:

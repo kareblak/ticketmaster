@@ -80,14 +80,7 @@ DECISION = dict(parent_url="u9", parent_labels=("wayfinder:map",))  # with a way
 def test_start_refusal_names_a_closed_ticket_first():
     assert ticket(**DECISION, labels=("wayfinder:task",), is_open=False, open_blockers=1).start_refusal("me") \
         == "#1 is closed"
-    assert ticket(team_key="TM", is_open=False).start_refusal("me") == "TM-1 is closed"  # Linear's key
-
-
-def test_start_refusal_names_spec_and_impl_cards():
-    spec = ticket(parent_url="u9", parent_labels=("wayfinder:map",), map_number=9, map_url="u9")
-    impl = ticket(parent_url="u7", map_number=9, map_url="u9")
-    assert spec.start_refusal("me") == "#1 is a spec card: s starts /wayfinder only on maps and decision tickets"
-    assert impl.start_refusal("me") == "#1 is an impl card: s starts /wayfinder only on maps and decision tickets"
+    assert ticket(key="TM-1", is_open=False).start_refusal("me") == "TM-1 is closed"  # Linear's key
 
 
 def test_start_refusal_names_blockers_and_other_claimant():
@@ -159,7 +152,7 @@ def test_a_task_is_hitl_or_afk_by_the_first_of_those_words_in_its_body():
 
 
 def test_start_refusal_names_a_ticket_that_is_not_wayfinder_work_last():
-    assert ticket().start_refusal("me") == "#1 is not wayfinder work: the board only starts /wayfinder"
+    assert ticket().start_refusal("me") == "#1 is not wayfinder work: the board only starts work on a map"
     assert ticket(open_blockers=1).start_refusal("me") == "#1 is blocked by 1 open issue"
     assert ticket(labels=("wayfinder:map",)).start_refusal("me") is None
     assert ticket(**DECISION, labels=("wayfinder:grilling",)).start_refusal("me") is None
@@ -235,23 +228,33 @@ def lanes(board):
     return {lane.map.number: {c: [t.number for t in ts] for c, ts in lane.columns.items() if ts} for lane in board.lanes}
 
 
-def test_each_open_map_is_a_lane_of_its_decision_tickets_in_the_four_columns():
+def test_each_open_map_is_a_lane_of_its_tickets_in_the_four_columns():
     other = ticket(number=20, labels=MAP)
     tickets = [
         other, MAP_TICKET,
         child(2), child(3, open_blockers=1, assignees=("bob",)), child(4, assignees=("bob",)),
         child(5, is_open=False), child(21, parent_number=20, parent_url="u20"),
         ticket(number=30),  # not wayfinder work
-        ticket(number=31, map_number=1, map_url="u1"),  # a spec: not a decision ticket
+        ticket(number=31, map_number=1, map_url="u1"),  # an implementation ticket of the map's spec
         ticket(number=32, labels=("wayfinder:task",)),  # its map not found
+        ticket(number=33, body="Part of #20", map_number=20, map_url="u20", assignees=("bob",)),  # map #20's spec
     ]
     board = build_board(tickets)
     assert [lane.map.number for lane in board.lanes] == [1, 20]
     assert lanes(board) == {
-        1: {Column.BLOCKED: [3], Column.FRONTIER: [2], Column.CLAIMED: [4], Column.DECIDED: [5]},
-        20: {Column.FRONTIER: [21]},
+        1: {Column.BLOCKED: [3], Column.FRONTIER: [2, 31], Column.CLAIMED: [4], Column.DECIDED: [5]},
+        20: {Column.FRONTIER: [21], Column.CLAIMED: [33]},
     }
-    assert board.ticket_count() == 5
+    assert board.ticket_count() == 7
+    assert map_progress(MAP_TICKET, tickets) == (1, 3, 1)  # the map's decisions only
+
+
+def test_spec_kind_tells_a_maps_spec_from_its_implementation_tickets():
+    assert ticket(body="Part of #1\n\n## Problem", map_number=1, map_url="u1").spec_kind == "spec"
+    assert ticket(body="## Parent\n\n#7", map_number=1, map_url="u1").spec_kind == "impl"
+    assert ticket(body="Part of #1", map_number=1, map_url="u1", labels=("wayfinder:task",)).spec_kind is None
+    assert ticket(body="Part of #1").spec_kind is None  # no map resolved
+    assert child(2).spec_kind is None and MAP_TICKET.spec_kind is None
 
 
 def test_lane_columns_sort_by_sub_issue_order_then_number_and_decided_keeps_all():
@@ -290,3 +293,23 @@ def test_frontier_follows_the_trackers_map_order_when_given():
 def test_a_ticket_with_a_map_has_no_map_missing():
     t = Ticket(number=4, title="Slice", url="u", is_open=True, parent_number=3, map_number=1, map_url="https://gh/1")
     assert not t.map_missing
+
+
+def spec_or_impl(kind, **kw):
+    return ticket(map_number=9, map_url="u9", body="Part of #9" if kind == "spec" else "## Parent\n\n#8", **kw)
+
+
+def test_start_refusal_refuses_a_closed_ticket_and_a_spec():
+    assert ticket(is_open=False, labels=("wayfinder:map",)).start_refusal("me") == "#1 is closed"
+    assert spec_or_impl("spec").start_refusal("me") == "#1 is a spec: s starts /implement on its implementation tickets"
+
+
+def test_start_refusal_refuses_an_implementation_ticket_with_an_open_closing_pr():
+    assert spec_or_impl("impl", has_open_change_request=True).start_refusal("me") == \
+        "#1 has an open PR that closes it"
+    assert spec_or_impl("impl").start_refusal("me") is None
+    assert spec_or_impl("impl", assignees=("me",)).start_refusal("me") is None
+
+
+def test_a_ticket_is_named_by_its_tracker_key_else_its_number():
+    assert ticket().ref == "#1" and ticket(key="TM-1").ref == "TM-1"
