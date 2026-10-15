@@ -1,35 +1,28 @@
-"""Provider-neutral ticket model and column classification."""
+"""Provider-neutral ticket model, and the swimlane board: one lane per wayfinder map, in four columns."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from enum import Enum
 from typing import NamedTuple
 
 
 class Column(Enum):
     BLOCKED = "Blocked"
-    READY = "Ready"
-    IN_PROGRESS = "In progress"
-    REVIEW = "Review"
-    DONE = "Done"
+    FRONTIER = "Frontier"
+    CLAIMED = "Claimed"
+    DECIDED = "Decided"
 
 
-COLUMN_ORDER = [Column.BLOCKED, Column.READY, Column.IN_PROGRESS, Column.REVIEW, Column.DONE]
+COLUMN_ORDER = [Column.BLOCKED, Column.FRONTIER, Column.CLAIMED, Column.DECIDED]
 
-# `review:security` (GitHub/Gitea) and `review::security` (GitLab scoped labels).
-REVIEW_LABEL = re.compile(r"^review::?(?P<kind>.+)$", re.IGNORECASE)
-BLOCKED_LABEL = "blocked"
-# Marks an issue closed as not planned; GitLab and Gitea have no close reason, so it is the marker.
-WONTFIX_LABEL = "wontfix"
 WAYFINDER_TYPES = ("research", "prototype", "grilling", "task")
 # `wayfinder:<kind>` (GitHub/Gitea) and `wayfinder::<kind>` (GitLab scoped labels).
 WAYFINDER_LABEL = re.compile(r"^wayfinder::?(?P<kind>[^:].*)$", re.IGNORECASE)
 # The child→map rule for trackers without a native link: the body's first line is `Part of #<map>`.
 PART_OF = re.compile(r"^Part of #(?P<map>\d+)\.?$")
-OUT_OF_SCOPE_LABEL = "out-of-scope"  # wayfinder's out-of-scope label, always English
 # HITL: worked with a human; AFK: the agent alone. A task says which in its body.
 TYPE_MODES = {"grilling": "HITL", "prototype": "HITL", "research": "AFK"}
 _MODE_WORD = re.compile(r"\b(HITL|AFK)\b")  # the acronyms, not "afk" in prose
@@ -43,7 +36,7 @@ class Ticket:
     is_open: bool
     body: str = ""
     closed_at: datetime | None = None
-    # Closed as not planned (GitHub's close reason); trackers without one leave it False.
+    # Closed as not planned (canceled); trackers without a close reason leave it False.
     not_planned: bool = False
     # Login/username of whoever opened the issue; empty when the provider did not say.
     author: str = ""
@@ -64,25 +57,8 @@ class Ticket:
     map_url: str | None = None
 
     @property
-    def review_tags(self) -> list[str]:
-        return [m.group("kind") for label in self.labels if (m := REVIEW_LABEL.match(label))]
-
-    @property
-    def other_labels(self) -> list[str]:
-        return [label for label in self.labels if not REVIEW_LABEL.match(label)]
-
-    @property
     def is_blocked(self) -> bool:
-        if self.open_blockers:
-            return True
-        return any(label.lower() == BLOCKED_LABEL for label in self.labels)
-
-    @property
-    def is_wont_fix(self) -> bool:
-        """Labelled `wontfix`, or closed as not planned without being ruled out of scope: not finished work, so
-        it stays off Done. Wayfinder closes out-of-scope tickets as not planned too, and those stay on Done."""
-        labels = {label.lower() for label in self.labels}
-        return WONTFIX_LABEL in labels or (self.not_planned and OUT_OF_SCOPE_LABEL not in labels)
+        return bool(self.open_blockers)
 
     def start_refusal(self, viewer: str | None) -> str | None:
         """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart."""
@@ -90,8 +66,6 @@ class Ticket:
             return f"#{self.number} is blocked by {', '.join(self.blocked_by)}"
         if self.open_blockers:
             return f"#{self.number} is blocked by {self.open_blockers} open issue{'s' if self.open_blockers > 1 else ''}"
-        if self.is_blocked:
-            return f"#{self.number} has the '{BLOCKED_LABEL}' label"
         if viewer and self.assignees and viewer.lower() not in (a.lower() for a in self.assignees):
             return f"#{self.number} is claimed by {', '.join('@' + a for a in self.assignees)}"
         if not (self.is_wayfinder_work or self.map_missing):  # a typed ticket without its map is warned about apart
@@ -134,22 +108,12 @@ class Ticket:
         return f"wayfinder:{self.wayfinder_type}, map not found"
 
     @property
-    def is_decision(self) -> bool:
-        """A wayfinder ticket: it resolves with a comment and closes, never through a PR. The map is not one."""
-        return self.wayfinder_type is not None
-
-    @property
     def mode(self) -> str | None:
         """`HITL` or `AFK` for a wayfinder ticket; a task by the first of those words in its body, else None."""
         if self.wayfinder_type == "task":
             match = _MODE_WORD.search(self.body or "")
             return match.group(1) if match else None
         return TYPE_MODES.get(self.wayfinder_type)
-
-    @property
-    def is_out_of_scope(self) -> bool:
-        """Closed as ruled out of scope, rather than resolved."""
-        return not self.is_open and any(label.lower() == OUT_OF_SCOPE_LABEL for label in self.labels)
 
     @property
     def summary(self) -> str:
@@ -189,64 +153,93 @@ def frontier(map_ticket: Ticket, tickets: list[Ticket], taken: set[int] = frozen
 
 
 class MapProgress(NamedTuple):
-    decided: int  # decisions so far, from the map's body
-    open: int  # the map's open tickets on the board
+    decided: int  # closed tickets, less those ruled out of scope
+    open: int
     blocked: int
 
 
 def map_progress(map_ticket: Ticket, tickets: list[Ticket]) -> MapProgress:
-    still_open = [t for t in map_tickets(map_ticket, tickets) if t.is_open]
-    return MapProgress(decisions_so_far(map_ticket.body), len(still_open), sum(t.is_blocked for t in still_open))
+    children = map_tickets(map_ticket, tickets)
+    still_open = [t for t in children if t.is_open]
+    decided = sum(not t.is_open and not is_out_of_scope(t, map_ticket) for t in children)
+    return MapProgress(decided, len(still_open), sum(t.is_blocked for t in still_open))
 
 
-_DECISIONS = re.compile(r"^#+[ \t]*Decisions[- ]so[- ]far[ \t]*:?[ \t]*$(?P<text>.*?)(?=^#+[ \t]|\Z)",
-                        re.MULTILINE | re.DOTALL | re.IGNORECASE)
-_TOP_BULLET = re.compile(r"^(?:[-*+]|\d+[.)])[ \t]+\S", re.MULTILINE)
+_OUT_OF_SCOPE = re.compile(r"^#+[ \t]*Out[- ]of[- ]scope[ \t]*:?[ \t]*$(?P<text>.*?)(?=^#+[ \t]|\Z)",
+                           re.MULTILINE | re.DOTALL | re.IGNORECASE)
+_HASH_REF = re.compile(r"(?<![\w&/])#(\d+)\b")
+_ISSUE_URL = re.compile(r"(?P<base>https?://\S+?/issues/)(?P<number>\d+)\b")
 
 
-def decisions_so_far(body: str) -> int:
-    """Top-level bullets in the map's Decisions-so-far section: wayfinder appends one per resolved ticket."""
-    match = _DECISIONS.search(body or "")
-    return len(_TOP_BULLET.findall(match.group("text"))) if match else 0
+def out_of_scope_refs(map_ticket: Ticket) -> set[int]:
+    """Issues of the map's repo that its `## Out of scope` section links, as `#<n>` or by issue URL."""
+    match = _OUT_OF_SCOPE.search(map_ticket.body or "")
+    if match is None:
+        return set()
+    text, base = match.group("text"), map_ticket.url.rpartition("/")[0] + "/"
+    urls = {int(m.group("number")) for m in _ISSUE_URL.finditer(text) if m.group("base") == base}
+    return {int(n) for n in _HASH_REF.findall(text)} | urls
+
+
+def is_out_of_scope(ticket: Ticket, map_ticket: Ticket) -> bool:
+    """Closed as canceled, or closed and linked from the map's `## Out of scope` section."""
+    return not ticket.is_open and (ticket.not_planned or ticket.number in out_of_scope_refs(map_ticket))
+
+
+def classify(ticket: Ticket) -> Column:
+    """The first rule that matches: closed, an open blocker, an assignee, else the frontier."""
+    if not ticket.is_open:
+        return Column.DECIDED
+    if ticket.is_blocked:
+        return Column.BLOCKED
+    if ticket.assignees:
+        return Column.CLAIMED
+    return Column.FRONTIER
+
+
+@dataclass
+class Lane:
+    """A map and its decision tickets by column; a closed map is collapsed to its header."""
+
+    map: Ticket
+    columns: dict[Column, list[Ticket]] = field(default_factory=lambda: {c: [] for c in COLUMN_ORDER})
+    progress: MapProgress = MapProgress(0, 0, 0)
+    out_of_scope: set[int] = field(default_factory=set)
+
+    @property
+    def collapsed(self) -> bool:
+        return not self.map.is_open
+
+    def tickets(self) -> list[Ticket]:
+        return [ticket for tickets in self.columns.values() for ticket in tickets]
 
 
 @dataclass
 class Board:
-    columns: dict[Column, list[Ticket]] = field(default_factory=lambda: {c: [] for c in COLUMN_ORDER})
+    lanes: list[Lane] = field(default_factory=list)
 
-    def total(self) -> int:
-        return sum(len(tickets) for tickets in self.columns.values())
+    def ticket_count(self) -> int:
+        """The lanes' ticket cards, not counting the maps."""
+        return sum(len(lane.tickets()) for lane in self.lanes)
 
-
-def classify(ticket: Ticket, now: datetime, done_days: int) -> Column | None:
-    """Return the column a ticket belongs in, or None if it should not be shown."""
-    if not ticket.is_open:
-        if ticket.is_wont_fix or ticket.closed_at is None or now - ticket.closed_at > timedelta(days=done_days):
-            return None
-        return Column.DONE
-    if (ticket.review_tags or ticket.has_open_change_request) and not ticket.is_decision:
-        return Column.REVIEW
-    if ticket.is_wayfinder_map:
-        return Column.IN_PROGRESS  # a map is worked through its tickets, never started itself
-    if ticket.is_blocked:
-        return Column.BLOCKED
-    if ticket.assignees:
-        return Column.IN_PROGRESS
-    return Column.READY
+    def tickets(self) -> list[Ticket]:
+        """Every card: each lane's map, then its tickets."""
+        return [ticket for lane in self.lanes for ticket in (lane.map, *lane.tickets())]
 
 
-def build_board(tickets: list[Ticket], done_days: int = 7, now: datetime | None = None) -> Board:
-    now = now or datetime.now(timezone.utc)
+def build_board(tickets: list[Ticket], named_map: int | None = None) -> Board:
+    """A lane per open map, by number, plus the named map when it is closed; anything else is not shown."""
+    maps = sorted((t for t in tickets if t.is_wayfinder_map and (t.is_open or t.number == named_map)),
+                  key=lambda t: t.number)
     board = Board()
-    for ticket in tickets:
-        column = classify(ticket, now, done_days)
-        if column is not None:
-            board.columns[column].append(ticket)
-    for column, items in board.columns.items():
-        if column is Column.DONE:
-            items.sort(key=lambda t: t.closed_at or now, reverse=True)
-        else:
-            items.sort(key=lambda t: (t.order, t.number))
+    for map_ticket in maps:
+        children = map_tickets(map_ticket, tickets)
+        lane = Lane(map_ticket, progress=map_progress(map_ticket, tickets),
+                    out_of_scope={t.number for t in children if is_out_of_scope(t, map_ticket)})
+        if not lane.collapsed:
+            for ticket in children:
+                lane.columns[classify(ticket)].append(ticket)
+        board.lanes.append(lane)
     return board
 
 

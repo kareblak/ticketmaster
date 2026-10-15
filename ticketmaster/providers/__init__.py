@@ -11,7 +11,7 @@ from datetime import datetime
 from http import HTTPStatus
 from typing import Literal, Protocol
 
-from ..model import Ticket, parse_blockers, part_of, wayfinder_kinds
+from ..model import WAYFINDER_TYPES, Ticket, parse_blockers, part_of, wayfinder_kinds
 
 TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo"}
 
@@ -97,12 +97,37 @@ def error_notice(tracker: str, error: ProviderError) -> ErrorNotice:
 
 @dataclass(frozen=True)
 class Query:
-    """What a board shows. With neither parent nor label: every open issue plus those closed within done_days."""
+    """What a board shows: every open wayfinder map with its tickets, plus `named_map` when that map is closed."""
 
-    parent: int | None = None
-    label: str | None = None
-    done_days: int = 7
-    limit: int = 300
+    named_map: int | None = None
+
+
+# Children read per map, and maps per board; a tracker page beyond these is not asked for.
+LIMIT = 300
+# Issues read per `wayfinder:` label on trackers without sub-issues: the whole repo's, open and closed, before
+# `Part of #<map>` picks a shown map's, so a map's tickets are not cut off by other maps' closed ones.
+LABEL_LIMIT = 5000
+
+
+def wayfinder_labels(names: list[str]) -> dict[str, list[str]]:
+    """Label names for maps (`map`) and for the four ticket types (`ticket`), in the order given."""
+    found: dict[str, list[str]] = {"map": [], "ticket": []}
+    for name in dict.fromkeys(names):
+        kinds = wayfinder_kinds((name,))
+        if "map" in kinds:
+            found["map"].append(name)
+        elif any(kind in WAYFINDER_TYPES for kind in kinds):
+            found["ticket"].append(name)
+    return found
+
+
+def map_board(maps: dict[int, Ticket], named: Ticket | None, children: list[Ticket]) -> list[Ticket]:
+    """For trackers without sub-issues: the maps, the named map when it is one, then each typed ticket whose
+    `Part of #<map>` line names one of them."""
+    if named is not None and named.is_wayfinder_map:
+        maps = {**maps, named.number: named}
+    linked = {t.number: t for t in children if t.wayfinder_type is not None and part_of(t.body) in maps}
+    return list(maps.values()) + [t for n, t in linked.items() if n not in maps]
 
 
 class Provider(Protocol):
@@ -139,7 +164,7 @@ def run_json(args: list[str], stdin: str | None = None):
 
 
 def mentions_parent(body: str, parent: int) -> bool:
-    """Fallback parent link for providers without sub-issues: body mentions `#<parent>`."""
+    """The body mentions `#<parent>`."""
     return re.search(rf"(?<![\w&])#{parent}\b", body or "") is not None
 
 
@@ -198,13 +223,6 @@ def on_map(ticket: Ticket, number: int | None, url: str | None) -> Ticket:
 
 def with_map(ticket: Ticket, parent: Ticket) -> Ticket:
     return replace(ticket, parent_number=parent.number, parent_url=parent.url, parent_labels=parent.labels)
-
-
-def on_map_board(tickets: list[Ticket], found: Ticket | None) -> list[Ticket]:
-    """A map board's map is each ticket's parent, unless its `Part of #<map>` line names another map."""
-    if not found:
-        return tickets
-    return [with_map(t, found) if part_of(t.body) in (None, found.number) else t for t in tickets]
 
 
 class IssueStates:
@@ -291,19 +309,3 @@ def as_spec(ticket: Ticket, map_ticket: Ticket) -> Ticket:
 def under_spec(tickets: list[Ticket], spec: Ticket) -> list[Ticket]:
     """The spec is each ticket's parent; the spec's map is the one their sessions start wayfinder on."""
     return [on_map(with_map(t, spec), spec.map_number, spec.map_url) for t in tickets]
-
-
-def map_family(tickets: list[Ticket], number: int, found: Ticket | None) -> list[Ticket]:
-    """For trackers without sub-issues: the parent's children (they mention `#<parent>`) and, when the
-    parent is a map, the spec and its implementation tickets (`## Parent` names the spec), parented to it."""
-    children = [t for t in tickets if t.number != number and mentions_parent(t.body, number)]
-    family = on_map_board(children, found)
-    if not is_map(found):
-        return family
-    family = [as_spec(t, found) if is_spec(t, number) else t for t in family]
-    taken = {number} | {t.number for t in children}
-    for spec in [t for t in family if is_spec(t, number)]:
-        linked = [t for t in tickets if t.number not in taken and names_parent(t.body, spec.number)]
-        taken |= {t.number for t in linked}
-        family += under_spec(linked, spec)
-    return family

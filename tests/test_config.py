@@ -32,13 +32,13 @@ def test_unknown_provider_errors():
         make_provider("bitbucket", "a/b", "bitbucket.org")
 
 
-def test_cli_accepts_bare_parent_and_explicit_command():
+def test_cli_accepts_bare_map_and_explicit_command():
     from ticketmaster.cli import parse_args
 
-    assert (parse_args(["680"]).command, parse_args(["680"]).parent) == ("open", 680)
-    assert (parse_args(["open", "#12"]).command, parse_args(["open", "#12"]).parent) == ("open", 12)
-    assert parse_args(["https://github.com/o/r/issues/9"]).parent == 9
-    assert parse_args(["--repo", "o/r", "7"]).parent == 7
+    assert (parse_args(["680"]).command, parse_args(["680"]).map) == ("open", 680)
+    assert (parse_args(["open", "#12"]).command, parse_args(["open", "#12"]).map) == ("open", 12)
+    assert parse_args(["https://github.com/o/r/issues/9"]).map == 9
+    assert parse_args(["--repo", "o/r", "7"]).map == 7
     assert parse_args([]).command == "open"
 
 
