@@ -73,24 +73,24 @@ class Ticket:
         """Why this ticket must not be started by `viewer`, or None. An unknown viewer is not told apart. A live
         session is the board's to check, since only herdr knows it."""
         if not self.is_open:
-            return f"#{self.number} is closed"
+            return f"{self.ref} is closed"
         if self.spec_kind == "spec":
-            return f"#{self.number} is a spec: s starts /implement on its implementation tickets"
+            return f"{self.ref} is a spec: s starts /implement on its implementation tickets"
         if self.blocked_by:
-            return f"#{self.number} is blocked by {', '.join(self.blocked_by)}"
+            return f"{self.ref} is blocked by {', '.join(self.blocked_by)}"
         if self.open_blockers:
-            return f"#{self.number} is blocked by {self.open_blockers} open issue{'s' if self.open_blockers > 1 else ''}"
+            return f"{self.ref} is blocked by {self.open_blockers} open issue{'s' if self.open_blockers > 1 else ''}"
         if viewer and self.assignees and viewer.lower() not in (a.lower() for a in self.assignees):
-            return f"#{self.number} is claimed by {', '.join('@' + a for a in self.assignees)}"
+            return f"{self.ref} is claimed by {', '.join('@' + a for a in self.assignees)}"
         if self.spec_kind == "impl" and self.has_open_change_request:
-            return f"#{self.number} has an open PR that closes it"
+            return f"{self.ref} has an open PR that closes it"
         if not (self.is_wayfinder_work or self.map_missing):  # a typed ticket without its map is warned about apart
             return self.not_wayfinder_work
         return None
 
     @property
     def not_wayfinder_work(self) -> str:
-        return f"#{self.number} is not wayfinder work: the board only starts work on a map"
+        return f"{self.ref} is not wayfinder work: the board only starts work on a map"
 
     @property
     def is_wayfinder_work(self) -> bool:

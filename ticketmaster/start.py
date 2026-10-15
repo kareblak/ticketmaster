@@ -1,4 +1,5 @@
-"""What the board's keys do in herdr: start a ticket's /wayfinder or /implement session, or go to its session."""
+"""What the board's keys do in herdr: start or continue a ticket's /wayfinder or /implement session in its own
+worktree, or go to its session."""
 
 from __future__ import annotations
 
@@ -23,9 +24,10 @@ class NotWayfinderWork(ValueError):
 
 def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND,
                  implement_command: str = DEFAULT_IMPLEMENT_COMMAND) -> str:
-    """Wayfinder claims and resolves map tickets itself, and drives a ticket that has a map (the spec a map
-    led to). An implementation ticket gets /implement on the ticket alone. Without a map there is nothing to
-    start: a typed wayfinder ticket raises MapNotFound, anything else NotWayfinderWork.
+    """Exactly `<wayfinder_command> <map-url> [<ticket-url>]`: wayfinder claims and resolves map tickets itself,
+    and drives a ticket that has a map (the spec a map led to). An implementation ticket gets /implement on the
+    ticket alone. Without a map there is nothing to start: a typed wayfinder ticket raises MapNotFound, anything
+    else NotWayfinderWork.
     """
     if ticket.spec_kind == "impl":
         return f"{implement_command} {ticket.url}"
@@ -53,6 +55,11 @@ def branch_name(ticket: Ticket) -> str:
 def session_label(ticket: Ticket) -> str:
     title = re.sub(r"\s+", " ", ticket.title)[:60]
     return f"{ticket.ref} {title}"
+
+
+def takes_focus(ticket: Ticket) -> bool:
+    """HITL tickets and maps pull the developer over; research and implementation run AFK and start unfocused."""
+    return ticket.spec_kind != "impl" and ticket.wayfinder_type != "research"
 
 
 def claude_args(ticket: Ticket, prompt: str) -> list[str]:
@@ -86,24 +93,19 @@ class Workbench:
         return build_prompt(ticket, self.wayfinder_command, self.implement_command)
 
     def start(self, ticket: Ticket) -> str:
-        if ticket.spec_kind == "impl":
-            return self.start_implement(ticket)
-        where = self.herdr.start_in_new_worktree(
-            self.cwd, worktree_name(ticket), session_label(ticket),
-            claude_args(ticket, self.prompt(ticket)), self.claude,
-        )
-        return f"Started #{ticket.number} in {where}"
-
-    def start_implement(self, ticket: Ticket) -> str:
-        """AFK: in the ticket's own worktree, reopened with `claude --continue` when it has one, never focused."""
+        """In the ticket's own worktree, named by its key: created with the prompt, or reopened with
+        `claude --continue` when it exists without an agent; never a `-2` copy."""
+        focus = takes_focus(ticket)
         where = self.herdr.start_in_worktree(
             self.cwd, worktree_name(ticket), branch_name(ticket), session_label(ticket),
-            claude_args(ticket, self.prompt(ticket)), continue_args(ticket), self.claude,
+            claude_args(ticket, self.prompt(ticket)), continue_args(ticket), self.claude, focus,
         )
-        return f"Started {self.implement_command} on {ticket.ref} in {where}, unfocused"
+        if ticket.spec_kind == "impl":
+            return f"Started {self.implement_command} on {ticket.ref} in {where}, unfocused"
+        return f"Started {ticket.ref} in {where}" + ("" if focus else ", unfocused: research runs AFK")
 
     def go_to(self, ticket: Ticket, session: Session) -> str:
-        return f"#{ticket.number}: " + self.herdr.go_to(self.cwd, session, session_label(ticket))
+        return f"{ticket.ref}: " + self.herdr.go_to(self.cwd, session, session_label(ticket))
 
 
 def workbench_for(cwd: Path, config: dict) -> Workbench:

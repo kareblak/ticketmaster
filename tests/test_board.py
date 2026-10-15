@@ -5,7 +5,7 @@ from pathlib import Path
 
 from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, passes_authors,
                                passes_labels, render_card)
-from ticketmaster.herdr import Session
+from ticketmaster.herdr import HerdrError, Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
 from ticketmaster.start import build_prompt
@@ -312,7 +312,8 @@ def test_s_refuses_a_blocked_ticket_naming_its_blockers_and_enter_says_it_has_no
                 assert not is_confirm(app)
             await loaded(app, pilot)
             assert bench.calls == []
-            assert [m for m, _ in notifications(app)][-2:] == ["#5 is blocked by #1, #9", "#5 has no session here"]
+            assert [m for m, _ in notifications(app)][-2:] == [
+                "#5 is blocked by #1, #9", "#5 has no session here; s refuses: #5 is blocked by #1, #9"]
 
     run(scenario())
 
@@ -330,7 +331,8 @@ def test_s_refuses_a_ticket_claimed_by_someone_else_and_enter_says_it_has_no_ses
             await pilot.press("enter")
             await pilot.pause()
             assert not is_confirm(app) and bench.calls == []
-            assert [m for m, _ in notifications(app)][-2:] == ["#6 is claimed by @bob", "#6 has no session here"]
+            assert [m for m, _ in notifications(app)][-2:] == [
+                "#6 is claimed by @bob", "#6 has no session here; s refuses: #6 is claimed by @bob"]
 
     run(scenario())
 
@@ -408,7 +410,7 @@ def test_enter_on_a_card_without_session_never_starts_and_says_so():
             await pilot.press("enter")
             await loaded(app, pilot)
             assert not is_confirm(app) and bench.calls == []
-            assert notifications(app)[-1][0] == "#1 has no session here"
+            assert notifications(app)[-1][0] == "#1 has no session here; s starts /wayfinder on it"
 
     run(scenario())
 
@@ -423,7 +425,7 @@ def test_double_click_acts_like_enter_and_never_starts():
             await pilot.click(card, times=2)
             await loaded(app, pilot)
             assert not is_confirm(app) and bench.calls == []
-            assert notifications(app)[-1][0] == "#1 has no session here"
+            assert notifications(app)[-1][0] == "#1 has no session here; s starts /wayfinder on it"
 
     run(scenario())
 
@@ -527,7 +529,8 @@ def test_enter_on_a_map_card_targets_the_maps_own_session_never_a_tickets():
             await select(app, pilot, 9)
             await pilot.press("enter")
             await loaded(app, pilot)
-            assert bench.calls == [] and notifications(app)[-1][0] == "#9 has no session here"
+            assert bench.calls == []  # its tickets' live sessions take its frontier, and Enter never starts
+            assert notifications(app)[-1][0] == "#9 has no session here; s starts /wayfinder on the map, its frontier is empty"
             bench.current = {**bench.current, 9: [live(9, "/w/tm-9", "idle")]}
             await pilot.press("r")
             await loaded(app, pilot)
@@ -1296,9 +1299,9 @@ def test_two_quick_presses_on_the_map_start_two_different_frontier_tickets():
     run(scenario())
 
 
-def test_frontier_skips_tickets_that_already_have_a_session():
+def test_frontier_skips_tickets_that_already_have_a_live_session():
     async def scenario():
-        bench = FakeBench({5: [Session(5, "/w/issue-5")]})
+        bench = FakeBench({5: [live(5, "/w/issue-5", "working")]})
         app = bench_app(bench, MAP_BOARD)
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
@@ -1309,22 +1312,199 @@ def test_frontier_skips_tickets_that_already_have_a_session():
     run(scenario())
 
 
-def test_empty_frontier_says_so_and_starts_nothing():
+def test_frontier_continues_a_ticket_whose_worktree_has_no_agent():
     async def scenario():
-        bench = FakeBench()
-        tickets = [MAP_CARD, map_child(5, assignees=("bob",)), map_child(7, open_blockers=1)]
-        app = bench_app(bench, tickets)
+        bench = FakeBench({5: [Session(5, "/w/issue-5")]})
+        app = bench_app(bench, MAP_BOARD)
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
             await pilot.press("s")
             await pilot.pause()
-            assert not is_confirm(app)
+            assert app.screen.question == "Continue #5 Question 5 (next on map #1) in its worktree issue-5?"
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 5)]
+
+    run(scenario())
+
+
+EMPTY_FRONTIER = [MAP_CARD, map_child(5, assignees=("bob",)), map_child(7, open_blockers=1)]
+
+
+def test_empty_frontier_starts_the_map_itself_and_enter_says_so_first():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench, EMPTY_FRONTIER)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await focus_map(app, pilot)
             await pilot.press("enter")
             await loaded(app, pilot)
-            assert bench.calls == []
-            warnings = [m for m, severity in notifications(app) if severity == "warning"]
-            assert "#1" in warnings[0] and "frontier" in warnings[0]
-            assert warnings[1:] == ["#1 has no session here"]  # Enter never starts
+            assert not is_confirm(app) and bench.calls == []  # Enter never starts
+            assert notifications(app)[-1][0] == \
+                "#1 has no session here; s starts /wayfinder on the map, its frontier is empty"
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Start #1 Pick a stack (map #1's frontier is empty) in a new worktree?"
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 1)]
+
+    run(scenario())
+
+
+def test_empty_frontier_continues_the_maps_own_agentless_worktree():
+    async def scenario():
+        bench = FakeBench({1: [Session(1, "/w/issue-1")]})
+        app = bench_app(bench, EMPTY_FRONTIER)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await focus_map(app, pilot)
+            await pilot.press("s", "y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 1)]
+
+    run(scenario())
+
+
+def test_empty_frontier_with_a_live_map_session_says_press_enter():
+    async def scenario():
+        bench = FakeBench({1: [live(1, "/w/issue-1", "idle")]})
+        app = bench_app(bench, EMPTY_FRONTIER)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await focus_map(app, pilot)
+            await pilot.press("s")
+            await loaded(app, pilot)
+            assert not is_confirm(app) and bench.calls == []
+            assert notifications(app)[-1] == ("#1 has a live session: press Enter to go to it", "warning")
+
+    run(scenario())
+
+
+def test_s_refuses_a_ticket_with_a_live_session_and_names_enter():
+    async def scenario():
+        bench = FakeBench({1: [Session(1, "/w/old"), live(1, "/w/issue-1", "working")]})
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s")
+            await loaded(app, pilot)
+            assert not is_confirm(app) and bench.calls == []
+            assert notifications(app)[-1] == ("#1 has a live session: press Enter to go to it", "warning")
+
+    run(scenario())
+
+
+def test_s_on_my_claimed_ticket_with_only_an_agentless_worktree_continues_it():
+    async def scenario():
+        bench = FakeBench({2: [Session(2, "/w/issue-2")]})
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 2)
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Continue #2 Doing in its worktree issue-2?"
+            assert "claude --continue" in app.screen.detail
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 2)]
+
+    run(scenario())
+
+
+class FailingBench(FakeBench):
+    def start(self, ticket):
+        super().start(ticket)
+        raise HerdrError("agent_start_failed")
+
+
+def test_a_failed_start_frees_the_ticket_for_another_s():
+    async def scenario():
+        bench = FailingBench()
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s", "y")
+            await loaded(app, pilot)
+            assert notifications(app)[-1] == ("herdr: agent_start_failed", "error")
+            await pilot.press("s")
+            await pilot.pause()
+            assert is_confirm(app)
+
+    run(scenario())
+
+
+def test_s_stays_refused_while_the_new_worktree_waits_for_its_agent():
+    async def scenario():
+        bench = FakeBench()
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s", "y")
+            await loaded(app, pilot)
+            bench.current = {1: [Session(1, "/w/issue-1")]}  # herdr lists the worktree before Claude is ready
+            await pilot.press("r")
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s")
+            await loaded(app, pilot)
+            assert not is_confirm(app) and bench.calls == [("start", 1)]
+            assert notifications(app)[-1][0] == "#1 has a live session: press Enter to go to it"
+            bench.current = {1: [live(1, "/w/issue-1", "idle")]}
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert 1 not in app.starting
+
+    run(scenario())
+
+
+def test_s_offers_to_continue_only_the_worktree_named_by_the_key():
+    async def scenario():
+        bench = FakeBench({1: [Session(1, "/w/issue-1-2"), Session(1, "/w/issue-1")]})
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Continue #1 Ready one in its worktree issue-1?"
+            bench.current = {1: [Session(1, "/w/issue-1-2")]}  # a copy alone: herdr makes the key's worktree
+            await pilot.press("n", "r")
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Start #1 Ready one in a new worktree?"
+
+    run(scenario())
+
+
+def test_s_starts_decision_tickets_of_all_four_types():
+    async def scenario():
+        bench = FakeBench()
+        kinds = ["research", "prototype", "grilling", "task"]
+        app = bench_app(bench, [MAP, *(on(9, 20 + i, kind=kind) for i, kind in enumerate(kinds))])
+        async with app.run_test(size=(160, 60)) as pilot:
+            await loaded(app, pilot)
+            for i in range(len(kinds)):
+                await select(app, pilot, 20 + i)
+                await pilot.press("s", "y")
+                await loaded(app, pilot)
+            assert bench.calls == [("start", 20), ("start", 21), ("start", 22), ("start", 23)]
+
+    run(scenario())
+
+
+def test_enter_on_a_map_with_a_frontier_names_the_ticket_s_would_start():
+    async def scenario():
+        app = bench_app(FakeBench(), MAP_BOARD)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await focus_map(app, pilot)
+            await pilot.press("enter")
+            await loaded(app, pilot)
+            assert notifications(app)[-1][0] == "#1 has no session here; s starts #5 Question 5, next on the map"
 
     run(scenario())
 
@@ -1503,7 +1683,7 @@ def test_s_on_an_impl_card_refuses_and_leaves_the_workbench_untouched():
             assert bench.calls == []
             assert [m for m, _ in notifications(app)][-5:] == [
                 "#52 is closed", "#53 is blocked by #51", "#54 is claimed by @bob",
-                "#55 has a live session: press Enter", "#56 has an open PR that closes it"]
+                "#55 has a live session: press Enter to go to it", "#56 has an open PR that closes it"]
 
     run(scenario())
 
