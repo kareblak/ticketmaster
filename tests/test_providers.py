@@ -43,6 +43,17 @@ def test_github_merged_pr_alone_is_not_review():
     assert github.to_ticket(node, 0).has_open_change_request is False
 
 
+def test_github_merged_closing_pr_is_marked_merged():
+    node = {
+        "number": 1, "title": "T", "url": "u", "state": "OPEN",
+        "assignees": {"nodes": []}, "labels": {"nodes": []},
+        "closedByPullRequestsReferences": {"nodes": [{"state": "MERGED"}]},
+    }
+    assert github.to_ticket(node, 0).has_merged_change_request is True
+    assert github.to_ticket({**node, "closedByPullRequestsReferences": {"nodes": [{"state": "OPEN"}]}},
+                            0).has_merged_change_request is False
+
+
 def gh_issue(number, labels=(), body="", parent=None, state="OPEN"):
     node = {"number": number, "title": f"t{number}", "url": f"https://gh/o/r/issues/{number}", "body": body,
             "state": state, "assignees": {"nodes": []}, "labels": {"nodes": [{"name": n} for n in labels]},
