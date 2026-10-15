@@ -3,8 +3,8 @@
 
 The board is every open `wayfinder:map` issue of the configured team, and every closed one an open spec still names,
 and, per map, its sub-issues in sub-issue order, plus the team's issues whose first line is `Part of <map>`: a typed ticket linked only that way, or the map's
-spec. A sub-issue of the map with the spec signature and no `wayfinder:` label is its spec too. Linear stores a typed `Part of TM-1` as a mention, `[TM-1](<issue URL>)`, so the line may hold the key, the
-mention or the URL. A spec's implementation tickets are its sub-issues and the issues whose `## Parent` section
+spec. A sub-issue of the map with the spec signature and no `wayfinder:` label is its spec too. Linear stores a
+typed `Part of TM-1` as a mention, `[TM-1](<issue URL>)`, so the line may hold the key, the mention or the URL. A spec's implementation tickets are its sub-issues and the issues whose `## Parent` section
 names it. Blockers are the `blocks` relations pointing at an issue, then the `TM-<n>` its `Blocked by:` line or
 `## Blocked by` section lists.
 
@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 from ..model import Ticket, parse_time, part_of, wayfinder_kinds
 from . import (OPEN_MAPS, IssueStates, ProviderError, Query, RateLimited, as_spec, cap_lanes, capped,
-               closed_map_refs, is_spec, parent_ref, under_spec, with_body_blockers, with_map, with_spec_tickets)
+               closed_map_refs, parent_ref, under_spec, with_body_blockers, with_map, with_spec_tickets)
 
 if TYPE_CHECKING:
     from .linear_oauth import OAuthSession
@@ -267,10 +267,13 @@ class LinearProvider:
         tickets, specs = list(maps.values()), {}
         for number, map_ticket in maps.items():
             for child, child_id in self._children(found[number]["id"], limit + 1):
-                if is_spec(child, number):
-                    specs[child.number] = (as_spec(child, map_ticket), child_id)
-                tickets.append(specs[child.number][0] if child.number in specs else with_map(child, map_ticket))
-        for spec, spec_id in specs.values():  # a sub-issue spec's own sub-issues are its implementation tickets
+                if child.is_spec_of(number):
+                    spec = as_spec(child, map_ticket)
+                    specs[child.number] = (spec, child_id)
+                    tickets.append(spec)
+                else:
+                    tickets.append(with_map(child, map_ticket))
+        for spec, spec_id in specs.values():  # a map spec's own sub-issues are its implementation tickets
             seen = {t.number for t in tickets}
             subs = under_spec([child for child, _ in self._children(spec_id, limit + 1) if child.number not in seen],
                               spec)
@@ -313,7 +316,7 @@ class LinearProvider:
                 continue
             if ticket.wayfinder_type is not None:
                 linked.append(with_map(ticket, map_ticket))
-            elif is_spec(ticket, map_ticket.number):
+            elif ticket.is_spec_of(map_ticket.number):
                 specs[ticket.number] = as_spec(ticket, map_ticket)
                 linked.append(specs[ticket.number])
         for ticket in candidates:

@@ -2,8 +2,8 @@
 
 The board is every open `wayfinder:map`, and every closed one an open spec still names, and, per map, its sub-issues in order, the typed tickets that link to
 it only by a `Part of #<map>` line, the spec (a sub-issue with the spec signature, else linked by `Part of #<map>`)
-and the spec's implementation tickets: its sub-issues and the issues whose `## Parent` section names it. Body links show up as cross-references in
-the linked issue's timeline. Then every standalone spec with its tickets, found by their signatures: an open spec's
+and the spec's implementation tickets: its sub-issues and the issues whose `## Parent` section names it. Body links
+show up as cross-references in the linked issue's timeline. Then every standalone spec with its tickets, found by their signatures: an open spec's
 tickets are its children the same way, a closed one's the open and recently closed tickets naming it.
 """
 
@@ -16,7 +16,7 @@ from typing import NamedTuple
 
 from ..model import Ticket, parse_time, part_of
 from . import (LIMIT, OPEN_MAPS, RECENTLY_CLOSED, SIGNATURE_HITS, IssueStates, NotFound, ProviderError, Query, Quota,
-               RateLimited, as_spec, blocker_ref, capped, closed_map_refs, in_spec_lane, is_signature_hit, is_spec,
+               RateLimited, as_spec, blocker_ref, capped, closed_map_refs, in_spec_lane, is_signature_hit,
                is_spec_ticket, is_standalone_candidate, lane_cut, names_parent, resolve_maps, run_cli, run_json,
                tracker_error, under_spec, with_body_blockers, with_spec_tickets)
 
@@ -125,8 +125,8 @@ class GitHubProvider:
         self.cut_off: list[str] = []
 
     def fetch(self, query: Query) -> list[Ticket]:
-        """Every open map, every closed map an open spec names (`Part of #<map>`, or its parent), and their children; the
-        sub-issue parent is the native child→map link, `Part of #<map>` the fallback. Then every standalone spec
+        """Every open map, every closed map an open spec names (`Part of #<map>`, or its parent), and their children;
+        the sub-issue parent is the native child→map link, `Part of #<map>` the fallback. Then every standalone spec
         that is open or named by an open ticket, with its tickets.
 
         The searches read lean fields, the maps and the standalone specs get one full fetch together, and the
@@ -162,13 +162,13 @@ class GitHubProvider:
         maps += [full[n] for n in wanted if n in full and full[n].is_wayfinder_map]
         numbers = {m.number for m in maps}
         candidates = [s.number for s in specs
-                      if s.number not in numbers and part_of(s.body) in numbers and is_spec(s, part_of(s.body))]
+                      if s.number not in numbers and part_of(s.body) in numbers and s.is_spec_of(part_of(s.body))]
         any_map = numbers | {n for n, t in full.items() if t.is_wayfinder_map}
         standalone = [full[n] for n in open_specs + closed_specs if n in full and is_standalone_candidate(full[n], any_map)]
         children = self._children([m.number for m in maps] + candidates
                                   + [s.number for s in standalone if s.is_open], limit)
         # A spec the open `Part of` search missed (a closed one) has its children read in one more batch.
-        specs_of = [t.number for m in maps for t in self._map_family(m, children, {m.number}) if is_spec(t, m.number)]
+        specs_of = [t.number for m in maps for t in self._map_family(m, children, {m.number}) if t.is_spec_of(m.number)]
         children |= self._children([n for n in specs_of if n not in children], limit)
         tickets = list(maps)
         for map_ticket in maps:
@@ -264,7 +264,7 @@ class GitHubProvider:
         tickets = new_tickets(subs, taken, self.repo)
         tickets += new_tickets(refs, taken | {t.number for t in tickets}, self.repo,
                                lambda node: part_of(node.get("body") or "") == number)
-        return [as_spec(t, map_ticket) if is_spec(t, number) else t for t in tickets]
+        return [as_spec(t, map_ticket) if t.is_spec_of(number) else t for t in tickets]
 
     def _map_with_specs(self, map_ticket: Ticket, children: dict[int, Children], taken: set[int], limit: int,
                         cut: list[str]) -> list[Ticket]:
@@ -276,7 +276,7 @@ class GitHubProvider:
         def seen() -> set[int]:
             return taken | {t.number for t in tickets}
 
-        for spec in [t for t in tickets if is_spec(t, map_ticket.number)]:
+        for spec in [t for t in tickets if t.is_spec_of(map_ticket.number)]:
             subs, refs, spec_more = children[spec.number]
             more = more or spec_more
             tickets += under_spec(new_tickets(subs, seen(), self.repo), spec)
@@ -388,7 +388,7 @@ class GitHubProvider:
 
 class StandaloneWanted(NamedTuple):
     """What the full fetch reads for the standalone specs, by number: the open specs, the closed specs an open ticket
-    names, the maps those name by `Part of`, and the tickets naming them."""
+    names, the maps those name by `Part of` or are sub-issues of, and the tickets naming them."""
 
     open: list[int]
     closed: list[int]
@@ -402,11 +402,12 @@ class StandaloneWanted(NamedTuple):
 def standalone_wanted(hits: dict[int, Ticket], open_maps: set[int], part_of_specs: set[int]) -> StandaloneWanted:
     """From the signature search hits: the open standalone spec candidates, and the closed specs that keep a lane
     because an open ticket names them, which come in full with their tickets. A parent that is an open hit or an
-    open `Part of` issue (`part_of_specs`) is no closed spec."""
+    open `Part of` issue (`part_of_specs`) is no closed spec. A closed spec's map is the one its `Part of` line names,
+    else its sub-issue parent."""
     open_specs = [n for n, t in hits.items() if t.is_open and is_standalone_candidate(t, open_maps)]
     named = [t.spec_number for t in hits.values() if t.is_open and is_spec_ticket(t, t.spec_number)]
     closed = list(dict.fromkeys(p for p in named if p not in part_of_specs and not (p in hits and hits[p].is_open)))
-    maps = [n for p in closed if p in hits and (n := part_of(hits[p].body)) is not None]
+    maps = [n for p in closed if p in hits and (n := part_of(hits[p].body) or hits[p].parent_number) is not None]
     tickets = [n for n, t in hits.items() if t.spec_number in closed and is_spec_ticket(t, t.spec_number)]
     return StandaloneWanted(open_specs, closed, maps, tickets)
 

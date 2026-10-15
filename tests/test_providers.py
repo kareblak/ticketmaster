@@ -720,10 +720,10 @@ def test_spec_is_part_of_the_map_without_a_wayfinder_label():
     def spec(body, labels=()):
         return Ticket(number=3, title="Spec", url="u", is_open=True, body=body, labels=labels)
 
-    assert providers.is_spec(spec("Part of #5\n\n## Problem Statement", ("ready-for-agent",)), 5)
-    assert not providers.is_spec(spec("Part of #50"), 5)
-    assert not providers.is_spec(spec("Part of #5", ("wayfinder:task",)), 5)  # a decision ticket
-    assert not providers.is_spec(spec("Part of #5", ("wayfinder::grilling",)), 5)
+    assert spec("Part of #5\n\n## Problem Statement", ("ready-for-agent",)).is_spec_of(5)
+    assert not spec("Part of #50").is_spec_of(5)
+    assert not spec("Part of #5", ("wayfinder:task",)).is_spec_of(5)  # a decision ticket
+    assert not spec("Part of #5", ("wayfinder::grilling",)).is_spec_of(5)
 
 
 def test_implementation_ticket_names_its_spec_in_the_parent_section():
@@ -1328,3 +1328,14 @@ def test_github_shows_a_closed_map_whose_sub_issue_spec_is_still_open(monkeypatc
     FakeGitHub(monkeypatch, issues=[closed_map], subs=subs, signed=[spec])
     tickets = github.GitHubProvider("o/r").fetch(Query())
     assert lanes(tickets) == {1: {"SPECS": [10], "FRONTIER": [11], "DECIDED": [2]}}
+
+
+def test_github_takes_a_closed_sub_issue_spec_of_a_closed_map_for_no_standalone_spec(monkeypatch):
+    # As a closed `Part of #1` spec of a closed map is: the open ticket keeps neither lane.
+    closed_map = gh_issue(1, MAP_LABELS, state="CLOSED")
+    spec = gh_issue(10, [], SPEC_SIG, parent=1, state="CLOSED", closed_at=ago(1))
+    impl = gh_issue(11, [], TICKET_SIG, parent=10, parent_labels=())
+    FakeGitHub(monkeypatch, issues=[closed_map], subs={1: [spec], 10: [impl]}, signed=[spec, impl])
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert not any(t.is_standalone_spec for t in tickets)
+    assert lanes(tickets) == {}

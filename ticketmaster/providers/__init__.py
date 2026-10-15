@@ -382,12 +382,6 @@ def is_map(found: Ticket | None) -> bool:
     return found is not None and found.is_wayfinder_map
 
 
-def is_spec(ticket: Ticket, map_number: int) -> bool:
-    """The spec a map led to: `Part of #<map>` (`Part of TM-<map>` on Linear), or the spec signature as a sub-issue
-    of the map, and no `wayfinder:` label, so it is no decision ticket."""
-    return ticket.is_spec_of(map_number)
-
-
 def as_spec(ticket: Ticket, map_ticket: Ticket) -> Ticket:
     """The map is the spec's parent, and the map its session starts wayfinder on."""
     return on_map(with_map(ticket, map_ticket), map_ticket.number, map_ticket.url)

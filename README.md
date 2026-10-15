@@ -280,8 +280,9 @@ and the badges of the spec's sessions. The map card's own counts are of its deci
 
 On GitHub, each standalone spec is a spec lane. A standalone spec carries the spec **signature**, the
 headings `/to-spec` writes, `## Problem Statement` and `## Solution`, has no `Part of #<map>` line naming a
-map, is no sub-issue of a map and has no `wayfinder:` label. Both headings must be there, at `##` level, in any case; an issue that
-only mentions them in prose does not count, and one that also carries the ticket signature is a spec.
+map, is no sub-issue of a map and has no `wayfinder:` label. Both headings must be there, at `##` level,
+in any case; an issue that only mentions them in prose does not count, and one that also carries the
+ticket signature is a spec.
 Its header is the spec card (`▣`, magenta): `▣ #<n> <title>`, `spec closed` once it is closed, its
 assignees, and `spec · N done · N open · N blocked` (done is closed, less canceled). Its tickets are the
 issues with the ticket signature `/to-tickets` writes, `## What to build` and `## Acceptance criteria`,
