@@ -20,7 +20,7 @@ from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static
 
-from .config import (board_budget, board_interval, load_settings, parse_budget, parse_interval, save_settings,
+from .config import (DEFAULT_BUDGET, board_budget, board_interval, load_settings, parse_budget, parse_interval, save_settings,
                      seconds_text)
 from .herdr import HerdrError, Session
 from .model import COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, Ticket, build_board, frontier
@@ -186,7 +186,7 @@ def load_filters(saved: dict) -> dict[str, dict[str, str]]:
     return filters
 
 
-def budget_pace(quota: Quota, budget: float, now: datetime) -> float:
+def budget_pace(quota: Quota, budget: float, now: datetime) -> int:
     """Whole seconds between ticket fetches that spend at most `budget` points an hour at the last fetch's cost, and
     longer when the points left would run out before they reset at that pace; 0 for a fetch that cost nothing."""
     if quota.cost <= 0:
@@ -222,14 +222,16 @@ class Pacer:
         """A new interval from the settings menu: the next fetches are due that long after the last ones started.
         A rate-limit back-off stays: tickets keep its minute, sessions its 10s at least."""
         self.interval = interval
-        if not self.limited:
-            self.next_tickets = self.last_tickets + self.tickets_every
+        self._reschedule_tickets()
         self.next_sessions = self.last_sessions + self._sessions_every()
 
     def pace(self, seconds: float) -> None:
         """A new pace from the latest quota reading: the next ticket fetch is due `tickets_every` after the last one
         started. A rate-limit back-off stays."""
-        self.paced = seconds
+        self.paced = float(seconds)  # a float, as `seconds_text` shows it
+        self._reschedule_tickets()
+
+    def _reschedule_tickets(self) -> None:
         if not self.limited:
             self.next_tickets = self.last_tickets + self.tickets_every
 
@@ -841,7 +843,7 @@ class BoardApp(App):
             self._tracker_error(error)
             if quota is not None:
                 self.quota = quota
-                self._pace()
+            self._pace()
         if self.queued is not None:
             tickets, self.queued = self.queued and not self.pacer.limited, None
             self._fetch_in_background(tickets)
@@ -953,8 +955,7 @@ class BoardApp(App):
             maps, tickets = len(self.board.lanes), self.board.ticket_count()
             status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)} · {tickets} tickets")
             if not self.pacer.limited:
-                every = self.pacer.tickets_every
-                status.append(f" · every {seconds_text(every if every > self.interval else self.interval)}s")
+                status.append(f" · every {seconds_text(self.pacer.tickets_every)}s")
                 if self.quota is not None and self.quota.remaining is not None:
                     status.append(f" · {self.quota.remaining:,} pts left")
         if self.pacer.limited:
@@ -1273,6 +1274,8 @@ class BoardApp(App):
             self.budget = budget
             self._pace()
             self._render_status()
+        if values.get("budget") == DEFAULT_BUDGET and "budget" not in self._repo_settings():
+            del values["budget"]  # the untouched default stays a default
         saved = {key: int(value) if value.is_integer() else value for key, value in values.items()}
         if any(self._repo_settings().get(key) != value for key, value in saved.items()):
             self._repo_settings(create=True).update(saved)

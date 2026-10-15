@@ -1182,6 +1182,19 @@ def test_the_budget_is_a_github_setting_saved_per_repo(tmp_path):
     run(restored())
 
 
+def test_an_untouched_default_budget_is_not_saved(tmp_path):
+    settings = tmp_path / "settings.json"
+
+    async def scenario():
+        app, _ = quota_app([Quota(10, 4000, NOW + timedelta(hours=1))], settings=settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await enter_interval(pilot, app, "7")
+
+    run(scenario())
+    assert json.loads(settings.read_text()) == {"repos": {"github:o/r": {"interval": 7}}}
+
+
 def test_other_trackers_have_no_budget_setting(tmp_path):
     async def scenario():
         app = settings_app(tmp_path / "settings.json")
