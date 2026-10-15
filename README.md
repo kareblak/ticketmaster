@@ -83,10 +83,10 @@ herdr.
 
 `cleanup MAP` without `--dry-run` removes what the dry run marks removable, on a closed map only: an open map
 is refused with a non-zero exit and nothing changed, since a human closes the map in the tracker. For each
-removable entry it removes the worktree (`git worktree remove`, which refuses one changed since the look, and
-then leaves all of that entry alone), closes the herdr workspace open on it and any agent of it in another
-workspace, and deletes the branch with `git branch -d`, which keeps a branch git calls unmerged, such as one
-whose PR was squash-merged. Nothing is forced. Kept entries are left alone, and the summary lists what was
+removable entry it closes the herdr workspace open on the worktree and any agent of it in another workspace,
+removes the worktree (`git worktree remove`, which refuses one changed since the look, and then keeps the
+branch too), and deletes the branch with `git branch -d`, which keeps a branch git calls unmerged into the
+checkout it runs from, such as one whose PR was squash-merged. Nothing is forced. Kept entries are left alone, and the summary lists what was
 removed and what was kept, with the reasons. It exits non-zero when git or herdr refused a step.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
@@ -175,8 +175,8 @@ included, focuses its most urgent session (needs you, then working, then idle). 
 no Claude running it focuses, or opens, that worktree's workspace with a shell; Claude is not
 resumed. A map card goes only to the map's own session or worktree, never to one of its tickets'.
 
-The board only reads; `cleanup MAP` without `--dry-run` is the one command that changes anything. Wayfinder claims its tickets by assigning them, so the card moves to Claimed
-on the next refresh.
+The board only reads; `cleanup MAP` without `--dry-run` is the one command that changes anything.
+Wayfinder claims its tickets by assigning them, so the card moves to Claimed on the next refresh.
 
 ## Filters
 

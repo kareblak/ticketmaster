@@ -7,9 +7,9 @@ worktree, and an agent titled with a lane ticket that runs elsewhere. Each is re
 a PR closing it is merged, by the tracker, and it holds no uncommitted changes. Unpushed commits say nothing: a
 squash merge whose remote branch was deleted leaves every local commit unpushed. Whatever cleanup runs in is kept.
 
-Without `--dry-run`, and only on a closed map, each removable worktree is removed (`git worktree remove`, which
-refuses a worktree changed since), then its herdr workspace and agents are closed, then its branch is deleted with
-`git branch -d`, which refuses a branch git calls unmerged. Nothing is forced; kept entries are left alone. This is
+Without `--dry-run`, and only on a closed map, each removable worktree's herdr workspace and agents are closed,
+then the worktree is removed (`git worktree remove`, which refuses a worktree changed since), then its branch is
+deleted with `git branch -d`, which refuses a branch git calls unmerged. Nothing is forced; kept entries are left alone. This is
 the one command that changes anything: the board only reads.
 """
 
@@ -72,7 +72,7 @@ def has_uncommitted(path: str) -> bool | None:
     return bool(result.stdout.strip()) if result.returncode == 0 else None
 
 
-def verdict(ticket: Ticket, dirty: bool | None, outside: bool = False, here: bool = False) -> tuple[bool, str]:
+def verdict(ticket: Ticket, dirty: bool | None, outside: bool = False, occupied: bool = False) -> tuple[bool, str]:
     """Removable, and why; or kept, with every reason."""
     kept = []
     if ticket.is_open and ticket.has_open_change_request:
@@ -85,18 +85,19 @@ def verdict(ticket: Ticket, dirty: bool | None, outside: bool = False, here: boo
         kept.append("uncommitted changes")
     if outside:
         kept.append("agent outside a ticket worktree")
-    if here:
+    if occupied:
         kept.append("cleanup runs in it")
     if kept:
         return False, ", ".join(kept)
     return True, "ticket closed" if not ticket.is_open else "PR merged"
 
 
-def leftover(ticket: Ticket, path: str | None, branch: str | None, workspaces: list[str | None],
-             agents: list[dict], dirty: bool | None, outside: bool = False, here: bool = False,
-             opened: str | None = None) -> Leftover:
-    removable, reason = verdict(ticket, dirty, outside, here)
-    return Leftover(ticket, path, branch, tuple(dict.fromkeys(w for w in [opened, *workspaces] if w)),
+def leftover(ticket: Ticket, path: str | None, branch: str | None, agents: list[dict], dirty: bool | None,
+             outside: bool = False, occupied: bool = False, opened: str | None = None) -> Leftover:
+    """`occupied`: cleanup runs in it. `opened`: the herdr workspace open on the worktree."""
+    removable, reason = verdict(ticket, dirty, outside, occupied)
+    workspaces = [opened, *(a.get("workspace_id") for a in agents)]
+    return Leftover(ticket, path, branch, tuple(dict.fromkeys(w for w in workspaces if w)),
                     tuple(a.get("agent_status") or "unknown" for a in agents), removable, reason,
                     tuple((a["pane_id"], a.get("workspace_id")) for a in agents if a.get("pane_id")), opened)
 
@@ -122,9 +123,11 @@ def leftovers(cwd: Path, map_ticket: Ticket, tickets: list[Ticket], bench: Herdr
               uncommitted: Uncommitted | None = None, own_pane: str | None = None) -> list[Leftover]:
     """The map's and its lane tickets' worktrees in herdr's order with every agent running in them, then their
     branches checked out nowhere, then agents titled with one of them that run outside those worktrees. Only
-    lists: herdr is asked, never told. A worktree `cwd` lies in, or with an agent in `own_pane`, is kept."""
+    lists: herdr is asked, never told. A worktree `cwd` lies in, or whose workspace or agent is `own_pane`'s, is
+    kept."""
     uncommitted = uncommitted or has_uncommitted
     where = cwd.resolve()
+    own_workspace = own_pane.split(":")[0] if own_pane else None
     family = {t.number: t for t in (map_ticket, *lane_tickets(map_ticket, tickets))}
     by_branch = {name: t for t in family.values() for name in ticket_branches(t)}
     checkouts = bench.call("worktree", "list", "--cwd", str(cwd)).get("worktrees", [])
@@ -139,19 +142,20 @@ def leftovers(cwd: Path, map_ticket: Ticket, tickets: list[Ticket], bench: Herdr
         if ticket is None:
             continue
         here = running.get(wt["path"], [])
-        inside = where.is_relative_to(Path(wt["path"]).resolve()) or any(a.get("pane_id") == own_pane for a in here)
-        found.append(leftover(ticket, wt["path"], wt.get("branch"), [a.get("workspace_id") for a in here],
-                              here, uncommitted(wt["path"]), here=inside, opened=wt.get("open_workspace_id")))
+        occupied = (where.is_relative_to(Path(wt["path"]).resolve())
+                    or (own_workspace is not None and wt.get("open_workspace_id") == own_workspace)
+                    or any(a.get("pane_id") == own_pane for a in here))
+        found.append(leftover(ticket, wt["path"], wt.get("branch"), here, uncommitted(wt["path"]),
+                              occupied=occupied, opened=wt.get("open_workspace_id")))
     checked_out = {wt.get("branch") for wt in checkouts}
     for branch in herdr.local_branches(cwd):
         if branch in by_branch and branch not in checked_out:
-            found.append(leftover(by_branch[branch], None, branch, [], [], False))
+            found.append(leftover(by_branch[branch], None, branch, [], False))
     listed = {entry.path for entry in found}
     for path, here in running.items():
         for agent in here:
             if path not in listed and (ticket := family.get(title_number(agent))) is not None:
-                found.append(leftover(ticket, path, None, [agent.get("workspace_id")], [agent], False,
-                                      outside=True))
+                found.append(leftover(ticket, path, None, [agent], False, outside=True))
     return found
 
 
@@ -198,9 +202,9 @@ def git(cwd: Path, *args: str) -> tuple[bool, str]:
 
 
 def remove(cwd: Path, found: list[Leftover], bench: Herdr, home: Path | None = None) -> list[Outcome]:
-    """Removes each removable entry: its worktree, then the herdr workspace open on it and the panes of its agents
-    in other workspaces, then its branch if git calls it merged. A worktree git refuses to remove keeps everything of it.
-    Kept entries are not touched."""
+    """Removes each removable entry: closes the herdr workspace open on it and the panes of its agents in other
+    workspaces, then removes its worktree, then its branch if git calls it merged. A worktree git refuses to remove
+    keeps its branch. Kept entries are not touched."""
     home = Path.home() if home is None else home
     outcomes = []
     for entry in found:
@@ -210,22 +214,23 @@ def remove(cwd: Path, found: list[Leftover], bench: Herdr, home: Path | None = N
         removed: list[str] = []
         left: list[str] = []
         failed = False
-        if entry.path:
-            ok, complaint = git(cwd, "worktree", "remove", entry.path)
-            if not ok:
-                outcomes.append(Outcome(entry, (), f"git worktree remove refused: {complaint}", failed=True))
-                continue
-            removed.append(f"worktree {shown(entry.path, home)}")
-        closing = [("workspace", entry.opened)] if entry.opened else []
-        closing += [("pane", pane) for pane, workspace in entry.panes if workspace != entry.opened]
-        for group, target in closing:
+        closing = [("workspace", entry.opened, f"workspace {entry.opened}")] if entry.opened else []
+        closing += [("pane", pane, f"agent {pane}") for pane, workspace in entry.panes if workspace != entry.opened]
+        for group, target, label in closing:
             try:
                 bench.call(group, "close", target)
             except herdr.HerdrError as exc:
-                left.append(f"{group} {target} not closed: {exc}")
+                left.append(f"{label} not closed: {exc}")
                 failed = True
             else:
-                removed.append(f"workspace {target}" if group == "workspace" else f"agent {target}")
+                removed.append(label)
+        if entry.path:
+            ok, complaint = git(cwd, "worktree", "remove", entry.path)
+            if not ok:
+                left.append(f"worktree kept: git worktree remove refused: {complaint}")
+                outcomes.append(Outcome(entry, tuple(removed), ", ".join(left), failed=True))
+                continue
+            removed.insert(0, f"worktree {shown(entry.path, home)}")
         if entry.branch:
             ok, complaint = git(cwd, "branch", "-d", entry.branch)
             if ok:

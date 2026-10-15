@@ -381,16 +381,15 @@ def test_cleanup_closes_an_agent_in_another_workspace_by_its_pane(repo):
 
 
 def test_cleanup_never_forces_a_worktree_with_new_changes_out(repo):
-    """Changes made after the look: git refuses to remove the worktree, and nothing of it is touched."""
+    """Changes made after the look: git refuses to remove the worktree, which keeps its branch too."""
     (repo.parent / "issue-40" / "new.txt").write_text("x")
     spy = real_fake(repo)
     found = cleanup.leftovers(repo, MAP, TICKETS, Herdr(spy), uncommitted=lambda path: False)
     outcomes = cleanup.remove(repo, found, Herdr(spy))
     assert (repo.parent / "issue-40" / "new.txt").exists()
     assert "issue-40" in REAL_LOCAL_BRANCHES(repo)
-    assert ["workspace", "close", "w2"] not in spy.calls
     entry = next(o for o in outcomes if o.entry.ticket.number == 40)
-    assert entry.removed == () and "git worktree remove refused" in entry.note
+    assert entry.failed and "worktree kept: git worktree remove refused" in entry.note
     assert not any("--force" in call or "-D" in call for call in spy.calls)
 
 
@@ -417,3 +416,29 @@ def test_main_cleanup_on_an_open_map_exits_non_zero(monkeypatch, capsys):
     open_map = issue(40, title="Ship deviations", labels=MAP_LABELS)
     assert run_main(monkeypatch, [open_map, *TICKETS[1:]], ["cleanup", "40"]) == 1
     assert "still open" in capsys.readouterr().err
+
+
+def test_cleanup_closes_herdr_before_removing_the_worktree(repo):
+    """No live agent has its directory removed under it."""
+    seen = {}
+    spy = real_fake(repo)
+    spy.answers[("workspace", "close")] = lambda argv: seen.setdefault(argv[2], (repo.parent / "issue-40").exists())
+    run_cleanup(repo, spy)
+    assert seen["w2"] is True
+
+
+def test_a_refused_herdr_close_fails_the_cleanup_and_main_exits_non_zero(repo, monkeypatch, capsys):
+    spy = real_fake(repo)
+    spy.answers[("workspace", "close")] = herdr.HerdrError("workspace_not_found")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(herdr, "available", lambda: True)
+    monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(TICKETS))
+    monkeypatch.setattr(herdr, "Herdr", lambda: Herdr(spy))
+    assert cli.main(["cleanup", "40"]) == 1
+    assert "workspace w2 not closed: workspace_not_found" in capsys.readouterr().out
+
+
+def test_the_workspace_cleanup_runs_in_is_kept(repo):
+    text, _ = run_cleanup(repo, real_fake(repo), own_pane="w2:p4")
+    assert (repo.parent / "issue-40").exists()
+    assert any(line.startswith("kept") and "#40" in line and "cleanup runs in it" in line for line in text.splitlines())
