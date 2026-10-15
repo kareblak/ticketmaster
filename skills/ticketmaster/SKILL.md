@@ -20,10 +20,11 @@ ticketmaster $ARGUMENTS
 - `cleanup <map> --dry-run`: lists the map's and its tickets' worktrees, branches and herdr workspaces, each
   marked removable or kept with the reason; it changes nothing. Relay the list as printed.
 - `cleanup <map>`: removes what the dry run marks removable (worktree, herdr workspace and agents, merged
-  branch), never forcing anything; it refuses an open map. Run it only when the user asks for the cleanup itself,
-  not just the list, and relay the summary as printed. Run from inside one of the map's worktrees, it removes that
-  worktree last, prints the summary, and then closes its own herdr workspace, which ends this session: make it the
-  session's last step, as there is no turn after it to relay anything.
+  branch), never forcing anything; it refuses an open map. Run it when the user asks for the cleanup itself, not
+  just the list, or as the final step of a session that finished a map's last work (see below), and relay the
+  summary as printed. Run from inside one of the map's worktrees, it removes that worktree last, prints the
+  summary, and then closes its own herdr workspace, which ends this session: make it the session's last step, as
+  there is no turn after it to relay anything.
 
 The first run, and the first after a plugin update, builds the plugin's venv, which takes a minute.
 
@@ -43,3 +44,22 @@ On the board, `Enter` goes to the session working a ticket (or its worktree, wit
 none and what `s` would do; it never starts Claude. `s` starts (or continues) `/wayfinder` for the ticket,
 or a map's next frontier ticket, `/to-tickets` on a spec without tickets, or `/implement` on a spec's ticket,
 in its own git worktree and herdr workspace, or says why it refuses.
+
+## Cleanup as a map's final step
+
+A session that finishes a map's last work (its last ticket merged or closed) ends with cleanup, once a human has
+closed the map in the tracker:
+
+1. Check the map's state (`gh issue view <map> --json state`, or the tracker's equivalent). If it is still open,
+   say that cleanup waits for the map to be closed, and stop. Never close the map yourself.
+2. Run `ticketmaster cleanup <map> --dry-run` and relay the list, since the real run may end this session before
+   you can say anything.
+3. Run `ticketmaster cleanup <map>`.
+
+Reading the list: **removable** entries go; **kept** entries stay with their reasons, and nothing is ever
+forced. `open ticket` or `unmerged PR` means the ticket's work is not in yet; `uncommitted changes` (or
+`git status unreadable`) means a worktree may hold work nobody committed; `agent outside a ticket worktree` is a
+session working the ticket from another checkout. Name each kept entry and its reason for the user; do not remove
+it by hand. `removed last: cleanup runs in it` marks this session's own worktree, whose workspace closes after the
+summary. In the real run's summary, `branch … kept: not merged in git` is normal after a squash merge, and
+`worktree kept: git worktree remove refused` means the worktree changed after the look.
