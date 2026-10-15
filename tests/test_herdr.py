@@ -12,6 +12,12 @@ REPO = Path("/code/shiplog")
 
 
 @pytest.fixture(autouse=True)
+def from_claude(monkeypatch):
+    monkeypatch.setenv(herdr.CLAUDE_ENV, "1")
+    monkeypatch.delenv(herdr.BOARD_ENV, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def no_git(monkeypatch):
     monkeypatch.setattr(herdr, "local_branches", lambda cwd: [])
     monkeypatch.setattr(herdr, "repo_root", lambda cwd: cwd)
@@ -201,6 +207,13 @@ def test_open_board_launched_by_a_board_pane_runs_in_place_without_looking_it_up
     monkeypatch.setenv(herdr.BOARD_ENV, "1")
     fake = FakeHerdr({("pane", "list"): {"panes": [pane("w1:p2", label="ticketmaster")]}})
     assert Herdr(fake).open_board(REPO, "tm open", caller="wN:p2") is None
+    assert fake.calls == []
+
+
+def test_open_board_typed_at_a_shell_runs_in_place_without_a_split(monkeypatch):
+    monkeypatch.delenv(herdr.CLAUDE_ENV)
+    fake = FakeHerdr({("pane", "list"): {"panes": [pane("w1:p1")]}})
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p1") is None
     assert fake.calls == []
 
 

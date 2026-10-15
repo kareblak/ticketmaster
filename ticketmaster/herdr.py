@@ -24,6 +24,7 @@ from pathlib import Path
 
 BOARD_LABEL = "ticketmaster"
 BOARD_ENV = "TICKETMASTER_BOARD"  # set on the `open` a board pane runs, so it knows it is the board
+CLAUDE_ENV = "CLAUDECODE"  # set in Claude's shell; without it `open` was typed at a shell, so the board runs there
 WRAPPER_ENV = "TICKETMASTER_WRAPPER"  # the plugin's bin/ticketmaster, exported by the wrapper itself
 DATA_ENV = "CLAUDE_PLUGIN_DATA"  # the wrapper's venv lives here; exported with WRAPPER_ENV
 BOARD_RATIO = 0.7  # share the caller keeps; leaves the board ~1/3, i.e. single-column mode
@@ -161,9 +162,12 @@ class Herdr:
 
     def open_board(self, cwd: Path, command: str, caller: str | None = None, session: str | None = None) -> BoardOpened | None:
         """Restarts the board in the caller's workspace, or splits one off the caller. Returns where it
-        went, or None when this process runs in the board pane itself, which then runs the board in place."""
+        went, or None when this process runs in the board pane itself, or was typed at a shell rather than run
+        by Claude, which then runs the board in place."""
         if os.environ.get(BOARD_ENV):
             return None  # launched by a board pane; it may not be in `pane list` yet, so don't look it up
+        if not os.environ.get(CLAUDE_ENV):
+            return None  # typed at a shell: the board takes this pane, no split
         command = f"{BOARD_ENV}=1 {command}"
         panes = self.call("pane", "list").get("panes", [])
         caller, own = self.caller_pane(panes, cwd, caller, session)
