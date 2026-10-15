@@ -10,6 +10,8 @@ from ticketmaster.herdr import Herdr
 from ticketmaster.model import Ticket
 from ticketmaster.providers import Query
 
+REAL_LOCAL_BRANCHES = herdr.local_branches
+
 REPO = Path("/code/shiplog")
 HERDR_HOME = "/home/me/.herdr/worktrees/shiplog"
 CLAUDE_HOME = "/code/shiplog/.claude/worktrees"
@@ -248,9 +250,14 @@ def test_cli_parses_cleanup_with_its_map_and_dry_run():
     assert cli.parse_args(["cleanup", "TM-7", "--dry-run"]).map == "TM-7"
 
 
+def test_cli_parses_cleanup_without_dry_run():
+    args = cli.parse_args(["cleanup", "40"])
+    assert (args.command, args.map, args.dry_run) == ("cleanup", 40, False)
+
+
 @pytest.mark.parametrize("argv, error", [
     (["cleanup", "--dry-run"], "cleanup needs a map"),
-    (["cleanup", "40"], "--dry-run"),
+    (["cleanup"], "cleanup needs a map"),
     (["open", "40", "--dry-run"], "--dry-run is for cleanup"),
 ])
 def test_cli_refuses_cleanup_without_a_map_or_dry_run(argv, error, capsys, monkeypatch):
@@ -278,3 +285,160 @@ def test_main_prints_the_dry_run(monkeypatch, capsys):
 def test_main_on_no_map_fails_with_the_reason(monkeypatch, capsys):
     assert run_main(monkeypatch, TICKETS, ["cleanup", "41", "--dry-run"]) == 1
     assert "ticketmaster: #41 is not a wayfinder map in github:o/r" in capsys.readouterr().err
+
+
+def test_an_agent_in_the_pane_cleanup_runs_in_keeps_its_worktree():
+    found = cleanup.leftovers(REPO, MAP, TICKETS, Herdr(fake()), uncommitted=lambda path: False, own_pane="w5:p1")
+    entry = by_place(found)[f"{HERDR_HOME}/issue-42"]
+    assert "cleanup runs in it" in entry.reason
+
+
+def test_the_worktree_cleanup_runs_in_is_kept():
+    found = cleanup.leftovers(Path(f"{HERDR_HOME}/issue-40/sub"), MAP, TICKETS, Herdr(fake()),
+                              uncommitted=lambda path: False)
+    entry = by_place(found)[f"{HERDR_HOME}/issue-40"]
+    assert (entry.removable, entry.reason) == (False, "cleanup runs in it")
+
+
+# --- cleanup without --dry-run, on a real git repo -------------------------------------------------
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """main, with worktrees issue-40 (merged into main), issue-51 (its PR squash-merged, so unmerged in git) and
+    issue-42 (open ticket), and branch issue-50 merged with no worktree."""
+    monkeypatch.setattr(herdr, "local_branches", REAL_LOCAL_BRANCHES)
+    root = tmp_path / "shiplog"
+    root.mkdir()
+    git("init", "-q", "-b", "main", cwd=root)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "start", cwd=root)
+    for branch in ("issue-40", "issue-50"):
+        git("branch", branch, cwd=root)
+    for name in ("issue-40", "issue-51", "issue-42"):
+        args = ["worktree", "add", "-q", str(tmp_path / name)]
+        git(*args, *(["-b", name] if name != "issue-40" else [name]), cwd=root)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "work",
+        cwd=tmp_path / "issue-51")
+    return root
+
+
+def real_fake(repo, agents=()):
+    home = repo.parent
+    return FakeHerdr({
+        ("worktree", "list"): {"worktrees": [
+            {"path": str(repo), "branch": "main", "is_linked_worktree": False, "open_workspace_id": "w1"},
+            wt(str(home / "issue-40"), "issue-40", "w2"),
+            wt(str(home / "issue-51"), "issue-51", "w3"),
+            wt(str(home / "issue-42"), "issue-42", "w5"),
+        ]},
+        ("agent", "list"): {"agents": list(agents)},
+    })
+
+
+def run_cleanup(repo, spy, tickets=TICKETS, own_pane=None):
+    return cleanup.clean(repo, FakeProvider(tickets), 40, Herdr(spy), own_pane=own_pane)
+
+
+def test_cleanup_removes_a_removable_worktree_its_workspace_and_its_merged_branch(repo):
+    spy = real_fake(repo)
+    run_cleanup(repo, spy)
+    assert not (repo.parent / "issue-40").exists()
+    assert "issue-40" not in REAL_LOCAL_BRANCHES(repo)
+    assert ["workspace", "close", "w2"] in spy.calls
+
+
+def test_cleanup_deletes_a_merged_branch_left_without_a_worktree(repo):
+    run_cleanup(repo, real_fake(repo))
+    assert "issue-50" not in REAL_LOCAL_BRANCHES(repo)
+
+
+def test_cleanup_never_deletes_a_branch_git_calls_unmerged(repo):
+    """The tracker says merged (a squash merge), git does not: the worktree goes, the branch stays."""
+    text, _ = run_cleanup(repo, real_fake(repo))
+    assert not (repo.parent / "issue-51").exists()
+    assert "issue-51" in REAL_LOCAL_BRANCHES(repo)
+    line = next(line for line in text.splitlines() if "#51" in line)
+    assert line.startswith("removed")
+    assert "branch issue-51 kept: not merged in git" in line
+
+
+def test_cleanup_leaves_kept_entries_alone_and_lists_them(repo):
+    spy = real_fake(repo, [{"pane_id": "w5:p1", "workspace_id": "w5", "agent_status": "working",
+                            "foreground_cwd": str(repo.parent / "issue-42")}])
+    text, _ = run_cleanup(repo, spy)
+    assert (repo.parent / "issue-42").exists()
+    assert "issue-42" in REAL_LOCAL_BRANCHES(repo)
+    assert not any("w5" in call for call in spy.calls if call[1] == "close")
+    assert any(line.startswith("kept") and "#42" in line and "open ticket" in line for line in text.splitlines())
+
+
+def test_cleanup_closes_an_agent_in_another_workspace_by_its_pane(repo):
+    spy = real_fake(repo, [{"pane_id": "w8:p3", "workspace_id": "w8", "agent_status": "idle",
+                            "foreground_cwd": str(repo.parent / "issue-40")}])
+    run_cleanup(repo, spy)
+    assert ["pane", "close", "w8:p3"] in spy.calls
+    assert ["workspace", "close", "w8"] not in spy.calls
+
+
+def test_cleanup_never_forces_a_worktree_with_new_changes_out(repo):
+    """Changes made after the look: git refuses to remove the worktree, which keeps its branch too."""
+    (repo.parent / "issue-40" / "new.txt").write_text("x")
+    spy = real_fake(repo)
+    found = cleanup.leftovers(repo, MAP, TICKETS, Herdr(spy), uncommitted=lambda path: False)
+    outcomes = cleanup.remove(repo, found, Herdr(spy))
+    assert (repo.parent / "issue-40" / "new.txt").exists()
+    assert "issue-40" in REAL_LOCAL_BRANCHES(repo)
+    entry = next(o for o in outcomes if o.entry.ticket.number == 40)
+    assert entry.failed and "worktree kept: git worktree remove refused" in entry.note
+    assert not any("--force" in call or "-D" in call for call in spy.calls)
+
+
+def test_cleanup_summary_shows_what_was_removed_and_kept(repo):
+    text, ok = run_cleanup(repo, real_fake(repo))
+    lines = text.splitlines()
+    assert lines[0] == "#40 Ship deviations (closed): cleaned up"
+    assert any(line.startswith("removed") and "#40" in line and "branch issue-40" in line and "workspace w2" in line
+               for line in lines)
+    assert lines[-1] == "3 removed, 1 kept"
+    assert ok
+
+
+def test_cleanup_on_an_open_map_refuses_and_changes_nothing(repo):
+    open_map = issue(40, title="Ship deviations", labels=MAP_LABELS)
+    spy = real_fake(repo)
+    with pytest.raises(cleanup.CleanupError, match="#40 is still open: close the map in the tracker first"):
+        run_cleanup(repo, spy, tickets=[open_map, *TICKETS[1:]])
+    assert spy.calls == []
+    assert (repo.parent / "issue-40").exists()
+
+
+def test_main_cleanup_on_an_open_map_exits_non_zero(monkeypatch, capsys):
+    open_map = issue(40, title="Ship deviations", labels=MAP_LABELS)
+    assert run_main(monkeypatch, [open_map, *TICKETS[1:]], ["cleanup", "40"]) == 1
+    assert "still open" in capsys.readouterr().err
+
+
+def test_cleanup_closes_herdr_before_removing_the_worktree(repo):
+    """No live agent has its directory removed under it."""
+    seen = {}
+    spy = real_fake(repo)
+    spy.answers[("workspace", "close")] = lambda argv: seen.setdefault(argv[2], (repo.parent / "issue-40").exists())
+    run_cleanup(repo, spy)
+    assert seen["w2"] is True
+
+
+def test_a_refused_herdr_close_fails_the_cleanup_and_main_exits_non_zero(repo, monkeypatch, capsys):
+    spy = real_fake(repo)
+    spy.answers[("workspace", "close")] = herdr.HerdrError("workspace_not_found")
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(herdr, "available", lambda: True)
+    monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(TICKETS))
+    monkeypatch.setattr(herdr, "Herdr", lambda: Herdr(spy))
+    assert cli.main(["cleanup", "40"]) == 1
+    assert "workspace w2 not closed: workspace_not_found" in capsys.readouterr().out
+
+
+def test_the_workspace_cleanup_runs_in_is_kept(repo):
+    text, _ = run_cleanup(repo, real_fake(repo), own_pane="w2:p4")
+    assert (repo.parent / "issue-40").exists()
+    assert any(line.startswith("kept") and "#40" in line and "cleanup runs in it" in line for line in text.splitlines())

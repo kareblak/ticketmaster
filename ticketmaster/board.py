@@ -1,4 +1,5 @@
-"""Live Textual swimlane board: a lane per wayfinder map and per standalone spec, its tickets in four columns."""
+"""Live Textual swimlane board: a lane per wayfinder map and per standalone spec, and the Loose lane, its tickets in
+four columns."""
 
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ import time
 import webbrowser
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
@@ -21,8 +22,8 @@ from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static
 
-from .config import (DEFAULT_BUDGET, board_budget, board_fetch_limit, board_interval, load_settings, parse_budget,
-                     parse_fetch_limit, parse_interval, save_settings, seconds_text)
+from .config import (DEFAULT_BUDGET, board_budget, board_decided_age, board_fetch_limit, board_interval, load_settings,
+                     parse_budget, parse_decided_age, parse_fetch_limit, parse_interval, save_settings, seconds_text)
 from .herdr import HerdrError, Session
 from .model import (COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, LaneKind, SpecProgress, Ticket, build_board,
                     frontier)
@@ -38,7 +39,10 @@ COLUMN_COLORS = {
 }
 MAP_COLOR = "cyan"
 SPEC_COLOR = "magenta"  # a standalone spec's lane
-LANE_GLYPHS = {LaneKind.MAP: "◆", LaneKind.SPEC: "▣"}
+LOOSE_COLOR = "blue"  # the Loose lane
+LANE_GLYPHS = {LaneKind.MAP: "◆", LaneKind.SPEC: "▣", LaneKind.LOOSE: "◇"}
+LOOSE_TITLE = "Loose tickets"
+NO_ISSUE = "The Loose lane has no issue; select one of its tickets"
 STATUS_STYLES = {  # herdr agent states
     "working": ("● working", "bold yellow"),
     "blocked": ("⚠ needs you", "bold red"),
@@ -108,8 +112,11 @@ def render_lane_header(lane: Lane, sessions: list[Session] = (), starting: bool 
                spec_sessions: dict[int, list[Session]] | None = None, spec_starting: set[int] = frozenset()) -> Text:
     """A lane's header. A map's: its title and its decided / open / blocked counts, then a line per spec with its
     tickets' done / open / blocked counts, or that it has none yet, and its sessions' badges. A standalone spec's: its
-    title, whether it is closed, its assignees and its tickets' done / open / blocked counts."""
+    title, whether it is closed, its assignees and its tickets' done / open / blocked counts. The Loose lane's: what it
+    holds and its tickets' done / open / blocked counts."""
     text = session_lines(sessions, starting, claimed)
+    if lane.kind is LaneKind.LOOSE:
+        return render_loose_lane(lane, text)
     if not lane.is_map:
         return render_spec_lane(lane, text)
     text.append(f"◆ {lane.header.ref} ", style=f"bold {MAP_COLOR}")
@@ -146,6 +153,21 @@ def render_spec_lane(lane: Lane, text: Text) -> Text:
     text.append(f"\nspec · {progress.done} done · {progress.open} open · {progress.blocked} blocked",
                 style=f"bold {SPEC_COLOR}")
     return text
+
+
+def render_loose_lane(lane: Lane, text: Text) -> Text:
+    """The Loose lane's header after `text`: what it holds, then its tickets' done / open / blocked counts."""
+    progress = lane.progress
+    text.append(f"{LANE_GLYPHS[LaneKind.LOOSE]} {LOOSE_TITLE}", style=f"bold {LOOSE_COLOR}")
+    text.append("  to-tickets output with no parent", style="grey62")
+    text.append(f"\n{progress.done} done · {progress.open} open · {progress.blocked} blocked",
+                style=f"bold {LOOSE_COLOR}")
+    return text
+
+
+def lane_title(lane: Lane) -> str:
+    """What a lane's cards name it by: its header issue's title, or the Loose lane's own."""
+    return lane.header.title if lane.header else LOOSE_TITLE
 
 
 def matches(ticket: Ticket, needle: str) -> bool:
@@ -220,6 +242,13 @@ def load_filters(saved: dict) -> dict[str, dict[str, str]]:
             values = [v for v in values if v in ASSIGNEES and v != ANYONE][:1]
         filters[section] = dict.fromkeys(values, INCLUDE)
     return filters
+
+
+def aged_out(ticket: Ticket, days: int | None, now: datetime) -> bool:
+    """A closed ticket closed more than `days` ago, which the Decided age hides; never an open ticket or one without a
+    close date, and nothing while the age is off (None)."""
+    return (days is not None and not ticket.is_open and ticket.closed_at is not None
+            and now - ticket.closed_at > timedelta(days=days))
 
 
 def budget_pace(quota: Quota, budget: float, now: datetime) -> int:
@@ -307,7 +336,7 @@ class Pacer:
 
 
 class Card(Static, can_focus=True):
-    """A ticket in a lane's column, or the map heading its lane (column None)."""
+    """A ticket in a lane's column, or the issue heading its lane (column None); the Loose lane's header has none."""
 
     # Bound on the card itself: otherwise the lanes' VerticalScroll handles up/down as scrolling.
     BINDINGS = [
@@ -317,10 +346,15 @@ class Card(Static, can_focus=True):
         Binding("right,l", "app.move(1,0)", show=False),
     ]
 
-    def __init__(self, ticket: Ticket, column: Column | None, text: Text):
+    def __init__(self, ticket: Ticket | None, column: Column | None, text: Text):
         super().__init__(text, classes="card" if column is not None else "card map-card")
         self.ticket = ticket
         self.column = column
+
+    @property
+    def key(self) -> int | LaneKind:
+        """What finds the card again after a refresh: its issue number, or the Loose lane for its header."""
+        return self.ticket.number if self.ticket else LaneKind.LOOSE
 
     def on_click(self, event: events.Click) -> None:
         self.focus()
@@ -562,8 +596,8 @@ KEY_DETAILS = {
     "open": "open the issue in the browser",
     "pick_filter": "narrow by type, HITL/AFK, assignee (me, unassigned, anyone), map and author; combines with /, "
                    "Esc on the board clears all, saved per repo",
-    "settings": "the refresh interval, applied at once, the fetch limit, from the next fetch, and the budget on "
-                "GitHub; saved per repo",
+    "settings": "the refresh interval and the Decided age, applied at once, the fetch limit, from the next fetch, "
+                "and the budget on GitHub; saved per repo",
 }
 
 
@@ -598,10 +632,11 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     text.append("  Click selects a card, double-click acts like Enter.\n", style="dim")
 
     heading("Lanes")
-    text.append("  Map lanes come first, by number, then spec lanes, by number. A map lane is an open\n"
-                "  wayfinder map, headed by its map card (◆): its decided (closed, not out of scope), open\n"
-                "  and blocked tickets. Naming a map (ticketmaster <map>, a number or a tracker key) filters\n"
-                "  this run's board to it, unsaved, and hides the spec lanes; Esc shows every lane again.\n"
+    text.append("  Map lanes come first, by number, then spec lanes, by number, then the Loose lane. A map\n"
+                "  lane is an open wayfinder map, headed by its map card (◆): its decided (closed, not out of\n"
+                "  scope), open and blocked tickets. Naming a map (ticketmaster <map>, a number or a tracker\n"
+                "  key) filters this run's board to it, unsaved, and hides the spec lanes and the Loose lane;\n"
+                "  Esc shows every lane again.\n"
                 "  A map named by number shows also when closed, as its header card\n"
                 f"  alone.{'  ← this board' if query.named_map else ''}\n"
                 "  A spec whose first line is `Part of #<map>` is a line of the map card, ▣ #<spec> open or\n"
@@ -614,6 +649,10 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  /to-tickets (`## What to build` and `## Acceptance criteria`, the spec as sub-issue parent\n"
                 "  or in `## Parent`), fill the columns, tagged impl; the spec is tagged spec. The lane stays\n"
                 "  while the spec or any of its tickets is open.\n"
+                "  The Loose lane (◇) holds /to-tickets tickets whose parent is no spec, or that have none:\n"
+                "  the open ones and those closed in the last 7 days, tagged impl, with their done (closed,\n"
+                "  less canceled), open and blocked counts. It has no issue behind it, and shows only when it\n"
+                "  has tickets.\n"
                 "  PR open: an open pull request will close the card's issue.\n")
 
     heading("Columns (the first rule that matches)")
@@ -645,13 +684,20 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
         ("wayfinder ticket", "a wayfinder:research/prototype/grilling/task ticket (or wayfinder::…);\n"
                              + " " * 22 + "its map is the native parent, else `Part of #<map>` on the body's\n"
                              + " " * 22 + "first line"),
-        ("impl ticket", "implement_command (default /mattpocock-skills:implement) with the\n"
+        ("standalone spec", "s on a spec lane's header card (▣), while the spec has no tickets\n"
+                            + " " * 22 + "(neither open nor closed), starts to_tickets_command with the spec's URL,\n"
+                            + " " * 22 + "focused, in the spec's own worktree. Once it has tickets, s\n"
+                            + " " * 22 + "refuses it: s starts /implement on its tickets, one by one"),
+        ("impl ticket", "an impl card, in a map lane or a spec lane: implement_command\n"
+                        + " " * 22 + "(default /mattpocock-skills:implement) with the\n"
                         + " " * 22 + "ticket's URL, unfocused (AFK). On Linear the branch is the issue's\n"
                         + " " * 22 + "gitBranchName. Not with an open PR that closes it. The session owns\n"
                         + " " * 22 + "review, push and PR; the board starts nothing else"),
         ("refused", "a closed, blocked or someone else's ticket or ticketless spec, and\n"
-                    + " " * 22 + "one with a live session (press Enter instead); a spec closed\n"
-                    + " " * 22 + "without tickets is passed over"),
+                    + " " * 22 + "one with a live session (press Enter instead); a map's spec closed\n"
+                    + " " * 22 + "without tickets is passed over. Any other issue is not board\n"
+                    + " " * 22 + "work: the board starts work on wayfinder maps, standalone specs\n"
+                    + " " * 22 + "and loose tickets. The board never removes a spec's worktree"),
     ]:
         row(kind, 18, prompt)
     text.append("  A wayfinder ticket's card says who it needs: HITL (you at the keyboard) for grilling and\n"
@@ -676,6 +722,10 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  tickets it reads per map (default 300), from the next fetch; a lower one asks the tracker\n"
                 "  less. A fetch that reaches it says so in the status line, e.g. `cut off at 300: open maps,\n"
                 "  #12's tickets`, so a missing ticket can be traced to the limit.\n"
+                "  Decided age (days): hides Decided tickets closed more than N days ago, at once and without\n"
+                "  a fetch; column heads and tabs count only the cards shown, lane headers keep the full\n"
+                "  progress. Open tickets and those without a close date always show. Empty (the default)\n"
+                "  shows every Decided ticket; 0 hides every one with a close date.\n"
                 "  GitHub budget: the board spends about 1,000 GraphQL points an hour by default (any\n"
                 "  positive number, saved per repo). Ticket fetches come every --interval, or every\n"
                 "  last fetch's cost × 3600 / budget when that is longer, and longer still when the points\n"
@@ -783,6 +833,7 @@ class BoardApp(App):
         self.wall = wall
         self.pacer = Pacer(self.interval, clock())
         self.budget = board_budget(self._repo_settings())  # GitHub points an hour, see budget_pace
+        self.decided_age = board_decided_age(self._repo_settings())  # days; None shows every Decided ticket
         self.quota: Quota | None = None  # the provider's reading after the last good ticket fetch; GitHub only
         self.ticker: Timer | None = None
         self.fetching = False
@@ -932,7 +983,9 @@ class BoardApp(App):
         return self.board.tickets()
 
     def _visible(self, lane: Lane, column: Column) -> list[Ticket]:
-        return [t for t in lane.columns[column] if self._passes(t)]
+        """The column's cards that pass the filters, less those the Decided age hides."""
+        now = self.wall()
+        return [t for t in lane.columns[column] if self._passes(t) and not aged_out(t, self.decided_age, now)]
 
     def _chosen(self, section: str) -> list[str]:
         """The section's selected values that are on the board, in the picker's order. The preset map counts even
@@ -961,20 +1014,22 @@ class BoardApp(App):
         return matches(ticket, self.needle) and passes_filters(ticket, self.filters, self.known, self.viewer)
 
     def _lane(self, header: Ticket) -> Lane | None:
-        return next((lane for lane in self.board.lanes if lane.header.number == header.number), None)
+        return next((lane for lane in self.board.lanes if lane.header and lane.header.number == header.number), None)
 
     def _render_board(self) -> None:
         container = self.query_one("#lanes", VerticalScroll)
         focused_widget = container.screen.focused  # the board's, also under the filter picker
-        focused = focused_widget.ticket.number if isinstance(focused_widget, Card) else None
+        focused = focused_widget.key if isinstance(focused_widget, Card) else None
         container.remove_children()
         self.grid, lanes = [], []
         for lane in self._shown_lanes():
             head = lane.header
-            header = Card(head, None, render_lane_header(lane, self.sessions.get(head.number, []), head.number in self.starting,
-                                                 self._claimed(head), self.sessions, self.starting))
+            text = (render_lane_header(lane, self.sessions.get(head.number, []), head.number in self.starting,
+                                       self._claimed(head), self.sessions, self.starting) if head
+                    else render_lane_header(lane))
+            header = Card(head, None, text)
             cells = [[Card(t, column, render_card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
-                                                  head.title, t.number in lane.out_of_scope, self._claimed(t),
+                                                  lane_title(lane), t.number in lane.out_of_scope, self._claimed(t),
                                                   LANE_GLYPHS[lane.kind]))
                       for t in self._visible(lane, column)] for column in COLUMN_ORDER]
             self.grid.append((header, cells))
@@ -993,7 +1048,7 @@ class BoardApp(App):
         for column in COLUMN_ORDER:
             head = self.query_one(f"#head-{column.name}", Static)
             head.update(Text(f"{column.value} ({self._visible_count(column)})", style=f"bold {COLUMN_COLORS[column]}"))
-        refocus = next((card for card in self._cards() if card.ticket.number == focused), None)
+        refocus = next((card for card in self._cards() if card.key == focused), None)
         if refocus is not None:
             self.call_after_refresh(refocus.focus, scroll_visible=False)
         self._render_status()
@@ -1020,7 +1075,8 @@ class BoardApp(App):
         if self.last_ok:
             status.append(" · ")
             maps = sum(lane.is_map for lane in self.board.lanes)
-            specs, tickets = len(self.board.lanes) - maps, self.board.ticket_count()
+            specs = sum(lane.kind is LaneKind.SPEC for lane in self.board.lanes)
+            tickets = self.board.ticket_count()
             status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)}"
                           + (f" · {specs} spec{'s' * (specs != 1)}" if specs else "") + f" · {tickets} tickets")
             if not self.pacer.limited:
@@ -1145,13 +1201,19 @@ class BoardApp(App):
 
     def action_open(self) -> None:
         if isinstance(self.focused, Card):
-            webbrowser.open(self.focused.ticket.url)
+            if self.focused.ticket is None:
+                self.notify(NO_ISSUE, severity="warning")
+            else:
+                webbrowser.open(self.focused.ticket.url)
 
     # --- herdr actions ----------------------------------------------------------------------------
 
     def _card(self) -> Card | None:
         if not isinstance(self.focused, Card):
             self.notify("Select a ticket first", severity="warning")
+            return None
+        if self.focused.ticket is None:
+            self.notify(NO_ISSUE, severity="warning")
             return None
         if self.workbench is None:
             self.notify("Sessions need herdr; run the board from a herdr pane", severity="warning")
@@ -1186,8 +1248,8 @@ class BoardApp(App):
         if isinstance(plan, str):
             would = f"s refuses: {plan}"
         elif plan.ticket.spec_kind == "spec":
-            prompt = self.describe_start(plan.ticket).partition("\n")[0]
-            would = f"s starts {prompt or '/to-tickets'} on its spec {plan.ticket.ref}"
+            prompt = self.describe_start(plan.ticket).partition("\n")[0] or "/to-tickets"
+            would = f"s starts {prompt}" + ("" if plan.ticket is ticket else f" on its spec {plan.ticket.ref}")
         elif plan.ticket is not ticket:
             would = f"s starts {plan.ticket.ref} {plan.ticket.title}, next on the map"
         elif ticket.is_wayfinder_map:
@@ -1199,8 +1261,9 @@ class BoardApp(App):
         self.notify(f"{ticket.ref} has no session here; {would}", severity="warning")
 
     def action_start(self) -> None:
-        """s: start /to-tickets on a map card's ticketless spec, /wayfinder on the card's ticket (/implement on an
-        impl card), or on a map's first frontier ticket, else on the map itself; or say why it refuses."""
+        """s: start /to-tickets on a map card's ticketless spec or a ticketless standalone spec card, /wayfinder on
+        the card's ticket (/implement on an impl card), or on a map's first frontier ticket, else on the map itself;
+        or say why it refuses."""
         card = self._card()
         if card is None:
             return
@@ -1343,16 +1406,19 @@ class BoardApp(App):
     def action_settings(self) -> None:
         fields = [Setting("interval", "Refresh interval (seconds)", seconds_text(self.interval), parse_interval),
                   Setting("fetch_limit", "Fetch limit (open maps, and tickets per map)", str(self.board_query.limit),
-                          parse_fetch_limit)]
+                          parse_fetch_limit),
+                  Setting("decided_age", "Decided age (days; empty shows every Decided ticket)",
+                          "" if self.decided_age is None else str(self.decided_age), parse_decided_age)]
         if self.provider.name == "github":
             fields.append(Setting("budget", "GitHub budget (GraphQL points an hour)", seconds_text(self.budget),
                                   parse_budget))
         self.push_screen(SettingsMenu(fields), self._apply_settings)
 
     def _apply_settings(self, values: dict | None) -> None:
-        """Applies the menu's values, the interval at once and the fetch limit from the next fetch, and saves those
-        that differ from the repo's saved ones, also a value that `--interval` already set for this run, but not an
-        unchanged default fetch limit; Esc (None) changes nothing."""
+        """Applies the menu's values, the interval and the Decided age at once and the fetch limit from the next
+        fetch, and saves those that differ from the repo's saved ones, also a value that `--interval` already set for
+        this run, but not an unchanged default fetch limit; an empty Decided age removes the saved one. Esc (None)
+        changes nothing."""
         if values is None:
             return
         interval, limit, budget = values["interval"], values["fetch_limit"], values.get("budget", self.budget)
@@ -1370,8 +1436,19 @@ class BoardApp(App):
             saved["fetch_limit"] = limit
         if "budget" in values and (budget != DEFAULT_BUDGET or "budget" in self._repo_settings()):
             saved["budget"] = int(budget) if budget.is_integer() else budget  # an untouched default stays a default
-        if any(self._repo_settings().get(key) != value for key, value in saved.items()):
-            self._repo_settings(create=True).update(saved)
+        age = values["decided_age"]
+        if age != self.decided_age:
+            self.decided_age = age
+            self._render_board()
+            self.call_after_refresh(self.action_move, 0, 0)
+        stale = age is None and "decided_age" in self._repo_settings()
+        if age is not None:
+            saved["decided_age"] = age
+        if stale or any(self._repo_settings().get(key) != value for key, value in saved.items()):
+            repo = self._repo_settings(create=True)
+            repo.update(saved)
+            if stale:
+                del repo["decided_age"]
             self._write_settings("settings")
 
     def _repo_settings(self, create: bool = False) -> dict:

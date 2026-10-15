@@ -41,3 +41,9 @@ _Avoid_: orphan spec, PRD
 An issue with the ticket signature whose parent is neither a map spec nor a standalone spec, including one with no
 parent at all.
 _Avoid_: orphan ticket, unparented ticket
+
+### Starting work
+
+**Board work**:
+What `s` starts a session on: wayfinder work (a map, a ticket on one, a map spec and its tickets) or standalone
+work (a standalone spec and the tickets in its spec lane), or a loose ticket. Anything else is refused.
