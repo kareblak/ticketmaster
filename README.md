@@ -65,7 +65,9 @@ ticketmaster cleanup MAP --dry-run
 
 `open` is the default command: it opens the board in a herdr pane right of the
 calling pane (the focused pane when `HERDR_PANE_ID` is stale or another session's), labelled
-`ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there. It
+`ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there.
+Typed at a shell rather than run by Claude (no `CLAUDECODE` in the env), it runs the board right in
+the current pane, with no split. It
 only runs inside herdr (`HERDR_ENV=1`). `login` logs in to Linear with OAuth instead of an API key
 (see [Providers](#providers)); it runs anywhere.
 
