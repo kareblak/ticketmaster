@@ -226,12 +226,12 @@ def test_text_filter_matches_the_author():
     run(scenario())
 
 
-def test_no_open_maps_says_so():
+def test_no_open_maps_or_specs_says_so():
     async def scenario():
         app = BoardApp(FakeProvider([Ticket(number=1, title="Plain", url="u1", is_open=True)]), Query(), interval=60)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
-            assert "No open wayfinder maps in o/r." in str(app.query_one("#empty").render())
+            assert "No open wayfinder maps or specs in o/r." in str(app.query_one("#empty").render())
             assert not list(app.query(Card))
 
     run(scenario())
@@ -747,7 +747,9 @@ def test_help_explains_lanes_and_the_four_column_rules():
             await pilot.press("question_mark")
             await pilot.pause()
             text = " ".join(app.screen.text.plain.split())
-            assert "Each open wayfinder map is a lane, headed by its map card" in text
+            assert "A map lane is an open wayfinder map, headed by its map card (◆)" in text
+            assert "A spec lane is a standalone spec, from /to-spec with no map link" in text
+            assert "Other issues are not shown" not in text and "Each open wayfinder map is a lane" not in text
             for rule in ("Decided closed, of any age", "Blocked an open blocking issue", "Claimed assigned to someone",
                          "Frontier everything else; the first is the one /wayfinder <map> picks"):
                 assert rule in text
@@ -2287,5 +2289,97 @@ def test_the_status_line_says_when_a_fetch_was_cut_off_at_the_limit():
             await pilot.press("r")
             await loaded(app, pilot)
             assert "cut off" not in status_of(app)
+
+    run(scenario())
+
+
+# --- standalone spec lanes -------------------------------------------------------------------------
+
+SPEC_BODY = "## Problem Statement\n\nCards vanish.\n\n## Solution\n\nKeep them.\n"
+
+
+def standalone(number, title="", **kw):
+    """A standalone spec: the spec signature, no map link and no `wayfinder:` label."""
+    base = dict(number=number, title=title or f"Standalone {number}", url=f"u{number}", is_open=True,
+                body=SPEC_BODY, labels=("ready-for-agent",))
+    return Ticket(**{**base, **kw})
+
+
+def ticket_of(spec, number, title="", what="Build the thing.", **kw):
+    """A `/to-tickets` ticket of the standalone `spec`, linked by its `## Parent` section."""
+    body = (f"## Parent\n\n#{spec.number}\n\n## What to build\n\n{what}\n\n## Acceptance criteria\n\n"
+            "- [ ] Tests pass\n")
+    base = dict(number=number, title=title or f"Ticket {number}", url=f"u{number}", is_open=True, body=body,
+                parent_number=spec.number, parent_url=spec.url, lane_spec=spec.number)
+    return Ticket(**{**base, **kw})
+
+
+CLOSED_NOW = dict(is_open=False, closed_at=datetime.now(timezone.utc))
+ALONE = standalone(70, "Board shows standalone work", assignees=("alice",), has_tickets=True)
+CLOSED_ALONE = standalone(40, "Old spec", has_tickets=True, **CLOSED_NOW)
+SPEC_LANES = [
+    *TICKETS, a_map(20, "Ship billing"), ALONE, CLOSED_ALONE, standalone(85, "Fresh spec"),
+    ticket_of(ALONE, 71, what="Show the lane."), ticket_of(ALONE, 72, open_blockers=1, blocked_by=("#71",)),
+    ticket_of(ALONE, 73, **CLOSED_NOW),
+    ticket_of(ALONE, 74, not_planned=True, is_open=False, closed_at=datetime(2020, 1, 1, tzinfo=timezone.utc)),
+    ticket_of(ALONE, 75, assignees=("bob",)),
+    ticket_of(CLOSED_ALONE, 41), ticket_of(CLOSED_ALONE, 42, **CLOSED_NOW),
+    standalone(80, "Done spec", has_tickets=True, **CLOSED_NOW), ticket_of(standalone(80), 81, **CLOSED_NOW),
+]
+
+
+def test_spec_lanes_follow_the_map_lanes_by_number_headed_by_the_spec():
+    async def scenario():
+        app = BoardApp(FakeProvider(SPEC_LANES), Query(), interval=60)
+        async with app.run_test(size=(200, 80)) as pilot:
+            await loaded(app, pilot)
+            assert headers(app) == [9, 20, 40, 70, 85]  # #80 and all its tickets are closed: no lane
+            lanes = shown_lanes(app)
+            assert {n: lanes[n] for n in (40, 70, 85)} == {
+                40: {"FRONTIER": [41], "DECIDED": [42]},
+                70: {"BLOCKED": [72], "FRONTIER": [71], "CLAIMED": [75], "DECIDED": [73, 74]},  # #74 however old
+                85: {}}
+            header = card_text(app, 70).split("\n")
+            assert header[0] == "▣ #70 Board shows standalone work  @alice"
+            assert header[1] == "spec · 1 done · 3 open · 1 blocked"  # #74 was canceled
+            assert card_text(app, 40).split("\n")[:2] == ["▣ #40 Old spec  spec closed",
+                                                         "spec · 1 done · 1 open · 0 blocked"]
+            assert card_text(app, 85).split("\n")[1] == "spec · 0 done · 0 open · 0 blocked"
+            assert chips_of(app, 71).startswith("impl ") and "▣ Board shows standalone work" in chips_of(app, 71)
+            assert "Show the lane." in card_text(app, 71) and "Tests pass" not in card_text(app, 71)
+            assert "2 maps · 3 specs · 11 tickets" in status_of(app)
+
+    run(scenario())
+
+
+def test_the_type_filter_keeps_standalone_cards_and_the_map_filter_hides_spec_lanes(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path, tickets=SPEC_LANES)
+        async with app.run_test(size=(200, 80)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            await pick(pilot, app, "impl")
+            assert headers(app) == [40, 70] and shown_numbers(app) == [41, 42, 71, 72, 73, 74, 75]
+            await pick(pilot, app, "impl")  # off again
+            await pick(pilot, app, "spec")
+            assert headers(app) == [40, 70, 85] and shown_numbers(app) == []
+            await pick(pilot, app, "spec")
+            assert picker_values(app, "Map") == ["9", "20"]  # spec lanes are no maps
+            await pick(pilot, app, "9", "Map")
+            assert headers(app) == [9]
+
+    run(scenario())
+
+
+def test_the_map_named_on_the_command_line_hides_the_spec_lanes(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path, Query(named_map=9), SPEC_LANES)
+        async with app.run_test(size=(200, 80)) as pilot:
+            await loaded(app, pilot)
+            assert headers(app) == [9]
+            await pilot.press("escape")
+            await pilot.pause()
+            assert headers(app) == [9, 20, 40, 70, 85]
 
     run(scenario())

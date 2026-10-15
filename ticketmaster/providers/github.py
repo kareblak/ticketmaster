@@ -3,7 +3,8 @@
 The board is every open `wayfinder:map`, and every closed one an open spec still names, and, per map, its sub-issues in order, the typed tickets that link to
 it only by a `Part of #<map>` line, the spec that links to it that way and the spec's implementation tickets:
 its sub-issues and the issues whose `## Parent` section names it. Body links show up as cross-references in
-the linked issue's timeline.
+the linked issue's timeline. Then every standalone spec with its tickets, found by their signatures: an open spec's
+tickets are its children the same way, a closed one's the open and recently closed tickets naming it.
 """
 
 from __future__ import annotations
@@ -12,9 +13,10 @@ import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
-from ..model import Ticket, parse_time, part_of
-from . import (LIMIT, OPEN_MAPS, IssueStates, NotFound, ProviderError, Query, Quota, RateLimited, as_spec,
-               blocker_ref, capped, closed_map_refs, is_spec, lane_cut, names_parent, resolve_maps, run_cli, run_json,
+from ..model import Ticket, has_spec_signature, has_ticket_signature, parse_time, part_of
+from . import (LIMIT, OPEN_MAPS, RECENTLY_CLOSED, SIGNED, IssueStates, NotFound, ProviderError, Query, Quota,
+               RateLimited, as_spec, blocker_ref, capped, closed_map_refs, in_spec_lane, is_signed, is_spec,
+               is_spec_ticket, is_standalone_candidate, lane_cut, names_parent, resolve_maps, run_cli, run_json,
                tracker_error, under_spec, with_body_blockers, with_spec_tickets)
 
 MAP_LABEL = "wayfinder:map"
@@ -35,15 +37,21 @@ RATE_LIMIT = "rateLimit { cost remaining resetAt }"
 # A search hit carries only what picks the hits worth a full fetch: about 1 point a page.
 LEAN_FIELDS = "number body labels(first: 30) { nodes { name } }"
 
-SEARCH = """
+# A signature search hit also says whether it is open, when it closed, and its sub-issue parent.
+SIGNED_FIELDS = LEAN_FIELDS + " state closedAt parent { number }"
+
+SEARCHES = """
 query($q: String!, $after: String) {
-  search(query: $q, type: ISSUE, first: 100, after: $after) {
+  search(query: $q, type: %s, first: 100, after: $after) {
     pageInfo { hasNextPage endCursor }
     nodes { ... on Issue { %s } }
   }
   %s
 }
-""" % (LEAN_FIELDS, RATE_LIMIT)
+"""
+SEARCH = SEARCHES % ("ISSUE", LEAN_FIELDS, RATE_LIMIT)
+# Advanced search takes OR, so one search finds both signatures, open or recently closed.
+SIGNED_SEARCH = SEARCHES % ("ISSUE_ADVANCED", SIGNED_FIELDS, RATE_LIMIT)
 
 # An issue's sub-issues and the issues of any repo cross-referencing it, a page each, with the paging arguments.
 CONNECTIONS = """
@@ -117,12 +125,14 @@ class GitHubProvider:
 
     def fetch(self, query: Query) -> list[Ticket]:
         """Every open map, every closed map an open spec's `Part of #<map>` names, and their children; the
-        sub-issue parent is the native child→map link, `Part of #<map>` the fallback.
+        sub-issue parent is the native child→map link, `Part of #<map>` the fallback. Then every standalone spec
+        that is open or named by an open ticket, with its tickets.
 
-        The searches read lean fields, the maps get one full fetch together, and the children of every map and of
-        every spec one batched query; `quota` then holds what the calls cost. The map search and each map's
-        tickets stop at the query's limit. The `Part of` search, which only finds closed maps, keeps the default
-        cap: nearly every ticket says `Part of`, so a low limit would cut it on every fetch.
+        The searches read lean fields, the maps and the standalone specs get one full fetch together, and the
+        children of every map, of every map spec and of every open standalone spec one batched query; `quota` then
+        holds what the calls cost. The map search and each lane's tickets stop at the query's limit. The `Part of`
+        search, which only finds closed maps, and the signature search keep the default cap: nearly every ticket
+        says `Part of`, so a low limit would cut it on every fetch.
         """
         self._spent = 0
         try:
@@ -142,22 +152,65 @@ class GitHubProvider:
         wanted = closed_map_refs(specs, set(open_maps))
         if query.named_map is not None and query.named_map not in set(open_maps) | set(wanted):
             wanted.append(query.named_map)
-        full = self._issues(open_maps + wanted)
-        maps = [to_ticket(full[n], order=0, repo=self.repo) for n in open_maps if n in full]
-        maps += [t for n in wanted if n in full and (t := to_ticket(full[n], order=0, repo=self.repo)).is_wayfinder_map]
+        hits = {t.number: t for t in self._signed(cut)}
+        open_specs = [n for n, t in hits.items() if t.is_open and is_standalone_candidate(t, set(open_maps))]
+        # A closed spec keeps its lane while an open ticket names it, so the spec and its tickets come in full too.
+        part_of_specs = {s.number for s in specs}
+        closed_specs = list(dict.fromkeys(
+            p for t in hits.values() if t.is_open and is_spec_ticket(t, p := t.spec_number) and p != t.number
+            and p not in part_of_specs and not (p in hits and hits[p].is_open)))
+        their_maps = [n for p in closed_specs if p in hits and (n := part_of(hits[p].body)) is not None]
+        their_tickets = [n for n, t in hits.items() if t.spec_number in closed_specs and is_spec_ticket(t, t.spec_number)]
+        full = {n: to_ticket(node, order=0, repo=self.repo) for n, node in
+                self._issues(open_maps + wanted + open_specs + closed_specs + their_maps + their_tickets).items()}
+        maps = [full[n] for n in open_maps if n in full]
+        maps += [full[n] for n in wanted if n in full and full[n].is_wayfinder_map]
         numbers = {m.number for m in maps}
         candidates = [s.number for s in specs
                       if s.number not in numbers and part_of(s.body) in numbers and is_spec(s, part_of(s.body))]
-        children = self._children([m.number for m in maps] + candidates, limit)
+        any_map = numbers | {n for n, t in full.items() if t.is_wayfinder_map}
+        standalone = [full[n] for n in open_specs + closed_specs if n in full and is_standalone_candidate(full[n], any_map)]
+        children = self._children([m.number for m in maps] + candidates
+                                  + [s.number for s in standalone if s.is_open], limit)
         # A spec the open `Part of` search missed (a closed one) has its children read in one more batch.
         specs_of = [t.number for m in maps for t in self._map_family(m, children, {m.number}) if is_spec(t, m.number)]
         children |= self._children([n for n in specs_of if n not in children], limit)
         tickets = list(maps)
         for map_ticket in maps:
             tickets += self._map_with_specs(map_ticket, children, {t.number for t in tickets}, limit, cut)
-        tickets = with_body_blockers(resolve_maps(tickets, self._issue), self.states)
+        for spec in standalone:
+            if spec.number not in {t.number for t in tickets}:
+                named = [full[n] for n in their_tickets if n in full]
+                tickets += self._spec_lane(spec, children, named, {t.number for t in tickets}, limit, cut)
+        tickets = with_body_blockers(resolve_maps(tickets, self._issue, tuple(full.values())), self.states)
         self.cut_off = cut
         return tickets
+
+    def _signed(self, cut: list[str]) -> list[Ticket]:
+        """The issues with the spec or ticket signature, open or closed within `RECENTLY_CLOSED`, from one lean
+        search with the default cap, each body checked exactly."""
+        since = datetime.now(timezone.utc) - RECENTLY_CLOSED
+        q = (f'repo:{self.repo} is:issue (in:body "Problem Statement" OR in:body "What to build") '
+             f'(is:open OR closed:>={since:%Y-%m-%d})')
+        nodes = capped(self._paginate(SIGNED_SEARCH, {"q": q}, ["search"], LIMIT + 1), LIMIT, SIGNED, cut)
+        return [hit for node in nodes if is_signed(hit := signed_ticket(node), since)]
+
+    def _spec_lane(self, spec: Ticket, children: dict[int, Children], named: list[Ticket], taken: set[int],
+                   limit: int, cut: list[str]) -> list[Ticket]:
+        """The standalone spec, then its tickets: an open spec's sub-issues and the issues whose `## Parent` section
+        names it, a closed spec's the `named` hits that name it; `order` is that position. The first `limit` of them;
+        a spec with more goes on `cut`."""
+        if spec.is_open:
+            subs, refs, more = children[spec.number]
+            family = new_tickets(subs, taken | {spec.number}, self.repo)
+            family += new_tickets(refs, taken | {spec.number} | {t.number for t in family}, self.repo)
+        else:
+            family, more = [t for t in named if t.number not in taken], False
+        family = in_spec_lane([t for t in family if is_spec_ticket(t, spec.number)], spec)
+        if more or len(family) > limit:
+            cut.append(lane_cut(spec))
+        family = [replace(t, order=index) for index, t in enumerate(family[:limit])]
+        return with_spec_tickets([spec, *family])
 
     def map_order(self, number: int) -> list[int]:
         """The map's sub-issue numbers in the order set on GitHub; search results carry no such order."""
@@ -340,6 +393,12 @@ class GitHubProvider:
 def new_tickets(nodes: list[dict], taken: set[int], repo: str, links=lambda node: True) -> list[Ticket]:
     """The nodes not `taken` that `links` accepts, as tickets."""
     return [to_ticket(node, order=0, repo=repo) for node in nodes if node["number"] not in taken and links(node)]
+
+
+def signed_ticket(node: dict) -> Ticket:
+    """A signature search hit, from its lean fields."""
+    return replace(lean_ticket(node), is_open=node.get("state") == "OPEN", closed_at=parse_time(node.get("closedAt")),
+                   parent_number=(node.get("parent") or {}).get("number"))
 
 
 def lean_ticket(node: dict) -> Ticket:

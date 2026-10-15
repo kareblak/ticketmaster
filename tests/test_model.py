@@ -250,7 +250,7 @@ def test_a_closed_ticket_is_out_of_scope_when_canceled_or_linked_from_the_maps_s
 
 
 def lanes(board):
-    return {lane.map.number: {**({"SPECS": [t.number for t in lane.specs]} if lane.specs else {}),
+    return {lane.header.number: {**({"SPECS": [t.number for t in lane.specs]} if lane.specs else {}),
                               **{c: [t.number for t in ts] for c, ts in lane.columns.items() if ts}}
             for lane in board.lanes}
 
@@ -267,7 +267,7 @@ def test_each_open_map_is_a_lane_of_its_tickets_in_the_four_columns():
         ticket(number=33, body="Part of #20", map_number=20, map_url="u20", assignees=("bob",)),  # map #20's spec
     ]
     board = build_board(tickets)
-    assert [lane.map.number for lane in board.lanes] == [1, 20]
+    assert [lane.header.number for lane in board.lanes] == [1, 20]
     assert lanes(board) == {
         1: {Column.BLOCKED: [3], Column.FRONTIER: [2, 31], Column.CLAIMED: [4], Column.DECIDED: [5]},
         20: {"SPECS": [33], Column.FRONTIER: [21]},
@@ -299,7 +299,7 @@ def test_a_closed_map_shows_only_when_named_and_then_as_its_header_alone():
     tickets = [closed_map, child(2), child(3, is_open=False)]
     assert build_board(tickets).lanes == []
     lane = build_board(tickets, named_map=1).lanes[0]
-    assert lane.map is closed_map and lane.collapsed
+    assert lane.header is closed_map and lane.collapsed
     assert all(not cards for cards in lane.columns.values())
     assert lane.progress == (1, 1, 0)
     assert build_board(tickets, named_map=1).ticket_count() == 0
@@ -310,7 +310,7 @@ def test_a_closed_map_with_an_open_spec_or_implementation_ticket_shows_in_full()
     spec = ticket(number=14, body="Part of #1", map_number=1, map_url="u1", is_open=False)
     impl = ticket(number=15, map_number=1, map_url="u1")
     lane = build_board([closed_map, child(2, is_open=False), spec, impl]).lanes[0]
-    assert lane.map is closed_map and not lane.collapsed
+    assert lane.header is closed_map and not lane.collapsed
     assert [t.number for t in lane.specs] == [14]
     assert [t.number for t in lane.columns[Column.DECIDED]] == [2]
     assert [t.number for t in lane.columns[Column.FRONTIER]] == [15]
