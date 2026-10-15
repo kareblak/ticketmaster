@@ -340,7 +340,7 @@ nothing, and `o` opens nothing.
 
 | Column   | Rule                                                                                   |
 | -------- | -------------------------------------------------------------------------------------- |
-| Decided  | closed, of any age. A ticket closed as not planned (canceled), or linked from the map's `## Out of scope` section, is marked `out of scope` |
+| Decided  | closed, of any age. Its card is compact: its ref and title only, cut to two lines with `…` |
 | Blocked  | open, with an open blocking issue (native, or listed in the body)                      |
 | Claimed  | open, with an assignee                                                                 |
 | Frontier | everything else                                                                        |
@@ -349,7 +349,7 @@ Labels play no part: there is no `blocked`, `review:` or `wontfix` rule, and no 
 column. Within a column, cards sort by the map's sub-issue order, then issue number, so a map's first
 Frontier card is the one `/wayfinder <map>` would pick.
 
-A ticket card shows its number (its key, `TM-<n>`, on Linear) and title, the first ~90 characters of the body (the `## Question`
+An open ticket card shows its number (its key, `TM-<n>`, on Linear) and title, the first ~90 characters of the body (the `## Question`
 section when it has one, else the `## What to build` section), and then:
 
 - its type and who it needs: `HITL` (you at the keyboard) for `grilling` and `prototype`, `AFK` (the
@@ -357,7 +357,6 @@ section when it has one, else the `## What to build` section), and then:
   first (no badge when it names neither); `impl` for a spec's implementation ticket, a map spec's or a
   standalone spec's, and for a loose ticket
 - `PR open` on an open card when an open pull or merge request will close its issue
-- `out of scope`, in Decided
 - its open blockers (`⛔ #3 other/lib#12`, `⛔ TM-3` on Linear)
 - its assignees (`@kare`; Linear's display name, `@kaare.blakstad`)
 - its lane's title (`◆ Pick a stack` for a map, `▣ Board shows standalone work` for a spec,

@@ -4,10 +4,11 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from rich.text import Text
 from textual.widgets import Input
 
 from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, SettingsMenu,
-                               budget_pace, passes_filters, render_card)
+                               budget_pace, clamp_lines, passes_filters, render_card)
 from ticketmaster.herdr import HerdrError, Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, Quota, RateLimited
@@ -111,7 +112,7 @@ def test_each_open_map_is_a_lane_headed_by_its_map_card_and_other_issues_are_abs
     run(scenario())
 
 
-def test_tickets_land_by_the_classification_and_out_of_scope_ones_are_marked_in_decided():
+def test_tickets_land_by_the_classification_and_out_of_scope_ones_are_decided():
     closed = dict(is_open=False, closed_at=datetime.now(timezone.utc))
     map_ticket = a_map(1, body="## Out of scope\n\n- Mobile (#23)\n")
     tickets = [
@@ -132,8 +133,7 @@ def test_tickets_land_by_the_classification_and_out_of_scope_ones_are_marked_in_
             await loaded(app, pilot)
             assert shown_lanes(app) == {1: {"BLOCKED": [10], "FRONTIER": [12], "CLAIMED": [11],
                                             "DECIDED": [21, 22, 23, 24]}}
-            assert "out of scope" in card_text(app, 21) and "out of scope" in card_text(app, 23)
-            assert "out of scope" not in card_text(app, 22) and "out of scope" not in card_text(app, 24)
+            assert [card_text(app, n) for n in (21, 22, 23, 24)] == [f"#{n} Question {n}" for n in (21, 22, 23, 24)]
 
     run(scenario())
 
@@ -177,6 +177,32 @@ def test_ticket_cards_show_type_mode_assignee_blockers_and_the_maps_name():
     text = render_card(on(9, 3, kind="research", assignees=("bob",), open_blockers=2, blocked_by=("#1", "o/x#4")),
                        Column.BLOCKED, lane_title="Pick a stack").plain
     assert "research ·  AFK " in text and "@bob" in text and "⛔ #1 o/x#4" in text and "◆ Pick a stack" in text
+
+
+def test_a_decided_card_is_only_its_ref_and_title():
+    done = on(9, 4, "Shipped", kind="research", assignees=("bob",), is_open=False, closed_at=datetime.now(timezone.utc))
+    sessions = [Session(number=4, path="/w/issue-4", status="done")]
+    text = render_card(done, Column.DECIDED, sessions, lane_title="Pick a stack").plain
+    assert text == "#4 Shipped"
+
+
+def test_clamp_lines_cuts_to_the_line_count_and_ends_in_an_ellipsis():
+    assert clamp_lines(Text("#4 short"), 20, 2).plain == "#4 short"
+    clamped = clamp_lines(Text("#4 " + "word " * 20), 12, 2).plain.split("\n")
+    assert len(clamped) == 2 and clamped[-1].endswith("…") and all(len(line) <= 12 for line in clamped)
+
+
+def test_a_long_decided_title_is_two_lines_on_the_board():
+    async def scenario():
+        long = on(9, 4, "A very long decided title " * 6, is_open=False, closed_at=datetime.now(timezone.utc))
+        app = BoardApp(FakeProvider([MAP, long]), Query(), interval=60)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            card = next(c for c in app.query(Card) if number_of(c) == 4)
+            assert card.size.height == 2
+            assert card_text(app, 4).startswith("#4 A very long") and card_text(app, 4).endswith("…")
+
+    run(scenario())
 
 
 def test_board_starts_on_the_maps_header_and_arrows_walk_the_lane():

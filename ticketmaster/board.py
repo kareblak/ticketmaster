@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
+from rich.console import Console
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -56,6 +57,7 @@ PR_STYLE = "black on magenta"  # an open pull/merge request that closes the card
 NOTICE_SECONDS = 10  # a tracker error's notification stays up this long
 LIMITED_TICKETS_EVERY = 60.0  # ticket fetches while the tracker rate-limits the board
 LIMITED_SESSIONS_EVERY = 10.0  # herdr session refreshes meanwhile
+DECIDED_LINES = 2  # a Decided card's height: its ref and title, truncated
 
 
 def session_lines(sessions: list[Session], starting: bool, claimed: bool = False) -> Text:
@@ -73,9 +75,11 @@ def session_lines(sessions: list[Session], starting: bool, claimed: bool = False
 
 
 def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
-                lane_title: str = "", out_of_scope: bool = False, claimed: bool = False, glyph: str = "◆") -> Text:
+                lane_title: str = "", claimed: bool = False, glyph: str = "◆") -> Text:
     """A ticket: type · HITL/AFK (or spec/impl), an open closing PR, assignee, open blockers and its lane's title
-    after the lane's `glyph`."""
+    after the lane's `glyph`. A Decided ticket is only its ref and title, which its Card clamps to DECIDED_LINES."""
+    if column is Column.DECIDED:
+        return Text.assemble((f"{ticket.ref} ", f"bold {COLUMN_COLORS[column]}"), (ticket.title, "bold"))
     text = session_lines(sessions, starting, claimed)
     text.append(f"{ticket.ref} ", style=f"bold {COLUMN_COLORS[column]}")
     text.append(ticket.title, style="bold")
@@ -92,9 +96,6 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         chips.append(f"{ticket.spec_kind} ", style="bold")
     if ticket.is_open and ticket.has_open_change_request:
         chips.append(" PR open ", style=PR_STYLE)
-        chips.append(" ")
-    if out_of_scope:
-        chips.append(" out of scope ", style="black on grey50")
         chips.append(" ")
     if ticket.is_open and (ticket.blocked_by or ticket.open_blockers):
         chips.append(f"⛔ {' '.join(ticket.blocked_by) or ticket.open_blockers} ", style="red")
@@ -184,6 +185,21 @@ SAVED_KEYS = {TYPE: "types", MODE: "modes", ASSIGNEE: "assignee", MAP: "maps", A
 CARD_TYPES = (*WAYFINDER_TYPES, "spec", "impl")
 MODES = ("HITL", "AFK")
 ASSIGNEES, ANYONE = ("me", "unassigned", "anyone"), "anyone"  # one at a time; anyone narrows nothing
+
+
+def clamp_lines(text: Text, width: int, lines: int) -> Text:
+    """`text` wrapped to `width`, cut to its first `lines` lines, the last ending in … when anything was cut."""
+    if width < 1:
+        return text
+    wrapped = text.wrap(Console(width=width), width)
+    if len(wrapped) <= lines:
+        return text
+    kept = wrapped[:lines]
+    last = kept[-1].copy()
+    last.rstrip()
+    last.truncate(width - 1)
+    last.append("…", style="bold")
+    return Text("\n").join([*kept[:-1], last])
 
 
 def card_type(ticket: Ticket) -> str | None:
@@ -347,9 +363,17 @@ class Card(Static, can_focus=True):
     ]
 
     def __init__(self, ticket: Ticket | None, column: Column | None, text: Text):
-        super().__init__(text, classes="card" if column is not None else "card map-card")
+        classes = "card map-card" if column is None else "card decided-card" if column is Column.DECIDED else "card"
+        super().__init__(text, classes=classes)
         self.ticket = ticket
         self.column = column
+        self.text = text
+
+    def render(self):
+        """A Decided card is clamped to DECIDED_LINES at its current width; any other renders whole."""
+        if self.column is Column.DECIDED:
+            return clamp_lines(self.text, self.size.width, DECIDED_LINES)
+        return super().render()
 
     @property
     def key(self) -> int | LaneKind:
@@ -657,8 +681,7 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
 
     heading("Columns (the first rule that matches)")
     for column, rule in [
-        (Column.DECIDED, "closed, of any age; canceled, or linked from the map's ## Out of scope\n"
-                         + " " * 12 + "section, marks it out of scope"),
+        (Column.DECIDED, "closed, of any age; shown as its ref and title, cut to two lines"),
         (Column.BLOCKED, "an open blocking issue (native, or a 'Blocked by:' line or section)"),
         (Column.CLAIMED, "assigned to someone"),
         (Column.FRONTIER, "everything else; the first is the one /wayfinder <map> picks"),
@@ -772,6 +795,7 @@ class BoardApp(App):
     .cell { width: 1fr; height: auto; }
     .card { margin: 0 0 1 0; padding: 0 1; border-left: wide $panel-lighten-2; }
     .map-card { border-left: wide $accent-darken-2; }
+    .decided-card { max-height: 2; }
     .card:focus { background: $boost; border-left: wide $accent; }
     #empty { padding: 1 2; color: $text-muted; }
     #filter { dock: bottom; display: none; }
@@ -1029,7 +1053,7 @@ class BoardApp(App):
                     else render_lane_header(lane))
             header = Card(head, None, text)
             cells = [[Card(t, column, render_card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
-                                                  lane_title(lane), t.number in lane.out_of_scope, self._claimed(t),
+                                                  lane_title(lane), self._claimed(t),
                                                   LANE_GLYPHS[lane.kind]))
                       for t in self._visible(lane, column)] for column in COLUMN_ORDER]
             self.grid.append((header, cells))
