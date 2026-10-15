@@ -7,6 +7,7 @@ import re
 import time
 import webbrowser
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -20,7 +21,8 @@ from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static
 
-from .config import board_interval, load_settings, parse_interval, save_settings, seconds_text
+from .config import (board_fetch_limit, board_interval, load_settings, parse_fetch_limit, parse_interval,
+                     save_settings, seconds_text)
 from .herdr import HerdrError, Session
 from .model import COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, Ticket, build_board, frontier
 from .providers import ErrorNotice, Provider, ProviderError, Query, RateLimited, error_notice
@@ -495,7 +497,7 @@ KEY_DETAILS = {
     "open": "open the issue in the browser",
     "pick_filter": "narrow by type, HITL/AFK, assignee (me, unassigned, anyone), map and author; combines with /, "
                    "Esc on the board clears all, saved per repo",
-    "settings": "the refresh interval, applied at once and saved per repo",
+    "settings": "the refresh interval, applied at once, and the fetch limit, from the next fetch; saved per repo",
 }
 
 
@@ -590,7 +592,10 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     text.append("  c opens the settings menu: Enter applies the values at once and saves them per repo, Esc\n"
                 "  closes it unchanged. Refresh interval: --interval for this run, then the repo's saved\n"
                 "  interval, then the default (5 s, 30 s on Linear). Any positive number of seconds; a rate\n"
-                "  limit still slows the board down.\n")
+                "  limit still slows the board down. Fetch limit: the open maps the board reads, and the\n"
+                "  tickets it reads per map (default 300), from the next fetch; a lower one asks the tracker\n"
+                "  less. A fetch that reaches it says so in the status line, e.g. `cut off at 300: open maps,\n"
+                "  #12's tickets`, so a missing ticket can be traced to the limit.\n")
 
     heading("The board only reads")
     text.append("  It never writes to the tracker or the repo, and never removes a worktree. A session\n"
@@ -683,8 +688,9 @@ class BoardApp(App):
         self.settings_path = settings_path  # None: settings live only as long as the board
         self.settings = load_settings(settings_path) if settings_path else {}
         self.herdr_error: str | None = None
-        self.board_query = query
         self.repo_key = f"{provider.name}:{provider.repo}"
+        self.board_query = replace(query, limit=board_fetch_limit(self._repo_settings()))
+        self.cut_off: str | None = None  # what the last ticket fetch cut off at the fetch limit
         self.interval = board_interval(interval, self._repo_settings(), provider.name)
         self.clock = clock
         self.pacer = Pacer(self.interval, clock())
@@ -770,11 +776,14 @@ class BoardApp(App):
         if not tickets:
             self.call_from_thread(self._apply, None, None, sessions, herdr_error, fetched_tickets=False)
             return
+        query = self.board_query
         try:
             if self.viewer is None:
                 self.viewer = self._viewer()
-            board = build_board(self.provider.fetch(self.board_query), self.board_query.named_map)
-            self.call_from_thread(self._apply, board, None, sessions, herdr_error)
+            board = build_board(self.provider.fetch(query), query.named_map)
+            cut = getattr(self.provider, "cut_off", [])  # what the fetch cut off at the limit, when it says
+            cut_off = f"cut off at {query.limit}: {', '.join(cut)}" if cut else None
+            self.call_from_thread(self._apply, board, None, sessions, herdr_error, cut_off=cut_off)
         except RateLimited as exc:
             explain = getattr(self.provider, "explain", None)  # GitHub can say which limit it was
             self.call_from_thread(self._apply, None, explain(exc) if explain else exc, sessions, herdr_error,
@@ -794,7 +803,8 @@ class BoardApp(App):
             return None  # claimed tickets then start after the confirm, as before the login was known
 
     def _apply(self, board: Board | None, error: ProviderError | None, sessions: dict[int, list[Session]] | None = None,
-               herdr_error: str | None = None, fetched_tickets: bool = True, rate_limited: bool = False) -> None:
+               herdr_error: str | None = None, fetched_tickets: bool = True, rate_limited: bool = False,
+               cut_off: str | None = None) -> None:
         self.fetching = False
         if fetched_tickets:
             self.pacer.fetched(self.clock(), ok=board is not None, rate_limited=rate_limited)
@@ -806,6 +816,7 @@ class BoardApp(App):
         if board is not None:
             changed = board.lanes != self.board.lanes or self.last_ok is None
             self.board = board
+            self.cut_off = cut_off
             self.known = known_values(board)
             self.last_ok = datetime.now()
         if sessions is not None and sessions != self.sessions:
@@ -906,6 +917,8 @@ class BoardApp(App):
             status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)} · {tickets} tickets")
             if not self.pacer.limited:
                 status.append(f" · every {seconds_text(self.interval)}s")
+            if self.cut_off:
+                status.append(f" · {self.cut_off}", style="bold yellow")
         if self.pacer.limited:
             slow = "rate-limited again · once a minute until restart" if self.pacer.stuck else "rate-limited"
             reason = f" · {self.notice.reason}" if self.notice else ""
@@ -1202,21 +1215,27 @@ class BoardApp(App):
                 self.notify(f"{what} not saved: {exc}", severity="warning")
 
     def action_settings(self) -> None:
-        fields = [Setting("interval", "Refresh interval (seconds)", seconds_text(self.interval), parse_interval)]
+        fields = [Setting("interval", "Refresh interval (seconds)", seconds_text(self.interval), parse_interval),
+                  Setting("fetch_limit", "Fetch limit (open maps, and tickets per map)", str(self.board_query.limit),
+                          parse_fetch_limit)]
         self.push_screen(SettingsMenu(fields), self._apply_settings)
 
     def _apply_settings(self, values: dict | None) -> None:
-        """Applies the menu's values at once and saves those that differ from the repo's saved ones, also a value
-        that `--interval` already set for this run; Esc (None) changes nothing."""
+        """Applies the menu's values, the interval at once and the fetch limit from the next fetch, and saves those
+        that differ from the repo's saved ones, also a value that `--interval` already set for this run, but not an
+        unchanged default fetch limit; Esc (None) changes nothing."""
         if values is None:
             return
-        interval = values["interval"]
+        interval, limit = values["interval"], values["fetch_limit"]
         if interval != self.interval:
             self.interval = interval
             self.pacer.set_interval(interval)
             self._start_ticker()
             self._render_status()
         saved = {"interval": int(interval) if interval.is_integer() else interval}
+        if limit != self.board_query.limit or "fetch_limit" in self._repo_settings():
+            self.board_query = replace(self.board_query, limit=limit)
+            saved["fetch_limit"] = limit
         if any(self._repo_settings().get(key) != value for key, value in saved.items()):
             self._repo_settings(create=True).update(saved)
             self._write_settings("settings")

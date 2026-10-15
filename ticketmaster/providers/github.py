@@ -13,9 +13,9 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from ..model import Ticket, parse_time, part_of
-from . import (LIMIT, IssueStates, NotFound, ProviderError, Query, Quota, RateLimited, as_spec, blocker_ref,
-               closed_map_refs, is_spec, names_parent, resolve_maps, run_cli, run_json, tracker_error, under_spec,
-               with_body_blockers)
+from . import (LIMIT, OPEN_MAPS, IssueStates, NotFound, ProviderError, Query, Quota, RateLimited, as_spec,
+               blocker_ref, capped, closed_map_refs, is_spec, lane_cut, names_parent, resolve_maps, run_cli, run_json,
+               tracker_error, under_spec, with_body_blockers)
 
 MAP_LABEL = "wayfinder:map"
 
@@ -92,6 +92,10 @@ query($owner: String!, $name: String!, $number: Int!, $after: String) {
 VIEWER = "query { viewer { login } %s }" % RATE_LIMIT
 
 
+# An issue's sub-issues, the issues of this repo referring to it, and whether either went past the fetch limit.
+Children = tuple[list[dict], list[dict], bool]
+
+
 def aliased(selections: list[str]) -> str:
     """One query asking for each of `selections` (`alias: field { … }`) in the repo."""
     fields = " ".join(selections)
@@ -109,13 +113,16 @@ class GitHubProvider:
         self.quota: Quota | None = None  # the last fetch's cost and the points left after it
         self._spent: int | None = None  # the points spent so far by the fetch under way
         self._seen: tuple[int | None, datetime | None] = (None, None)  # the latest points left and reset time
+        self.cut_off: list[str] = []
 
     def fetch(self, query: Query) -> list[Ticket]:
         """Every open map, every closed map an open spec's `Part of #<map>` names, and their children; the
         sub-issue parent is the native child→map link, `Part of #<map>` the fallback.
 
         The searches read lean fields, the maps get one full fetch together, and the children of every map and of
-        every spec one batched query; `quota` then holds what the calls cost.
+        every spec one batched query; `quota` then holds what the calls cost. The map search and each map's
+        tickets stop at the query's limit. The `Part of` search, which only finds closed maps, keeps the default
+        cap: nearly every ticket says `Part of`, so a low limit would cut it on every fetch.
         """
         self._spent = 0
         try:
@@ -125,8 +132,10 @@ class GitHubProvider:
             self._spent = None
 
     def _fetch(self, query: Query) -> list[Ticket]:
+        limit, cut = query.limit, []
         q = f'repo:{self.repo} is:issue is:open label:"{MAP_LABEL}"'
-        found = [lean_ticket(node) for node in self._paginate(SEARCH, {"q": q}, ["search"], LIMIT)]
+        hits = capped(self._paginate(SEARCH, {"q": q}, ["search"], limit + 1), limit, OPEN_MAPS, cut)
+        found = [lean_ticket(node) for node in hits]
         q = f'repo:{self.repo} is:issue is:open in:body "Part of"'
         specs = [lean_ticket(node) for node in self._paginate(SEARCH, {"q": q}, ["search"], LIMIT)]
         open_maps = [t.number for t in found]
@@ -139,14 +148,16 @@ class GitHubProvider:
         numbers = {m.number for m in maps}
         candidates = [s.number for s in specs
                       if s.number not in numbers and part_of(s.body) in numbers and is_spec(s, part_of(s.body))]
-        children = self._children([m.number for m in maps] + candidates)
+        children = self._children([m.number for m in maps] + candidates, limit)
         # A spec the open `Part of` search missed (a closed one) has its children read in one more batch.
         specs_of = [t.number for m in maps for t in self._map_family(m, children, {m.number}) if is_spec(t, m.number)]
-        children |= self._children([n for n in specs_of if n not in children])
+        children |= self._children([n for n in specs_of if n not in children], limit)
         tickets = list(maps)
         for map_ticket in maps:
-            tickets += self._map_with_specs(map_ticket, children, {t.number for t in tickets})
-        return with_body_blockers(resolve_maps(tickets, self._issue), self.states)
+            tickets += self._map_with_specs(map_ticket, children, {t.number for t in tickets}, limit, cut)
+        tickets = with_body_blockers(resolve_maps(tickets, self._issue), self.states)
+        self.cut_off = cut
+        return tickets
 
     def map_order(self, number: int) -> list[int]:
         """The map's sub-issue numbers in the order set on GitHub; search results carry no such order."""
@@ -197,35 +208,39 @@ class GitHubProvider:
     def _args(self) -> list[str]:
         return ["gh", "api", "graphql", "--hostname", self.host, "-H", "Content-Type: application/json", "--input", "-"]
 
-    def _map_family(self, map_ticket: Ticket, children: dict[int, tuple[list[dict], list[dict]]],
-                    taken: set[int]) -> list[Ticket]:
+    def _map_family(self, map_ticket: Ticket, children: dict[int, Children], taken: set[int]) -> list[Ticket]:
         """The map's sub-issues in order, then the typed tickets and the spec linked by `Part of #<map>`."""
         number = map_ticket.number
-        subs, refs = children[number]
+        subs, refs, _ = children[number]
         tickets = new_tickets(subs, taken, self.repo)
         tickets += new_tickets(refs, taken | {t.number for t in tickets}, self.repo,
                                lambda node: part_of(node.get("body") or "") == number)
         return [as_spec(t, map_ticket) if is_spec(t, number) else t for t in tickets]
 
-    def _map_with_specs(self, map_ticket: Ticket, children: dict[int, tuple[list[dict], list[dict]]],
-                taken: set[int]) -> list[Ticket]:
+    def _map_with_specs(self, map_ticket: Ticket, children: dict[int, Children], taken: set[int], limit: int,
+                        cut: list[str]) -> list[Ticket]:
         """The map's family, then each spec's implementation tickets: its sub-issues and the issues whose
-        `## Parent` section names it; `order` is that position."""
+        `## Parent` section names it; `order` is that position. The first `limit` of them; a map with more, or with
+        sub-issues or references (its own or its specs') past `limit`, goes on `cut`."""
         tickets = self._map_family(map_ticket, children, taken)
+        more = children[map_ticket.number][2]
         def seen() -> set[int]:
             return taken | {t.number for t in tickets}
 
         for spec in [t for t in tickets if is_spec(t, map_ticket.number)]:
-            subs, refs = children[spec.number]
+            subs, refs, spec_more = children[spec.number]
+            more = more or spec_more
             tickets += under_spec(new_tickets(subs, seen(), self.repo), spec)
             tickets += under_spec(new_tickets(refs, seen(), self.repo,
                                               lambda node: names_parent(node.get("body"), spec.number)), spec)
-        return [replace(t, order=index) for index, t in enumerate(tickets[:LIMIT])]
+        if more or len(tickets) > limit:
+            cut.append(lane_cut(map_ticket))
+        return [replace(t, order=index) for index, t in enumerate(tickets[:limit])]
 
-    def _children(self, numbers: list[int]) -> dict[int, tuple[list[dict], list[dict]]]:
-        """Each issue's sub-issues and the issues of this repo referring to it, by number: the first pages of
-        `BATCH` issues per query, then any further page issue by issue."""
-        children: dict[int, tuple[list[dict], list[dict]]] = {}
+    def _children(self, numbers: list[int], limit: int) -> dict[int, Children]:
+        """Each issue's first `limit` sub-issues and the issues of this repo among its first `limit` references, by
+        number: the first pages of `BATCH` issues per query, then any further page issue by issue."""
+        children: dict[int, Children] = {}
         numbers = list(dict.fromkeys(numbers))
         for start in range(0, len(numbers), BATCH):
             chunk = numbers[start:start + BATCH]
@@ -233,21 +248,25 @@ class GitHubProvider:
             for n in chunk:
                 if not found.get(f"c{n}"):
                     raise ProviderError(f"issue #{n} not found in {self.repo}")
-                children[n] = self._rest_of(n, found[f"c{n}"])
+                children[n] = self._rest_of(n, found[f"c{n}"], limit)
         return children
 
-    def _rest_of(self, number: int, issue: dict) -> tuple[list[dict], list[dict]]:
-        """The issue's sub-issues and this repo's issues referring to it, reading the pages after `issue`'s first."""
+    def _rest_of(self, number: int, issue: dict, limit: int) -> Children:
+        """The issue's sub-issues and this repo's issues referring to it, reading the pages after `issue`'s first,
+        up to `limit` of each, and whether either went past `limit`."""
         owner, name = self.repo.split("/", 1)
         found: dict[str, list[dict]] = {"subIssues": [], "timelineItems": []}
         after: dict[str, str | None] = {"subIssues": None, "timelineItems": None}
         todo = set(found)
+        more = False
         while True:
             for connection in list(todo):
                 page = issue[connection]
                 found[connection] += [n for n in page["nodes"] if n]
                 after[connection] = page["pageInfo"].get("endCursor")
-                if not page["pageInfo"]["hasNextPage"] or len(found[connection]) >= LIMIT:
+                has_next, count = page["pageInfo"]["hasNextPage"], len(found[connection])
+                more = more or count > limit or (has_next and count >= limit)
+                if not has_next or count >= limit:
                     todo.discard(connection)
             if not todo:
                 break
@@ -260,7 +279,7 @@ class GitHubProvider:
         sources = [event.get("source") or {} for event in found["timelineItems"]]
         refs = {s["number"]: s for s in sources if s.get("number")
                 and (s.get("repository") or {}).get("nameWithOwner", "").lower() == self.repo.lower()}
-        return found["subIssues"][:LIMIT], list(refs.values())[:LIMIT]
+        return found["subIssues"][:limit], list(refs.values())[:limit], more
 
     def _issue(self, number: int) -> Ticket | None:
         owner, name = self.repo.split("/", 1)

@@ -261,6 +261,28 @@ def test_a_missing_key_names_the_variable_and_the_key_env_option(monkeypatch):
         LinearProvider("TM", key_env="LINEAR_API_KEY_ACME")
 
 
+def test_the_fetch_limit_caps_the_open_maps_and_says_so():
+    fake = FakeLinear()
+    for n in range(3):
+        fake.add_issue(f"Map {n}", labels=["wayfinder:map"])
+    provider = LinearProvider("TM", transport=fake)
+    assert len(lanes(provider.fetch(Query(limit=2)))) == 2 and provider.cut_off == ["open maps"]
+    assert len(lanes(provider.fetch(Query(limit=3)))) == 3 and provider.cut_off == []
+
+
+def test_the_fetch_limit_caps_a_maps_tickets_and_reads_no_page_past_it():
+    fake = FakeLinear()  # two issues a page
+    the_map = fake.add_issue("Map", labels=["wayfinder:map"])
+    for n in range(8):
+        fake.add_issue(f"Ticket {n}", parent=the_map, labels=["wayfinder:task"])
+    provider = LinearProvider("TM", transport=fake)
+    shown = lanes(provider.fetch(Query(limit=2)))  # the first sub-issues as Linear pages them
+    assert list(shown) == [1] and len(shown[1]["FRONTIER"]) == 2
+    assert provider.cut_off == ["TM-1's tickets"]
+    assert fake.ops().count("TicketmasterChildren") == 2  # three of the eight sub-issues tell it was cut
+    assert len(provider.fetch(Query(limit=8))) == 9 and provider.cut_off == []
+
+
 def test_linear_reports_no_quota():
     fake = FakeLinear()
     fake.add_issue("Pick a stack", "Notes", labels=["wayfinder:map"])

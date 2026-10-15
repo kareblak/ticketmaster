@@ -1034,6 +1034,47 @@ def test_resolve_maps_follows_ticket_to_spec_to_map_fetching_each_issue_once():
     assert sorted(fetched) == [1, 3, 20, 21, 22, 404]  # each chain issue off the board fetched once
 
 
+# ---------- the fetch limit: maps per board and tickets per map, and what a fetch cut off ----------
+
+def test_github_reads_at_most_the_limit_of_maps_and_of_each_maps_tickets_and_says_what_it_cut(monkeypatch):
+    maps = [gh_issue(1, MAP_LABELS), gh_issue(20, MAP_LABELS), gh_issue(30, MAP_LABELS)]
+    subs = {1: [gh_issue(n, ["wayfinder:task"], parent=1) for n in (2, 3, 4)]}
+    github_board(monkeypatch, maps, subs)
+    provider = github.GitHubProvider("o/r")
+    assert [t.number for t in provider.fetch(Query(limit=2))] == [1, 20, 2, 3]
+    assert provider.cut_off == ["open maps", "#1's tickets"]
+    assert len(provider.fetch(Query(limit=3))) == 6 and provider.cut_off == []
+
+
+def test_gitlab_reads_at_most_the_limit_of_maps_and_of_each_maps_tickets_and_says_what_it_cut(monkeypatch):
+    issues = [gl_issue(1, ["wayfinder::map"]), gl_issue(20, ["wayfinder::map"]), gl_issue(30, ["wayfinder::map"]),
+              *(gl_issue(n, ["wayfinder::task"], "Part of #1") for n in (2, 3, 4))]
+    gitlab_board(monkeypatch, GITLAB_LABELS, issues)
+    provider = gitlab.GitLabProvider("g/p")
+    assert lanes(provider.fetch(Query(limit=2))) == {1: {"FRONTIER": [2, 3]}, 20: {}}
+    assert provider.cut_off == ["open maps", "#1's tickets"]
+    assert len(provider.fetch(Query(limit=3))) == 6 and provider.cut_off == []
+
+
+def test_gitea_reads_at_most_the_limit_of_maps_and_of_each_maps_tickets_and_says_what_it_cut(monkeypatch):
+    issues = [gt_issue(1, ["wayfinder:map"]), gt_issue(20, ["wayfinder:map"]), gt_issue(30, ["wayfinder:map"]),
+              *(gt_issue(n, ["wayfinder:task"], "Part of #1") for n in (2, 3, 4))]
+    gitea_board(monkeypatch, ["wayfinder:map", "wayfinder:task"], None, issues)
+    provider = gitea.GiteaProvider("o/r", "codeberg.org", login="x")
+    assert lanes(provider.fetch(Query(limit=2))) == {1: {"FRONTIER": [2, 3]}, 20: {}}
+    assert provider.cut_off == ["open maps", "#1's tickets"]
+    assert len(provider.fetch(Query(limit=3))) == 6 and provider.cut_off == []
+
+
+def test_a_cut_map_lane_keeps_its_first_tickets_in_map_order():
+    the_map = Ticket(number=1, title="", url="u1", is_open=True, labels=MAP_LABELS)
+    kids = [Ticket(number=n, title="", url=f"u{n}", is_open=True, labels=("wayfinder:task",), parent_number=1,
+                   parent_url="u1", parent_labels=MAP_LABELS, order=order) for n, order in ((7, 2), (8, 0), (9, 1))]
+    cut: list[str] = []
+    assert [t.number for t in providers.cap_lanes([the_map, *kids], 2, cut)] == [1, 8, 9]
+    assert cut == ["#1's tickets"]
+
+
 def lean_board(monkeypatch, cost=1):
     """Three open maps (#1, #10, #20), each with a decision ticket and a spec that names it by `Part of`; each spec has
     an implementation ticket as a sub-issue and one by its `## Parent` section. #30 is no map's spec."""

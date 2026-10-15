@@ -13,8 +13,9 @@ import functools
 import json
 
 from ..model import Ticket, parse_time
-from . import (LABEL_LIMIT, LIMIT, SPEC_SEARCHES, IssueStates, ProviderError, Query, blocker_ref, closed_map_refs,
-               map_board, resolve_maps, run_json, tracker_error, wayfinder_labels, with_body_blockers, with_specs)
+from . import (LABEL_LIMIT, LIMIT, OPEN_MAPS, SPEC_SEARCHES, IssueStates, ProviderError, Query, blocker_ref,
+               cap_lanes, capped, closed_map_refs, map_board, resolve_maps, run_json, tracker_error,
+               wayfinder_labels, with_body_blockers, with_specs)
 
 ISSUE_FIELDS = """
   iid title webUrl description state closedAt
@@ -77,6 +78,7 @@ class GitLabProvider:
         self.repo = repo
         self.host = host
         self.states = IssueStates(self._issue_states)
+        self.cut_off: list[str] = []
 
     def viewer(self) -> str | None:
         return (self._graphql(VIEWER, {}).get("currentUser") or {}).get("username")
@@ -92,10 +94,12 @@ class GitLabProvider:
 
     def fetch(self, query: Query) -> list[Ticket]:
         """The open maps, the closed maps an open spec names, the named map, and every typed ticket, open or closed,
-        whose `Part of #<map>` names one."""
+        whose `Part of #<map>` names one; at most the query's limit of open maps, and of tickets per map."""
+        limit, cut = query.limit, []
         labels = wayfinder_labels([node["title"] for node in self._pages(LABELS, {}, ["project", "labels"])])
-        maps = {t.number: t for label in labels["map"] for t in self._issues({"state": "opened", "labels": [label]})
-                if t.is_wayfinder_map}
+        open_maps = {t.number: t for label in labels["map"]
+                     for t in self._issues({"state": "opened", "labels": [label]}, limit + 1) if t.is_wayfinder_map}
+        maps = {t.number: t for t in capped(list(open_maps.values()), limit, OPEN_MAPS, cut)}
         named = self._named(query.named_map) if query.named_map is not None and query.named_map not in maps else None
         children = [t for label in labels["ticket"] for t in self._issues({"labels": [label]}, LABEL_LIMIT)]
         found = [t for words in SPEC_SEARCHES for t in self._issues({"search": words}, LABEL_LIMIT)] if labels["map"] else []
@@ -106,7 +110,10 @@ class GitLabProvider:
         tickets = map_board(maps, named, children)
         if any(t.is_wayfinder_map for t in tickets):
             tickets = with_specs(tickets, found)
-        return with_body_blockers(resolve_maps(tickets, functools.cache(self._issue)), self.states)
+        tickets = cap_lanes(resolve_maps(tickets, functools.cache(self._issue)), limit, cut)
+        tickets = with_body_blockers(tickets, self.states)
+        self.cut_off = cut
+        return tickets
 
     def _named(self, iid: int) -> Ticket | None:
         issue = (self._graphql(NAMED, {"path": self.repo, "named": str(iid)}).get("project") or {}).get("issue")
@@ -119,7 +126,7 @@ class GitLabProvider:
         return Ticket(number=iid, title="", url=issue["webUrl"], is_open=True, body=issue.get("description") or "",
                       labels=tuple(label["title"] for label in issue["labels"]["nodes"]))
 
-    def _issues(self, variables: dict, limit: int = LIMIT) -> list[Ticket]:
+    def _issues(self, variables: dict, limit: int) -> list[Ticket]:
         return [to_ticket(node, self.repo) for node in self._pages(ISSUES, variables, ["project", "issues"], limit)]
 
     def _pages(self, gql: str, variables: dict, path: list[str], limit: int = LIMIT) -> list[dict]:
