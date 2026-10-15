@@ -1,6 +1,6 @@
 ---
 name: ticketmaster
-description: Open a live, read-only swimlane board of the current repo's wayfinder maps and, on GitHub, standalone /to-spec specs (a lane per open map or spec, its tickets in Blocked, Frontier, Claimed, Decided) in a herdr pane beside this Claude session, from which a wayfinder ticket starts /wayfinder in its own worktree. Works with GitHub, GitLab, Gitea/Forgejo and Linear. Use when the user wants to see or track wayfinder work, start a map's tickets, or log in to the tracker for the board.
+description: Open a live, read-only swimlane board of the current repo's wayfinder maps and, on GitHub, standalone /to-spec specs (a lane per open map or spec, its tickets in Blocked, Frontier, Claimed, Decided) in a herdr pane beside this Claude session, from which a wayfinder ticket starts /wayfinder, a spec without tickets /to-tickets and a spec's ticket /implement, each in its own worktree. Works with GitHub, GitLab, Gitea/Forgejo and Linear. Use when the user wants to see or track wayfinder work, start a map's tickets, or log in to the tracker for the board.
 argument-hint: "[map] | login | cleanup <map> --dry-run"
 ---
 
@@ -36,5 +36,5 @@ If it fails:
 
 On the board, `Enter` goes to the session working a ticket (or its worktree, with a shell), or says it has
 none and what `s` would do; it never starts Claude. `s` starts (or continues) `/wayfinder` for the ticket,
-or a map's next frontier ticket, `/to-tickets` on a spec without tickets, or `/implement` on a spec's ticket, in its
-own git worktree and herdr workspace, or says why it refuses.
+or a map's next frontier ticket, `/to-tickets` on a spec without tickets, or `/implement` on a spec's ticket,
+in its own git worktree and herdr workspace, or says why it refuses.

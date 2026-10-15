@@ -5,8 +5,8 @@ standalone specs for [herdr](https://herdr.dev), packaged as a Claude Code plugi
 Claude session inside herdr and the board opens in a pane beside it. Every open map is a lane, and its
 decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub, so is every standalone spec
 written by `/to-spec`, with its `/to-tickets` tickets. `s` starts `/wayfinder` for a ticket,
-`/to-tickets` on a spec or `/implement` on its tickets, in its own git worktree, opened as a herdr workspace with Claude running in it as a herdr agent, and each
-card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
+`/to-tickets` on a spec or `/implement` on its tickets, in its own git worktree, opened as a herdr
+workspace with Claude running in it as a herdr agent, and each card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
 tracker or the repo, and never removes a worktree.
 
 ```
@@ -154,8 +154,8 @@ card and `/mattpocock-skills:wayfinder <map-url> <ticket-url>` session, so a sec
 next frontier ticket. With an empty frontier it starts `/mattpocock-skills:wayfinder <map-url>` in
 the map's own worktree, so wayfinder can graduate fog or finish the map.
 
-`s` on a spec lane's header card, a standalone spec with no implementation ticket yet, open or closed,
-starts `/mattpocock-skills:to-tickets <spec-url>`, focused, in the spec's own `issue-<spec>` worktree.
+`s` on a spec lane's header card, a standalone spec with no implementation ticket yet (neither open nor
+closed), starts `/mattpocock-skills:to-tickets <spec-url>`, focused, in the spec's own `issue-<spec>` worktree.
 It refuses a closed spec, a blocked one, one assigned to someone else, then one that has tickets (`s
 starts /implement on its tickets`), in that order. `s` on a ticket in a spec lane starts
 `/mattpocock-skills:implement <ticket-url>` unfocused in its `issue-<n>` worktree, as on a map spec's

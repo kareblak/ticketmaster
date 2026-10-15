@@ -759,8 +759,8 @@ def test_help_explains_lanes_and_the_four_column_rules():
             assert "is a line of the map card, ▣ #<spec> open or closed" in text
             assert ("s on the lane's header card, while its open spec has no tickets (open or closed), starts "
                     "to_tickets_command (default /mattpocock-skills:to-tickets)") in text
-            assert ("standalone spec s on a spec lane's header card (▣), while the spec has no tickets (open or "
-                    "closed), starts to_tickets_command") in text
+            assert ("standalone spec s on a spec lane's header card (▣), while the spec has no tickets (neither "
+                    "open nor closed), starts to_tickets_command") in text
             assert "s refuses it: s starts /implement on its tickets" in text
             assert "impl ticket an impl card, in a map lane or a spec lane: implement_command" in text
 

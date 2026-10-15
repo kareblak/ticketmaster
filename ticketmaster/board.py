@@ -646,7 +646,7 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                              + " " * 22 + "its map is the native parent, else `Part of #<map>` on the body's\n"
                              + " " * 22 + "first line"),
         ("standalone spec", "s on a spec lane's header card (▣), while the spec has no tickets\n"
-                            + " " * 22 + "(open or closed), starts to_tickets_command with the spec's URL,\n"
+                            + " " * 22 + "(neither open nor closed), starts to_tickets_command with the spec's URL,\n"
                             + " " * 22 + "focused, in the spec's own worktree. Once it has tickets, s\n"
                             + " " * 22 + "refuses it: s starts /implement on its tickets, one by one"),
         ("impl ticket", "an impl card, in a map lane or a spec lane: implement_command\n"

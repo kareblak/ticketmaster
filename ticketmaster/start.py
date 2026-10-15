@@ -20,7 +20,7 @@ class MapNotFound(ValueError):
 
 
 class NotBoardWork(ValueError):
-    """Neither wayfinder work nor standalone work: the board starts work on maps and standalone specs alone."""
+    """Neither wayfinder work nor standalone work: the board starts work on maps and standalone specs only."""
 
 
 def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND,
