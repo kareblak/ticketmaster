@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import NamedTuple
 
-from ..model import Ticket, has_spec_signature, has_ticket_signature, parse_time, part_of
-from . import (LIMIT, OPEN_MAPS, RECENTLY_CLOSED, SIGNED, IssueStates, NotFound, ProviderError, Query, Quota,
-               RateLimited, as_spec, blocker_ref, capped, closed_map_refs, in_spec_lane, is_signed, is_spec,
+from ..model import Ticket, parse_time, part_of
+from . import (LIMIT, OPEN_MAPS, RECENTLY_CLOSED, SIGNATURE_HITS, IssueStates, NotFound, ProviderError, Query, Quota,
+               RateLimited, as_spec, blocker_ref, capped, closed_map_refs, in_spec_lane, is_signature_hit, is_spec,
                is_spec_ticket, is_standalone_candidate, lane_cut, names_parent, resolve_maps, run_cli, run_json,
                tracker_error, under_spec, with_body_blockers, with_spec_tickets)
 
@@ -38,7 +39,7 @@ RATE_LIMIT = "rateLimit { cost remaining resetAt }"
 LEAN_FIELDS = "number body labels(first: 30) { nodes { name } }"
 
 # A signature search hit also says whether it is open, when it closed, and its sub-issue parent.
-SIGNED_FIELDS = LEAN_FIELDS + " state closedAt parent { number }"
+SIGNATURE_FIELDS = LEAN_FIELDS + " state closedAt parent { number }"
 
 SEARCHES = """
 query($q: String!, $after: String) {
@@ -51,7 +52,7 @@ query($q: String!, $after: String) {
 """
 SEARCH = SEARCHES % ("ISSUE", LEAN_FIELDS, RATE_LIMIT)
 # Advanced search takes OR, so one search finds both signatures, open or recently closed.
-SIGNED_SEARCH = SEARCHES % ("ISSUE_ADVANCED", SIGNED_FIELDS, RATE_LIMIT)
+SIGNATURE_SEARCH = SEARCHES % ("ISSUE_ADVANCED", SIGNATURE_FIELDS, RATE_LIMIT)
 
 # An issue's sub-issues and the issues of any repo cross-referencing it, a page each, with the paging arguments.
 CONNECTIONS = """
@@ -152,17 +153,11 @@ class GitHubProvider:
         wanted = closed_map_refs(specs, set(open_maps))
         if query.named_map is not None and query.named_map not in set(open_maps) | set(wanted):
             wanted.append(query.named_map)
-        hits = {t.number: t for t in self._signed(cut)}
-        open_specs = [n for n, t in hits.items() if t.is_open and is_standalone_candidate(t, set(open_maps))]
-        # A closed spec keeps its lane while an open ticket names it, so the spec and its tickets come in full too.
-        part_of_specs = {s.number for s in specs}
-        closed_specs = list(dict.fromkeys(
-            p for t in hits.values() if t.is_open and is_spec_ticket(t, p := t.spec_number) and p != t.number
-            and p not in part_of_specs and not (p in hits and hits[p].is_open)))
-        their_maps = [n for p in closed_specs if p in hits and (n := part_of(hits[p].body)) is not None]
-        their_tickets = [n for n, t in hits.items() if t.spec_number in closed_specs and is_spec_ticket(t, t.spec_number)]
+        hits = {t.number: t for t in self._signature_hits(cut)}
+        wanted_specs = standalone_wanted(hits, set(open_maps), {s.number for s in specs})
         full = {n: to_ticket(node, order=0, repo=self.repo) for n, node in
-                self._issues(open_maps + wanted + open_specs + closed_specs + their_maps + their_tickets).items()}
+                self._issues(open_maps + wanted + wanted_specs.all()).items()}
+        open_specs, closed_specs, their_tickets = wanted_specs.open, wanted_specs.closed, wanted_specs.tickets
         maps = [full[n] for n in open_maps if n in full]
         maps += [full[n] for n in wanted if n in full and full[n].is_wayfinder_map]
         numbers = {m.number for m in maps}
@@ -186,14 +181,14 @@ class GitHubProvider:
         self.cut_off = cut
         return tickets
 
-    def _signed(self, cut: list[str]) -> list[Ticket]:
+    def _signature_hits(self, cut: list[str]) -> list[Ticket]:
         """The issues with the spec or ticket signature, open or closed within `RECENTLY_CLOSED`, from one lean
         search with the default cap, each body checked exactly."""
         since = datetime.now(timezone.utc) - RECENTLY_CLOSED
         q = (f'repo:{self.repo} is:issue (in:body "Problem Statement" OR in:body "What to build") '
              f'(is:open OR closed:>={since:%Y-%m-%d})')
-        nodes = capped(self._paginate(SIGNED_SEARCH, {"q": q}, ["search"], LIMIT + 1), LIMIT, SIGNED, cut)
-        return [hit for node in nodes if is_signed(hit := signed_ticket(node), since)]
+        nodes = capped(self._paginate(SIGNATURE_SEARCH, {"q": q}, ["search"], LIMIT + 1), LIMIT, SIGNATURE_HITS, cut)
+        return [hit for node in nodes if is_signature_hit(hit := signature_hit(node), since)]
 
     def _spec_lane(self, spec: Ticket, children: dict[int, Children], named: list[Ticket], taken: set[int],
                    limit: int, cut: list[str]) -> list[Ticket]:
@@ -390,12 +385,37 @@ class GitHubProvider:
         return nodes[:limit]
 
 
+class StandaloneWanted(NamedTuple):
+    """What the full fetch reads for the standalone specs, by number: the open specs, the closed specs an open ticket
+    names, the maps those name by `Part of`, and the tickets naming them."""
+
+    open: list[int]
+    closed: list[int]
+    maps: list[int]
+    tickets: list[int]
+
+    def all(self) -> list[int]:
+        return [*self.open, *self.closed, *self.maps, *self.tickets]
+
+
+def standalone_wanted(hits: dict[int, Ticket], open_maps: set[int], part_of_specs: set[int]) -> StandaloneWanted:
+    """From the signature search hits: the open standalone spec candidates, and the closed specs that keep a lane
+    because an open ticket names them, which come in full with their tickets. A parent that is an open hit or an
+    open `Part of` issue (`part_of_specs`) is no closed spec."""
+    open_specs = [n for n, t in hits.items() if t.is_open and is_standalone_candidate(t, open_maps)]
+    named = [t.spec_number for t in hits.values() if t.is_open and is_spec_ticket(t, t.spec_number)]
+    closed = list(dict.fromkeys(p for p in named if p not in part_of_specs and not (p in hits and hits[p].is_open)))
+    maps = [n for p in closed if p in hits and (n := part_of(hits[p].body)) is not None]
+    tickets = [n for n, t in hits.items() if t.spec_number in closed and is_spec_ticket(t, t.spec_number)]
+    return StandaloneWanted(open_specs, closed, maps, tickets)
+
+
 def new_tickets(nodes: list[dict], taken: set[int], repo: str, links=lambda node: True) -> list[Ticket]:
     """The nodes not `taken` that `links` accepts, as tickets."""
     return [to_ticket(node, order=0, repo=repo) for node in nodes if node["number"] not in taken and links(node)]
 
 
-def signed_ticket(node: dict) -> Ticket:
+def signature_hit(node: dict) -> Ticket:
     """A signature search hit, from its lean fields."""
     return replace(lean_ticket(node), is_open=node.get("state") == "OPEN", closed_at=parse_time(node.get("closedAt")),
                    parent_number=(node.get("parent") or {}).get("number"))

@@ -175,13 +175,13 @@ def closed_map_refs(candidates: list[Ticket], shown: set[int], key: str | None =
 # What a fetch cut off at the limit, as the board's status line names it: the open maps, the signature search's
 # hits, or a map's or spec's tickets.
 OPEN_MAPS = "open maps"
-SIGNED = "specs and tickets"
+SIGNATURE_HITS = "specs and tickets"
 
 # How long a closed spec or ticket stays a signature search hit.
 RECENTLY_CLOSED = timedelta(days=7)
 
 
-def is_signed(ticket: Ticket, since: datetime) -> bool:
+def is_signature_hit(ticket: Ticket, since: datetime) -> bool:
     """A signature search hit the board keeps: the spec or ticket signature in its body (the search only narrows), no
     `wayfinder:` label, and open or closed since `since`."""
     recent = ticket.is_open or ticket.closed_at is not None and ticket.closed_at >= since

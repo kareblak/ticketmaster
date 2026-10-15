@@ -69,7 +69,7 @@ def session_lines(sessions: list[Session], starting: bool, claimed: bool = False
 
 
 def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
-                map_title: str = "", out_of_scope: bool = False, claimed: bool = False, glyph: str = "◆") -> Text:
+                lane_title: str = "", out_of_scope: bool = False, claimed: bool = False, glyph: str = "◆") -> Text:
     """A ticket: type · HITL/AFK (or spec/impl), an open closing PR, assignee, open blockers and its lane's title
     after the lane's `glyph`."""
     text = session_lines(sessions, starting, claimed)
@@ -96,15 +96,15 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         chips.append(f"⛔ {' '.join(ticket.blocked_by) or ticket.open_blockers} ", style="red")
     if ticket.assignees:
         chips.append(" ".join("@" + a for a in ticket.assignees) + " ", style="italic cyan")
-    if map_title:
-        chips.append(f"{glyph} {map_title}", style="grey62")
+    if lane_title:
+        chips.append(f"{glyph} {lane_title}", style="grey62")
     if chips.plain:
         text.append("\n")
         text.append(chips)
     return text
 
 
-def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False, claimed: bool = False,
+def render_lane_header(lane: Lane, sessions: list[Session] = (), starting: bool = False, claimed: bool = False,
                spec_sessions: dict[int, list[Session]] | None = None, spec_starting: set[int] = frozenset()) -> Text:
     """A lane's header. A map's: its title and its decided / open / blocked counts, then a line per spec with its
     tickets' done / open / blocked counts, or that it has none yet, and its sessions' badges. A standalone spec's: its
@@ -134,6 +134,8 @@ def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False,
 
 
 def render_spec_lane(lane: Lane, text: Text) -> Text:
+    """A spec lane's header after `text` (its sessions' badges): the spec, `spec closed` once it is, its assignees,
+    then its tickets' done / open / blocked counts."""
     spec, progress = lane.header, lane.progress
     text.append(f"▣ {spec.ref} ", style=f"bold {SPEC_COLOR}")
     text.append(spec.title, style="bold")
@@ -185,7 +187,7 @@ def passes_filters(ticket: Ticket, filters: dict[str, dict[str, str]], known: di
 
 def known_values(board: Board) -> dict[str, set[str]]:
     """The types, modes and authors the lanes' cards carry, a spec lane's header included, which the picker offers."""
-    cards = [ticket for lane in board.lanes for ticket in ([] if lane.is_map else [lane.header]) + lane.tickets()]
+    cards = [ticket for lane in board.lanes for ticket in (*lane.spec_cards(), *lane.columns_tickets())]
     return {
         TYPE: {kind for t in cards if (kind := card_type(t))},
         MODE: {t.mode for t in cards if t.mode},
@@ -902,16 +904,15 @@ class BoardApp(App):
         maps = set(self._chosen(MAP))
         lanes = [lane for lane in self.board.lanes if not maps or lane.is_map and maps & map_ids(lane.header)]
         if self.needle or any(self.filters[section] for section in CARD_FILTERS):
-            specs = lambda lane: lane.specs if lane.is_map else [lane.header]
-            lanes = [lane for lane in lanes if lane.collapsed or any(self._passes(spec) for spec in specs(lane))
+            lanes = [lane for lane in lanes if lane.collapsed or any(self._passes(spec) for spec in lane.spec_cards())
                      or any(self._visible(lane, column) for column in COLUMN_ORDER)]
         return lanes
 
     def _passes(self, ticket: Ticket) -> bool:
         return matches(ticket, self.needle) and passes_filters(ticket, self.filters, self.known, self.viewer)
 
-    def _lane(self, map_ticket: Ticket) -> Lane | None:
-        return next((lane for lane in self.board.lanes if lane.header.number == map_ticket.number), None)
+    def _lane(self, header: Ticket) -> Lane | None:
+        return next((lane for lane in self.board.lanes if lane.header.number == header.number), None)
 
     def _render_board(self) -> None:
         container = self.query_one("#lanes", VerticalScroll)
@@ -921,7 +922,7 @@ class BoardApp(App):
         self.grid, lanes = [], []
         for lane in self._shown_lanes():
             head = lane.header
-            header = Card(head, None, render_map(lane, self.sessions.get(head.number, []), head.number in self.starting,
+            header = Card(head, None, render_lane_header(lane, self.sessions.get(head.number, []), head.number in self.starting,
                                                  self._claimed(head), self.sessions, self.starting))
             cells = [[Card(t, column, render_card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
                                                   head.title, t.number in lane.out_of_scope, self._claimed(t),

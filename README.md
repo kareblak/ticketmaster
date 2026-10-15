@@ -1,9 +1,10 @@
 # ticketmaster
 
-A live, read-only swimlane board of [wayfinder](https://github.com/mattpocock/skills) maps for
-[herdr](https://herdr.dev), packaged as a Claude Code plugin. Run `/ticketmaster` in a Claude session
-inside herdr and the board opens in a pane beside it. Every open map is a lane, and its decision
-tickets sit in Blocked · Frontier · Claimed · Decided. `s` starts `/wayfinder` for a ticket in its
+A live, read-only swimlane board of [wayfinder](https://github.com/mattpocock/skills) maps and
+standalone specs for [herdr](https://herdr.dev), packaged as a Claude Code plugin. Run `/ticketmaster` in a
+Claude session inside herdr and the board opens in a pane beside it. Every open map is a lane, and its
+decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub, so is every standalone spec
+written by `/to-spec`, with its `/to-tickets` tickets. `s` starts `/wayfinder` for a ticket in its
 own git worktree, opened as a herdr workspace with Claude running in it as a herdr agent, and each
 card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
 tracker or the repo, and never removes a worktree.

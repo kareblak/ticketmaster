@@ -357,8 +357,16 @@ class Lane:
         return self.kind is LaneKind.MAP
 
     def tickets(self) -> list[Ticket]:
-        """The map's specs, then its cards column by column."""
-        return [*self.specs, *(ticket for tickets in self.columns.values() for ticket in tickets)]
+        """A map lane's specs, then the lane's cards column by column."""
+        return [*self.specs, *self.columns_tickets()]
+
+    def columns_tickets(self) -> list[Ticket]:
+        """The lane's cards, column by column."""
+        return [ticket for tickets in self.columns.values() for ticket in tickets]
+
+    def spec_cards(self) -> list[Ticket]:
+        """The specs the lane shows outside its columns: a map card's spec lines, or a spec lane's header."""
+        return self.specs if self.is_map else [self.header]
 
     @property
     def ticketless_spec(self) -> Ticket | None:

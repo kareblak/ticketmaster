@@ -169,7 +169,7 @@ def test_a_closed_map_is_hidden_unless_named_and_then_shows_as_its_header_alone(
 
 def test_ticket_cards_show_type_mode_assignee_blockers_and_the_maps_name():
     text = render_card(on(9, 3, kind="research", assignees=("bob",), open_blockers=2, blocked_by=("#1", "o/x#4")),
-                       Column.BLOCKED, map_title="Pick a stack").plain
+                       Column.BLOCKED, lane_title="Pick a stack").plain
     assert "research ·  AFK " in text and "@bob" in text and "⛔ #1 o/x#4" in text and "◆ Pick a stack" in text
 
 
