@@ -1736,3 +1736,31 @@ def test_enter_on_an_impl_card_without_a_worktree_names_the_implement_start_or_t
                 "#54 has no session here; s refuses: #54 is claimed by @bob"]
 
     run(scenario())
+
+
+def test_a_linear_maps_lane_shows_keys_display_names_and_key_blockers():
+    """The Linear provider over a fake Linear: issue keys, `@displayName` assignees, `TM-<n>` blockers."""
+    from fake_linear import FakeLinear
+    from ticketmaster.providers.linear import LinearProvider
+
+    fake = FakeLinear()
+    the_map = fake.add_issue("Read-only ticketmaster", labels=["wayfinder:map"])  # TM-1
+    survey = fake.add_issue("Survey", parent=the_map, labels=["wayfinder:research"], assignee="kaare.blakstad",
+                            state="In Progress")  # TM-2
+    decide = fake.add_issue("Decide", parent=the_map, labels=["wayfinder:grilling"])  # TM-3
+    fake.block(survey, decide)
+    spec = fake.add_issue("Spec", "Part of [TM-1](https://linear.app/fabricskill/issue/TM-1/slug)")  # TM-4
+    fake.add_issue("Slice", "## Parent\n\nTM-4\n\nBlocked by: TM-3", parent=spec)  # TM-5
+
+    async def scenario():
+        app = BoardApp(LinearProvider("TM", transport=fake), Query(), interval=30)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert shown_lanes(app) == {1: {"BLOCKED": [3, 5], "FRONTIER": [4], "CLAIMED": [2]}}
+            assert "TM-1 Read-only ticketmaster" in card_text(app, 1) and "#1" not in card_text(app, 1)
+            assert "TM-2 Survey" in card_text(app, 2) and "@kaare.blakstad" in card_text(app, 2)
+            assert "TM-3 Decide" in card_text(app, 3) and "⛔ TM-2" in card_text(app, 3)
+            assert chips_of(app, 4).startswith("spec ") and "⛔ TM-3" in chips_of(app, 5)
+            assert "linear:TM" in app.sub_title and "every 30s" in status_of(app)
+
+    run(scenario())

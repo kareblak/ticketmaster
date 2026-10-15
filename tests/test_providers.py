@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import pytest
 
 from ticketmaster import providers
-from ticketmaster.providers import ProviderError, Query, RateLimited, github, gitlab, gitea, mentions_parent
+from ticketmaster.providers import ProviderError, Query, RateLimited, github, gitlab, gitea
 from ticketmaster.model import Ticket
 from ticketmaster.providers.gitea import token_from_tea_config
 
@@ -298,10 +298,10 @@ def test_tea_config_token_lookup():
     assert token_from_tea_config(text, "missing.io") is None
 
 
-def test_mentions_parent():
-    assert mentions_parent("Part of #12.", 12)
-    assert not mentions_parent("see #123", 12)
-    assert not mentions_parent("&#12;", 12)
+def test_a_parent_section_names_whole_issue_numbers_only():
+    assert providers.names_parent("## Parent\n\n#12.", 12)
+    assert not providers.names_parent("## Parent\n\nsee #123", 12)
+    assert not providers.names_parent("## Parent\n\n&#12;", 12)
 
 
 class FakeCompleted:
@@ -647,6 +647,34 @@ def test_implementation_ticket_names_its_spec_in_the_parent_section():
     assert providers.names_parent("## Parent\n\nhttps://gl/g/p/-/issues/8\n", 8)
     assert not providers.names_parent("## Parent\n\n#80\n", 8)
     assert not providers.names_parent("Part of #8", 8)
+
+
+def test_a_linear_parent_section_names_its_spec_by_key_mention_or_url():
+    mention = "## Parent\n\n[TM-14](https://linear.app/w/issue/TM-14/read-only-ticketmaster)\n\n## What\n\nTM-9"
+    assert providers.parent_ref(mention, "TM") == 14 and providers.names_parent(mention, 14, "TM")
+    assert not providers.names_parent(mention, 9, "TM")
+    assert providers.parent_ref("## Parent\n\nTM-14\n", "TM") == 14
+    assert providers.parent_ref("## Parent\n\nhttps://linear.app/w/issue/TM-14\n", "TM") == 14
+    assert providers.parent_ref("## Parent\n\nENG-14\n", "TM") is None
+
+
+def test_key_like_words_in_a_parent_section_are_no_refs_without_the_trackers_key():
+    body = "## Parent\n\nUTF-8 notes for #14 (RFC-2119)\n"
+    assert providers.parent_ref(body) == 14 and providers.names_parent(body, 14)
+    assert not providers.names_parent(body, 8) and not providers.names_parent("## Parent\n\nTM-14\n", 14)
+
+
+def test_linear_body_blockers_render_as_keys():
+    tickets = [Ticket(number=4, title="A", url="u4", is_open=True, body="Blocked by: TM-2, TM-3", key="TM-4",
+                      blocked_by=("TM-9",), open_blockers=1)]
+    states = providers.IssueStates(lambda numbers: {2: True, 3: False})
+    [ticket] = providers.with_body_blockers(tickets, states, key="TM")
+    assert (ticket.blocked_by, ticket.open_blockers) == (("TM-9", "TM-2"), 2)
+
+
+def test_linear_errors_name_linear():
+    notice = providers.error_notice("linear", RateLimited("Rate limit exceeded", 400, "hourly request limit"))
+    assert notice.text.startswith("Linear rate-limited the board: hourly request limit")
 
 
 # A map (#1) with a decision ticket (#2), the spec (#3) and its implementation tickets (#4, #5);

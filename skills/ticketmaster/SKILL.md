@@ -1,6 +1,6 @@
 ---
 name: ticketmaster
-description: Open a live, read-only swimlane board of the current repo's wayfinder maps (a lane per open map, its tickets in Blocked, Frontier, Claimed, Decided) in a herdr pane beside this Claude session, from which a wayfinder ticket starts /wayfinder in its own worktree. Works with GitHub, GitLab and Gitea/Forgejo. Use when the user wants to see or track wayfinder work, start a map's tickets, or log in to the tracker for the board.
+description: Open a live, read-only swimlane board of the current repo's wayfinder maps (a lane per open map, its tickets in Blocked, Frontier, Claimed, Decided) in a herdr pane beside this Claude session, from which a wayfinder ticket starts /wayfinder in its own worktree. Works with GitHub, GitLab, Gitea/Forgejo and Linear. Use when the user wants to see or track wayfinder work, start a map's tickets, or log in to the tracker for the board.
 argument-hint: "[map] | login"
 ---
 
@@ -10,7 +10,7 @@ Run the plugin's `ticketmaster` command with the user's arguments, then reply wi
 ticketmaster $ARGUMENTS
 ```
 
-- No arguments, or a map (`42`, `#42` or an issue URL): opens the board in a herdr pane next to this
+- No arguments, or a map (`42`, `#42`, `TM-1` or an issue URL): opens the board in a herdr pane next to this
   session, labelled `ticketmaster`; running it again restarts the board there. A named map shows even when it
   is closed, as its header card alone.
 - `login`: logs in to the tracker for the board; relay what it prints.
@@ -25,7 +25,8 @@ If it fails:
   PATH (`brew install python@3.12`) and network access for pip, then `/ticketmaster` again.
 - **Provider or login error** (CLI missing or not logged in, unknown host): report it as printed, with the fix:
   `gh auth login`, `glab auth login`, `tea login add`, `/ticketmaster login`, or a `.ticketmaster.toml` with
-  `provider`/`host`/`repo` for a self-hosted tracker.
+  `provider`/`host`/`repo` for a self-hosted tracker. On Linear: `provider = "linear"` and `team = "<key>"` in
+  `.ticketmaster.toml`, and a personal API key in `LINEAR_API_KEY` (or the `LINEAR_` variable `key_env` names).
 
 On the board, `Enter` goes to the session working a ticket (or its worktree, with a shell), or says it has
 none and what `s` would do; it never starts Claude. `s` starts (or continues) `/wayfinder` for the ticket,

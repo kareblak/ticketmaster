@@ -65,7 +65,7 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
                 map_title: str = "", out_of_scope: bool = False, claimed: bool = False) -> Text:
     """A ticket: type · HITL/AFK (or spec/impl), an open closing PR, assignee, open blockers and its map's title."""
     text = session_lines(sessions, starting, claimed)
-    text.append(f"#{ticket.number} ", style=f"bold {COLUMN_COLORS[column]}")
+    text.append(f"{ticket.ref} ", style=f"bold {COLUMN_COLORS[column]}")
     text.append(ticket.title, style="bold")
     if ticket.summary:
         text.append("\n" + ticket.summary, style="dim")
@@ -99,7 +99,7 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
 def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False, claimed: bool = False) -> Text:
     """A lane's header: the map's title and its decided / open / blocked counts."""
     text = session_lines(sessions, starting, claimed)
-    text.append(f"◆ #{lane.map.number} ", style=f"bold {MAP_COLOR}")
+    text.append(f"◆ {lane.map.ref} ", style=f"bold {MAP_COLOR}")
     text.append(lane.map.title, style="bold")
     if lane.collapsed:
         text.append("  closed", style="grey50")
