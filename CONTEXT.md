@@ -47,6 +47,12 @@ work (a standalone spec and the tickets in its spec lane), or a loose ticket. An
 
 ### Sessions
 
+**Session backend**:
+What opens the board, starts, finds and goes to sessions, and releases them for cleanup: herdr panes and
+workspaces, or plain terminal windows. Auto-detected (herdr inside herdr, else plain), overridable per run, shell or
+repo.
+_Avoid_: workbench, multiplexer
+
 **Session**:
 A Claude session whose working directory is a card's worktree, whichever backend or hand opened it.
 
