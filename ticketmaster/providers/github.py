@@ -1,6 +1,6 @@
 """GitHub via `gh api graphql`: native blockedBy plus `Blocked by:` body lines, sub-issues and closing PRs.
 
-The board is every open `wayfinder:map` and, per map, its sub-issues in order, the typed tickets that link to
+The board is every open `wayfinder:map`, and every closed one an open spec still names, and, per map, its sub-issues in order, the typed tickets that link to
 it only by a `Part of #<map>` line, the spec that links to it that way and the spec's implementation tickets:
 its sub-issues and the issues whose `## Parent` section names it. Body links show up as cross-references in
 the linked issue's timeline.
@@ -13,8 +13,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from ..model import Ticket, parse_time, part_of
-from . import (LIMIT, IssueStates, NotFound, ProviderError, Query, RateLimited, as_spec, blocker_ref, is_spec,
-               names_parent, resolve_maps, run_cli, run_json, tracker_error, under_spec, with_body_blockers)
+from . import (LIMIT, IssueStates, NotFound, ProviderError, Query, RateLimited, as_spec, blocker_ref,
+               closed_map_refs, is_spec, names_parent, resolve_maps, run_cli, run_json, tracker_error, under_spec, with_body_blockers)
 
 MAP_LABEL = "wayfinder:map"
 
@@ -88,13 +88,18 @@ class GitHubProvider:
         self.states = IssueStates(self._issue_states)
 
     def fetch(self, query: Query) -> list[Ticket]:
-        """Every open map and its children; the sub-issue parent is the native child→map link, `Part of #<map>`
-        the fallback."""
+        """Every open map, every closed map an open spec's `Part of #<map>` names, and their children; the
+        sub-issue parent is the native child→map link, `Part of #<map>` the fallback."""
         q = f'repo:{self.repo} is:issue is:open label:"{MAP_LABEL}"'
         maps = [to_ticket(node, order=0, repo=self.repo) for node in self._paginate(SEARCH, {"q": q}, ["search"], LIMIT)]
-        if query.named_map is not None and query.named_map not in {m.number for m in maps}:
-            named = self._named(query.named_map)
-            maps += [named] if named is not None and named.is_wayfinder_map else []
+        q = f'repo:{self.repo} is:issue is:open in:body "Part of"'
+        specs = [to_ticket(node, order=0, repo=self.repo) for node in self._paginate(SEARCH, {"q": q}, ["search"], LIMIT)]
+        wanted = closed_map_refs(specs, {m.number for m in maps})
+        if query.named_map is not None and query.named_map not in {m.number for m in maps} | set(wanted):
+            wanted.append(query.named_map)
+        for number in wanted:
+            found = self._named(number)
+            maps += [found] if found is not None and found.is_wayfinder_map else []
         tickets = list(maps)
         for map_ticket in maps:
             tickets += self._map_family(map_ticket, {t.number for t in tickets})

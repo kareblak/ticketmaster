@@ -26,7 +26,7 @@ from pathlib import Path
 
 from ..model import Ticket, parse_time
 from . import (LABEL_LIMIT, LIMIT, SPEC_SEARCHES, IssueStates, NotFound, ProviderError, Query, RateLimited,
-               blocker_ref, map_board, resolve_maps, tracker_error, wayfinder_labels, with_body_blockers, with_specs)
+               blocker_ref, closed_map_refs, map_board, resolve_maps, tracker_error, wayfinder_labels, with_body_blockers, with_specs)
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -73,7 +73,8 @@ class GiteaProvider:
         return self._get("/user").get("login")
 
     def fetch(self, query: Query) -> list[Ticket]:
-        """The open maps, the named map, and every typed ticket, open or closed, whose `Part of #<map>` names one."""
+        """The open maps, the closed maps an open spec names, the named map, and every typed ticket, open or closed,
+        whose `Part of #<map>` names one."""
         labels = self._wayfinder_labels()
         pulls = self._list(f"/repos/{self.repo}/pulls", {"state": "open"}, 200)
         pr_bodies = [f"{p.get('title', '')}\n{p.get('body') or ''}" for p in pulls]
@@ -88,9 +89,14 @@ class GiteaProvider:
             found = self._issue_or_none(query.named_map)
             named = to_ticket(found, None, pr_bodies) if found else None
         children = [t for label in labels["ticket"] for t in issues("all", LABEL_LIMIT, labels=label)]
+        candidates = [t for words in SPEC_SEARCHES for t in issues("all", LABEL_LIMIT, q=words)] if labels["map"] else []
+        shown = maps.keys() | ({named.number} if named else set())
+        for number in closed_map_refs(candidates, shown):
+            if (found := self._issue_or_none(number)) and (closed := to_ticket(found, None, pr_bodies)).is_wayfinder_map:
+                maps[number] = closed
         tickets = map_board(maps, named, children)
         if any(t.is_wayfinder_map for t in tickets):
-            tickets = with_specs(tickets, [t for words in SPEC_SEARCHES for t in issues("all", LABEL_LIMIT, q=words)])
+            tickets = with_specs(tickets, candidates)
         open_numbers = [t.number for t in tickets if t.is_open]
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))

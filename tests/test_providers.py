@@ -58,15 +58,16 @@ def page(nodes):
     return {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}
 
 
-def github_board(monkeypatch, maps, subs=None, refs=None, named=None):
-    """Fakes `gh api graphql`: the map search, each issue's sub-issues and cross-references, a named issue."""
+def github_board(monkeypatch, maps, subs=None, refs=None, named=None, specs=()):
+    """Fakes `gh api graphql`: the map search, the open `Part of` search (`specs`), each issue's sub-issues and
+    cross-references, a named issue (one issue, or a dict of them by number)."""
     asked = []
 
     def fake_run_json(args, stdin=None):
         variables = json.loads(stdin)["variables"]
         if "q" in variables:
             asked.append(("search", variables["q"]))
-            return {"data": {"search": page(maps)}}
+            return {"data": {"search": page(list(specs) if '"Part of"' in variables["q"] else maps)}}
         if "withSubs" in variables:
             number = variables["number"]
             asked.append(("children", number))
@@ -75,9 +76,10 @@ def github_board(monkeypatch, maps, subs=None, refs=None, named=None):
                      "timelineItems": page([{"source": s} for s in (refs or {}).get(number, [])])}
             return {"data": {"repository": {"issue": issue}}}
         asked.append(("issue", variables["number"]))
-        if named is None:
+        found = named.get(variables["number"]) if named and "number" not in named else named
+        if found is None:
             return {"errors": [{"type": "NOT_FOUND", "message": "Could not resolve"}]}
-        return {"data": {"repository": {"issue": named}}}
+        return {"data": {"repository": {"issue": found}}}
 
     monkeypatch.setattr(github, "run_json", fake_run_json)
     return asked
@@ -100,7 +102,8 @@ def test_github_fetches_every_open_map_with_its_children_in_map_order(monkeypatc
                 gh_issue(5, ["wayfinder:grilling"], parent=1)]}
     asked = github_board(monkeypatch, maps, subs, refs)
     tickets = github.GitHubProvider("o/r").fetch(Query())
-    assert asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'), ("children", 1), ("children", 20)]
+    assert asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
+                     ("search", 'repo:o/r is:issue is:open in:body "Part of"'), ("children", 1), ("children", 20)]
     assert [(t.number, t.order) for t in tickets] == [(1, 0), (20, 0), (5, 0), (3, 1), (4, 2), (21, 0)]
     assert lanes(tickets) == {1: {"FRONTIER": [5, 4], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
 
@@ -269,6 +272,18 @@ GITEA_ISSUES = [
     gt_issue(31, ["wayfinder:task"], "Part of #30"), gt_issue(9, ["wayfinder:research"], "see #1"),
     gt_issue(40, ["bug"], "Part of #1"),
 ]
+
+
+def test_github_shows_a_closed_map_whose_spec_is_still_open(monkeypatch):
+    closed_map = gh_issue(1, MAP_LABELS, state="CLOSED")
+    spec = gh_issue(14, [], "Part of #1")
+    subs = {1: [gh_issue(2, ["wayfinder:grilling"], parent=1, state="CLOSED")], 14: [gh_issue(15, [], parent=14)]}
+    # #7 is an open spec too, but #9 is no map, so it brings nothing in.
+    asked = github_board(monkeypatch, [], subs, {1: [spec]}, named={1: closed_map, 9: gh_issue(9, ["bug"])},
+                         specs=[spec, gh_issue(7, [], "Part of #9")])
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert ("issue", 1) in asked and ("issue", 9) in asked
+    assert lanes(tickets) == {1: {"FRONTIER": [14, 15], "DECIDED": [2]}}
 
 
 def test_gitea_fetches_every_open_map_with_its_children_by_their_part_of_line(monkeypatch):
@@ -784,10 +799,20 @@ def test_gitea_reads_each_maps_spec_and_its_implementation_tickets_with_no_sub_i
     assert_lane_family(tickets, "https://gt/o/r/issues/1")
 
 
-def test_trackers_without_sub_issues_search_for_specs_only_with_a_map_on_the_board(monkeypatch):
-    asked = gitlab_board(monkeypatch, ["wayfinder::map"], [gl_issue(3, [], "Part of #1")])
+def test_trackers_without_sub_issues_search_for_specs_only_with_a_map_label(monkeypatch):
+    asked = gitlab_board(monkeypatch, ["bug"], [gl_issue(3, [], "Part of #1")])
     assert gitlab.GitLabProvider("g/p").fetch(Query()) == []
     assert not any(kind == "search" for kind, _ in asked)
+
+
+def test_gitlab_shows_a_closed_map_whose_spec_is_still_open(monkeypatch):
+    # No map is open, so the board finds map #1 only through its open spec #14's `Part of #1` line.
+    issues = [gl_issue(1, ["wayfinder::map"], state="closed"), gl_issue(14, [], "Part of #1"),
+              gl_issue(2, ["wayfinder::grilling"], "Part of #1", "closed"), gl_issue(15, [], "## Parent\n\n#14")]
+    asked = gitlab_board(monkeypatch, ["wayfinder::map", "wayfinder::grilling"], issues, named=issues[0])
+    tickets = gitlab.GitLabProvider("g/p").fetch(Query())
+    assert ("named", "1") in asked
+    assert lanes(tickets) == {1: {"FRONTIER": [14, 15], "DECIDED": [2]}}
 
 
 def test_github_map_order_is_the_maps_sub_issue_order(monkeypatch):

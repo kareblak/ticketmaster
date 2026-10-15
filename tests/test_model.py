@@ -302,6 +302,23 @@ def test_a_closed_map_shows_only_when_named_and_then_as_its_header_alone():
     assert build_board(tickets, named_map=1).ticket_count() == 0
 
 
+def test_a_closed_map_with_an_open_spec_or_implementation_ticket_shows_in_full():
+    closed_map = ticket(number=1, labels=MAP, is_open=False)
+    spec = ticket(number=14, body="Part of #1", map_number=1, map_url="u1", is_open=False)
+    impl = ticket(number=15, map_number=1, map_url="u1")
+    lane = build_board([closed_map, child(2, is_open=False), spec, impl]).lanes[0]
+    assert lane.map is closed_map and not lane.collapsed
+    assert [t.number for t in lane.columns[Column.DECIDED]] == [2, 14]
+    assert [t.number for t in lane.columns[Column.FRONTIER]] == [15]
+
+
+def test_a_closed_map_whose_spec_work_is_all_closed_stays_hidden():
+    closed_map = ticket(number=1, labels=MAP, is_open=False)
+    tickets = [closed_map, child(2), ticket(number=14, body="Part of #1", map_number=1, map_url="u1", is_open=False)]
+    assert build_board(tickets).lanes == []
+    assert build_board(tickets, named_map=1).lanes[0].collapsed
+
+
 def test_lanes_mark_out_of_scope_tickets():
     map_ticket = ticket(number=1, labels=MAP, body="## Out of scope\n- #3\n")
     lane = build_board([map_ticket, child(2, is_open=False, not_planned=True), child(3, is_open=False),
