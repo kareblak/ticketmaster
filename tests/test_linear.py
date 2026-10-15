@@ -259,3 +259,11 @@ def test_a_missing_key_names_the_variable_and_the_key_env_option(monkeypatch):
     monkeypatch.delenv("LINEAR_API_KEY_ACME", raising=False)
     with pytest.raises(ProviderError, match="LINEAR_API_KEY_ACME is not set.*key_env"):
         LinearProvider("TM", key_env="LINEAR_API_KEY_ACME")
+
+
+def test_linear_reports_no_quota():
+    fake = FakeLinear()
+    fake.add_issue("Pick a stack", "Notes", labels=["wayfinder:map"])
+    provider = LinearProvider("TM", transport=fake)
+    provider.fetch(Query())
+    assert getattr(provider, "quota", None) is None
