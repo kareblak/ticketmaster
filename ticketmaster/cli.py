@@ -1,5 +1,5 @@
 """Command line: `open` (the board in a herdr pane beside the caller, or right here when the caller is that
-pane) and `cleanup <map> --dry-run` (what a map leaves behind), which run inside herdr (HERDR_ENV=1), and `login`
+pane) and `cleanup <map>` (removes what a closed map leaves behind; `--dry-run` lists it), which run inside herdr (HERDR_ENV=1), and `login`
 (Linear OAuth, in the browser), which runs anywhere.
 """
 
@@ -22,7 +22,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     """No command means `open`, so `ticketmaster 42` is `ticketmaster open 42`; any other word is an invalid command."""
     parser = argparse.ArgumentParser(
         prog="ticketmaster",
-        usage="ticketmaster [open] [map] [options] | ticketmaster login | ticketmaster cleanup map --dry-run",
+        usage="ticketmaster [open] [map] [options] | ticketmaster login | ticketmaster cleanup map [--dry-run]",
         description="Live swimlane board of wayfinder maps and standalone specs, in herdr.",
     )
     parser.add_argument("--version", action="store_true", help="print the version")
@@ -36,7 +36,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--columns", choices=["auto", "one", "all"], default="auto",
                         help="one column at a time, all side by side, or auto by width (default)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="cleanup: list the map's worktrees, branches and herdr sessions, changing nothing")
+                        help="cleanup: only list the map's worktrees, branches and herdr sessions, changing nothing")
     if not argv or argv[0].startswith("-") or is_issue(argv[0]):
         argv = ["open", *argv]
     args = parser.parse_args(argv)
@@ -44,8 +44,6 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         parser.error("login takes no map")
     if args.command == "cleanup" and args.map is None:
         parser.error("cleanup needs a map")
-    if args.command == "cleanup" and not args.dry_run:
-        parser.error("cleanup only lists for now: pass --dry-run")
     if args.command != "cleanup" and args.dry_run:
         parser.error("--dry-run is for cleanup")
     if args.map is not None:
@@ -152,14 +150,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ticketmaster: {exc}", file=sys.stderr)
         return 2
     if args.command == "cleanup":
-        from .cleanup import CleanupError, dry_run
+        from .cleanup import CleanupError, clean, dry_run
 
+        pane = os.environ.get("HERDR_PANE_ID")
         try:
-            print(dry_run(cwd, provider, args.map, herdr.Herdr()))
+            if args.dry_run:
+                print(dry_run(cwd, provider, args.map, herdr.Herdr(), own_pane=pane))
+                return 0
+            summary, ok = clean(cwd, provider, args.map, herdr.Herdr(), own_pane=pane)
         except (CleanupError, ProviderError, herdr.HerdrError) as exc:
             print(f"ticketmaster: {exc}", file=sys.stderr)
             return 1
-        return 0
+        print(summary)
+        return 0 if ok else 1
     try:
         board = herdr.Herdr().open_board(
             cwd, herdr.open_command(passthrough(args)), os.environ.get("HERDR_PANE_ID"), os.environ.get("CLAUDE_CODE_SESSION_ID"),

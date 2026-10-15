@@ -60,7 +60,7 @@ so code changes apply on the next `/ticketmaster` without rebuilding. Changing `
 ticketmaster [open] [map] [--repo OWNER/NAME] [--provider github|gitlab|gitea|forgejo|linear]
              [--host HOST] [--columns auto|one|all] [--interval SECONDS]
 ticketmaster login
-ticketmaster cleanup MAP --dry-run
+ticketmaster cleanup MAP [--dry-run]
 ```
 
 `open` is the default command: it opens the board in a herdr pane right of the
@@ -77,8 +77,17 @@ decision, spec and implementation tickets (herdr's `~/.herdr/worktrees/<repo>/` 
 worktree, and an agent titled with one of the tickets that runs elsewhere. Each is **removable** when its
 ticket is closed, or a PR that closes it is merged (GitHub), and it has no uncommitted changes; otherwise it is
 **kept**, with the reasons: open ticket, unmerged PR, uncommitted changes. Merged comes from the tracker, never
-from unpushed commits, which a squash merge with its remote branch deleted leaves behind. It changes nothing,
-and runs inside herdr.
+from unpushed commits, which a squash merge with its remote branch deleted leaves behind. Whatever the command
+runs in (its directory, or its herdr pane's agent) is kept. With `--dry-run` it changes nothing. It runs inside
+herdr.
+
+`cleanup MAP` without `--dry-run` removes what the dry run marks removable, on a closed map only: an open map
+is refused with a non-zero exit and nothing changed, since a human closes the map in the tracker. For each
+removable entry it removes the worktree (`git worktree remove`, which refuses one changed since the look, and
+then leaves all of that entry alone), closes the herdr workspace open on it and any agent of it in another
+workspace, and deletes the branch with `git branch -d`, which keeps a branch git calls unmerged, such as one
+whose PR was squash-merged. Nothing is forced. Kept entries are left alone, and the summary lists what was
+removed and what was kept, with the reasons. It exits non-zero when git or herdr refused a step.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
 its spec and the spec's implementation tickets, and on GitHub every standalone spec written by `/to-spec`
@@ -166,7 +175,7 @@ included, focuses its most urgent session (needs you, then working, then idle). 
 no Claude running it focuses, or opens, that worktree's workspace with a shell; Claude is not
 resumed. A map card goes only to the map's own session or worktree, never to one of its tickets'.
 
-The board only reads. Wayfinder claims its tickets by assigning them, so the card moves to Claimed
+The board only reads; `cleanup MAP` without `--dry-run` is the one command that changes anything. Wayfinder claims its tickets by assigning them, so the card moves to Claimed
 on the next refresh.
 
 ## Filters
@@ -363,7 +372,7 @@ On Linear only the workflow state's type counts, never its team-renamable name: 
 closed, `canceled` and `duplicate` closed as not planned. Only the assignee claims a ticket; the
 delegate does not. Users are their display name, and the board's "me" is the key's or the token's user.
 
-Every provider only reads: the board has no way to close, label, assign or comment.
+Every provider only reads: the board has no way to close, label, assign or comment, and neither has `cleanup`.
 
 Besides native links, every provider counts the open issues a body lists on a `Blocked by: #3, #4`
 line (or the older Norwegian `Blokkert av: #3`) or under a `## Blocked by` heading as `- #3` bullets
