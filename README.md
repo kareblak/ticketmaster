@@ -5,9 +5,9 @@ standalone specs for [herdr](https://herdr.dev), packaged as a Claude Code plugi
 Claude session inside herdr and the board opens in a pane beside it. Every open map is a lane, and its
 decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub, so is every standalone spec
 written by `/to-spec`, with its `/to-tickets` tickets, and one Loose lane holds the `/to-tickets` tickets
-with no spec parent. `s` starts `/wayfinder` for a ticket in its
-own git worktree, opened as a herdr workspace with Claude running in it as a herdr agent, and each
-card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
+with no spec parent. `s` starts `/wayfinder` for a ticket, `/to-tickets` on a spec or `/implement` on
+its tickets, in its own git worktree, opened as a herdr workspace with Claude running in it as a herdr
+agent, and each card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
 tracker or the repo, and never removes a worktree.
 
 ```
@@ -103,7 +103,7 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 | Key            | Column            | Effect                                                              |
 | -------------- | ----------------- | ------------------------------------------------------------------- |
 | `Enter` / double-click | any       | go to the card's most urgent session, else its worktree with a shell; with neither, the status line says what `s` would do there or why it refuses. It never starts or resumes Claude |
-| `s`            | all but Decided   | start `/wayfinder` for the ticket, `/implement` on an `impl` card, or `/to-tickets` on a map card whose spec has no tickets yet, in its own `issue-<n>` worktree, or continue Claude in it when it has no agent (asks first); refused when closed, blocked, assigned to someone else or live (press `Enter`) |
+| `s`            | all but Decided   | start `/wayfinder` for the ticket, `/implement` on an `impl` card, or `/to-tickets` on a map card whose spec has no tickets yet or on a standalone spec card without tickets, in its own `issue-<n>` worktree, or continue Claude in it when it has no agent (asks first); refused when closed, blocked, assigned to someone else or live (press `Enter`) |
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | free-text filter, clear every filter, refresh now, quit             |
 | `f`            | any               | filter picker: type, HITL/AFK, assignee, map, author ([Filters](#filters); saved per repo) |
@@ -125,10 +125,12 @@ claude -n "#<n> <title>" "<prompt>"
 | Card                                                          | Prompt                                         |
 | ------------------------------------------------------------- | ---------------------------------------------- |
 | a map (`wayfinder:map`) whose spec has no tickets yet         | `/mattpocock-skills:to-tickets <spec-url>` in the spec's worktree; see below |
+| a standalone spec (a spec lane's header) with no tickets yet  | `/mattpocock-skills:to-tickets <spec-url>`, focused; refused once it has tickets, see below |
 | any other map                                                 | its first frontier ticket's; with an empty frontier `/mattpocock-skills:wayfinder <map-url>`; see below |
 | has a `wayfinder:<type>` label (`research`, `prototype`, `grilling`, `task`; GitLab's `wayfinder::<type>` too) | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
-| an implementation ticket (`impl`)                             | `/mattpocock-skills:implement <ticket-url>`, see below |
+| an implementation ticket (`impl`), in a map or a spec lane    | `/mattpocock-skills:implement <ticket-url>`, see below |
 | closed, blocked, assigned to someone else, a live session     | never started; the status line says why        |
+| anything else (no map, no standalone spec, not loose)         | not board work: never started                  |
 
 The skills are `wayfinder_command`, `implement_command` and `to_tickets_command` in `.ticketmaster.toml`. Each ticket gets
 one worktree, never a `-2` copy: when it exists without an agent, `s` opens it and runs
@@ -152,6 +154,13 @@ asked for when you press `s`; else issue number). That ticket gets its own `issu
 card and `/mattpocock-skills:wayfinder <map-url> <ticket-url>` session, so a second press starts the
 next frontier ticket. With an empty frontier it starts `/mattpocock-skills:wayfinder <map-url>` in
 the map's own worktree, so wayfinder can graduate fog or finish the map.
+
+`s` on a spec lane's header card, a standalone spec with no implementation ticket yet (neither open nor
+closed), starts `/mattpocock-skills:to-tickets <spec-url>`, focused, in the spec's own `issue-<spec>` worktree.
+It refuses a closed spec, a blocked one, one assigned to someone else, then one that has tickets (`s
+starts /implement on its tickets`), in that order. `s` on a ticket in a spec lane starts
+`/mattpocock-skills:implement <ticket-url>` unfocused in its `issue-<n>` worktree, as on a map spec's
+tickets. The board never removes a spec's worktree.
 
 The board finds the sessions working a ticket, including ones it did not start. A herdr agent works
 ticket `<n>` when its worktree path or branch is `issue-<n>` or `tm-<n>` (optionally `worktree-`

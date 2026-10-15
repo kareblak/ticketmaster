@@ -99,25 +99,34 @@ class Ticket:
             return f"{self.ref} is blocked by {self.open_blockers} open issue{'s' if self.open_blockers > 1 else ''}"
         if viewer and self.assignees and viewer.lower() not in (a.lower() for a in self.assignees):
             return f"{self.ref} is claimed by {', '.join('@' + a for a in self.assignees)}"
+        if self.spec_kind == "spec" and self.has_tickets:
+            return f"{self.ref} has tickets: s starts /implement on its tickets"
         if self.spec_kind == "impl" and self.has_open_change_request:
             return f"{self.ref} has an open PR that closes it"
         if not (self.is_board_work or self.map_missing):  # a typed ticket without its map is warned about apart
-            return self.not_wayfinder_work
+            return self.not_board_work
         return None
 
     @property
-    def not_wayfinder_work(self) -> str:
-        return f"{self.ref} is not wayfinder work: the board only starts work on a map"
+    def not_board_work(self) -> str:
+        return (f"{self.ref} is not board work: the board starts work on wayfinder maps, standalone specs and loose "
+                "tickets")
 
     @property
     def is_board_work(self) -> bool:
-        """Wayfinder work, or a loose ticket, which s starts /implement on."""
-        return self.is_wayfinder_work or self.is_loose
+        """The only work the board starts: wayfinder work, standalone work, or a loose ticket, which s starts
+        /implement on."""
+        return self.is_wayfinder_work or self.is_standalone_work or self.is_loose
 
     @property
     def is_wayfinder_work(self) -> bool:
-        """A map, or a ticket on one: the only work the board starts: /wayfinder, or /implement on an impl card."""
+        """A map, or a ticket on one: /wayfinder, /to-tickets on its spec, or /implement on an impl card."""
         return self.is_wayfinder_map or self.is_wayfinder_ticket or self.map_url is not None
+
+    @property
+    def is_standalone_work(self) -> bool:
+        """A standalone spec (/to-tickets), or a ticket in its lane (/implement)."""
+        return self.is_standalone_spec or (self.spec_kind == "impl" and self.lane_spec is not None)
 
     @property
     def is_wayfinder_map(self) -> bool:

@@ -5,7 +5,7 @@ import pytest
 from ticketmaster import start
 from ticketmaster.config import load_config
 from ticketmaster.model import Ticket
-from ticketmaster.start import MapNotFound, NotWayfinderWork, build_prompt, claude_args, workbench_for
+from ticketmaster.start import MapNotFound, NotBoardWork, build_prompt, claude_args, workbench_for
 
 MAP = ("wayfinder:map",)
 
@@ -47,6 +47,18 @@ def test_an_implementation_ticket_runs_implement_on_the_ticket_alone():
     assert build_prompt(SLICE, "/wayfinder", "/implement") == "/implement https://gh/686"
 
 
+STANDALONE = ticket(body="## Problem Statement\n\nx\n\n## Solution\n\ny")
+STANDALONE_TICKET = ticket(body="## Parent\n\n#680\n\n## What to build\n\nx\n\n## Acceptance criteria\n\n- [ ] y",
+                           parent_number=680, lane_spec=680)
+
+
+def test_a_standalone_spec_runs_to_tickets_focused_and_its_ticket_implement_unfocused():
+    assert build_prompt(STANDALONE) == "/mattpocock-skills:to-tickets https://gh/686"
+    assert start.takes_focus(STANDALONE)
+    assert build_prompt(STANDALONE_TICKET) == "/mattpocock-skills:implement https://gh/686"
+    assert not start.takes_focus(STANDALONE_TICKET)
+
+
 def test_linear_tickets_are_named_by_their_key_and_branch_on_gitbranchname():
     linear = ticket(key="TM-26", branch_name="kb/tm-26-s-starts-implement")
     assert (start.worktree_name(linear), start.branch_name(linear)) == ("tm-26", "kb/tm-26-s-starts-implement")
@@ -57,8 +69,8 @@ def test_linear_tickets_are_named_by_their_key_and_branch_on_gitbranchname():
 
 @pytest.mark.parametrize("t", [ticket(), ticket(parent_number=690, parent_url="https://gh/690"),
                                ticket(labels=("wayfinder:epic",))])
-def test_a_ticket_without_a_map_is_not_wayfinder_work_and_never_starts(t):
-    with pytest.raises(NotWayfinderWork, match="#686"):
+def test_a_ticket_without_a_map_or_standalone_spec_is_not_board_work_and_never_starts(t):
+    with pytest.raises(NotBoardWork, match="#686"):
         build_prompt(t)
 
 
