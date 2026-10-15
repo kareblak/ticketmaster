@@ -27,5 +27,6 @@ If it fails:
   `gh auth login`, `glab auth login`, `tea login add`, `/ticketmaster login`, or a `.ticketmaster.toml` with
   `provider`/`host`/`repo` for a self-hosted tracker.
 
-On the board, `Enter` goes to a ticket's herdr session, or says what `s` would do. `s` starts
+On the board, `Enter` goes to the session working a ticket (or its worktree, with a shell), or says it has
+none; it never starts Claude. `s` starts
 `/wayfinder` for the ticket in its own git worktree and herdr workspace, or says why it refuses.

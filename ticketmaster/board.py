@@ -45,7 +45,8 @@ LIMITED_TICKETS_EVERY = 60.0  # ticket fetches while the tracker rate-limits the
 LIMITED_SESSIONS_EVERY = 10.0  # herdr session refreshes meanwhile
 
 
-def session_lines(sessions: list[Session], starting: bool) -> Text:
+def session_lines(sessions: list[Session], starting: bool, claimed: bool = False) -> Text:
+    """A badge per session; for a claimed ticket without one, that the claim's session is not in this herdr."""
     text = Text()
     for session in sessions:
         label, style = STATUS_STYLES.get(session.status, STATUS_STYLES["unknown"])
@@ -53,13 +54,15 @@ def session_lines(sessions: list[Session], starting: bool) -> Text:
         text.append(f"{Path(session.path).name}\n", style="dim")
     if starting and not sessions:
         text.append("▶ starting…\n", style="bold green")
+    elif claimed and not sessions:
+        text.append("◇ claimed, no session here\n", style="grey62")
     return text
 
 
 def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
-                map_title: str = "", out_of_scope: bool = False) -> Text:
+                map_title: str = "", out_of_scope: bool = False, claimed: bool = False) -> Text:
     """A ticket: type · HITL/AFK, assignee, its open blockers and its map's title."""
-    text = session_lines(sessions, starting)
+    text = session_lines(sessions, starting, claimed)
     text.append(f"#{ticket.number} ", style=f"bold {COLUMN_COLORS[column]}")
     text.append(ticket.title, style="bold")
     if ticket.summary:
@@ -86,9 +89,9 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
     return text
 
 
-def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False) -> Text:
+def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False, claimed: bool = False) -> Text:
     """A lane's header: the map's title and its decided / open / blocked counts."""
-    text = session_lines(sessions, starting)
+    text = session_lines(sessions, starting, claimed)
     text.append(f"◆ #{lane.map.number} ", style=f"bold {MAP_COLOR}")
     text.append(lane.map.title, style="bold")
     if lane.collapsed:
@@ -347,7 +350,7 @@ class FilterPicker(ModalScreen[None]):
 
 
 KEY_DETAILS = {
-    "primary": "go to the ticket's herdr workspace; with none, the status line says what s would do; never starts",
+    "primary": "go to the card's most urgent session, else its worktree with a shell; never starts or resumes Claude",
     "start": "start /wayfinder for the ticket in a new issue-<n> worktree, even when it already has one; not while "
              "blocked or claimed by someone else, and never for an issue that is not wayfinder work",
     "open": "open the issue in the browser",
@@ -405,9 +408,7 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     heading("Starting a session")
     text.append("  s asks first, then creates a git worktree workspace in herdr on branch issue-<n>\n"
                 "  (issue-<n>-2… when it exists) and starts Claude in it as herdr agent issue-<n> with the\n"
-                "  wayfinder skill (wayfinder_command in .ticketmaster.toml). Enter only goes to a session.\n"
-                "  The card then lists the session: ● working, ⚠ needs you, ◌ idle, ✓ done or ○ no agent.\n"
-                "  The prompt depends on the ticket:\n")
+                "  wayfinder skill (wayfinder_command in .ticketmaster.toml). The prompt depends on the ticket:\n")
     for kind, prompt in [
         ("wayfinder map", "never started itself: s on the lane's header card starts the map's\n"
                           + " " * 22 + "first frontier ticket (open, unblocked, unclaimed, not started yet)\n"
@@ -422,6 +423,14 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     text.append("  A wayfinder ticket's card says who it needs: HITL (you at the keyboard) for grilling and\n"
                 "  prototype, AFK (the agent alone) for research, and for a task whichever of the two\n"
                 "  words its body names first.\n")
+
+    heading("Finding sessions")
+    text.append("  A herdr agent in this repo works #<n> when its worktree or branch is issue-<n> or tm-<n>\n"
+                "  (worktree- first and -<k> after allowed), or its terminal title starts with TM-<n> or #<n>.\n"
+                "  Each card shows a badge per session: ⚠ needs you, ● working, ◌ idle, ✓ done, or ○ no agent\n"
+                "  for a worktree without Claude; a claimed ticket with none says so. Enter, on any card, goes\n"
+                "  to the most urgent one, else opens its worktree with a shell; it never starts Claude.\n"
+                "  A map card goes to the map's own session, never a ticket's.\n")
 
     heading("The board only reads")
     text.append("  It never writes to the tracker or the repo, and never removes a worktree. A session\n"
@@ -657,9 +666,9 @@ class BoardApp(App):
         self.grid, lanes = [], []
         for lane in self.board.lanes:
             header = Card(lane.map, None, render_map(lane, self.sessions.get(lane.map.number, []),
-                                                     lane.map.number in self.starting))
+                                                     lane.map.number in self.starting, self._claimed(lane.map)))
             cells = [[Card(t, column, render_card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
-                                                  lane.map.title, t.number in lane.out_of_scope))
+                                                  lane.map.title, t.number in lane.out_of_scope, self._claimed(t)))
                       for t in self._visible(lane, column)] for column in COLUMN_ORDER]
             self.grid.append((header, cells))
             if lane.collapsed:
@@ -680,6 +689,10 @@ class BoardApp(App):
             self.call_after_refresh(refocus.focus, scroll_visible=False)
         self._render_status()
         self._render_tabs()
+
+    def _claimed(self, ticket: Ticket) -> bool:
+        """Open and assigned; only herdr can tell whether its session is here, so without it nothing is said."""
+        return self.workbench is not None and ticket.is_open and bool(ticket.assignees)
 
     def _cards(self) -> list[Card]:
         """Every card in board order: each lane's header, then its cells left to right."""
@@ -842,17 +855,17 @@ class BoardApp(App):
         self.run_worker(work, thread=True, group="herdr")
 
     def action_primary(self) -> None:
-        """Enter: go to the ticket's session; with none, say what s would do. It never starts one."""
+        """Enter, on any card: go to the card's own most urgent session, else its worktree with a shell; with
+        neither, say so. It never starts or resumes Claude."""
         card = self._card()
         if card is None:
             return
         ticket, sessions = card.ticket, self.sessions.get(card.ticket.number, [])
         if sessions:
-            session = min(sessions, key=lambda s: (s.status is None, s.workspace is None))
+            session = min(sessions, key=lambda s: s.urgency)
             self._run(lambda: self.workbench.go_to(ticket, session))
             return
-        refusal = ticket.start_refusal(self.viewer)
-        self.notify(refusal or f"#{ticket.number} has no session here; s starts one", severity="warning")
+        self.notify(f"#{ticket.number} has no session here", severity="warning")
 
     def action_start(self) -> None:
         card = self._card()
