@@ -50,11 +50,11 @@ in its own git worktree and herdr workspace, or says why it refuses.
 A session that finishes a map's last work (its last ticket merged or closed) ends with cleanup, once a human has
 closed the map in the tracker:
 
-1. Check the map's state (`gh issue view <map> --json state`, or the tracker's equivalent). If it is still open,
-   say that cleanup waits for the map to be closed, and stop. Never close the map yourself.
-2. Run `ticketmaster cleanup <map> --dry-run` and relay the list, since the real run may end this session before
-   you can say anything.
-3. Run `ticketmaster cleanup <map>`.
+1. Run `ticketmaster cleanup <map> --dry-run`. If its first line says `(open)`, say that cleanup waits for the
+   map to be closed, and stop; the user asks for the cleanup once they have closed it. Never close the map
+   yourself.
+2. Otherwise relay the list, since the real run may end this session before you can say anything, then run
+   `ticketmaster cleanup <map>`.
 
 Reading the list: **removable** entries go; **kept** entries stay with their reasons, and nothing is ever
 forced. `open ticket` or `unmerged PR` means the ticket's work is not in yet; `uncommitted changes` (or

@@ -95,12 +95,12 @@ first, then its own worktree and branch, prints the whole summary, and only then
 (or pane), which ends the session. If its own worktree is kept (uncommitted changes, an open ticket, an unmerged
 PR) or git refuses to remove it, the summary says why and the workspace stays open.
 
-End to end, a map's work finishes like this: the tickets' PRs merge, a human closes the map in the tracker,
-and the session that finished the map's last work runs `ticketmaster cleanup MAP` as its final step (after a
-`--dry-run` it relays, since the real run can end the session). Afterwards the map's merged worktrees, their
-branches and their herdr workspaces and agents are gone, the session's own last; only kept entries remain, each
-with its reason. While the map is still open the session runs nothing: it says cleanup waits for the map to be
-closed, and stops.
+End to end, a map's work finishes in four steps. The tickets' PRs merge. A human closes the map in the tracker.
+The session that finished the map's last work runs `ticketmaster cleanup MAP --dry-run` and relays the list, then
+runs `ticketmaster cleanup MAP` as its final step, since the real run can end the session. Afterwards the map's
+merged worktrees, their branches, and their herdr workspaces and agents are gone, the session's own worktree last;
+only kept entries remain, each with its reason. While the map is still open, the dry run's first line says so
+and the session goes no further: it says cleanup waits for the map to be closed, and stops.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
 its spec and the spec's implementation tickets, and on GitHub, GitLab, Gitea/Forgejo and Linear every standalone spec
