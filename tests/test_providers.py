@@ -138,7 +138,8 @@ def github_board(monkeypatch, maps, subs=None, refs=None, named=None, specs=()):
 def lanes(tickets, named_map=None):
     from ticketmaster.model import build_board
 
-    return {lane.map.number: {c.name: [t.number for t in ts] for c, ts in lane.columns.items() if ts}
+    return {lane.map.number: {**({"SPECS": [t.number for t in lane.specs]} if lane.specs else {}),
+                              **{c.name: [t.number for t in ts] for c, ts in lane.columns.items() if ts}}
             for lane in build_board(tickets, named_map).lanes}
 
 
@@ -241,7 +242,7 @@ def test_gitlab_fetches_every_open_map_with_its_children_by_their_part_of_line(m
                      ("search", "Part of"), ("search", "Parent")]
     assert [t.number for t in tickets] == [1, 20, 5, 3, 21, 40]  # #40: untyped with `Part of #1`, so the spec
     assert (tickets[2].parent_number, tickets[2].parent_url) == (1, "https://gl/g/p/-/issues/1")
-    assert lanes(tickets) == {1: {"FRONTIER": [5, 40], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
+    assert lanes(tickets) == {1: {"SPECS": [40], "FRONTIER": [5], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
 
 
 def test_gitlab_keeps_an_open_maps_tickets_behind_many_of_another_maps(monkeypatch):
@@ -333,7 +334,7 @@ def test_github_shows_a_closed_map_whose_spec_is_still_open(monkeypatch):
                          specs=[spec, gh_issue(7, [], "Part of #9")])
     tickets = github.GitHubProvider("o/r").fetch(Query())
     assert ("issues", [1, 9]) in asked
-    assert lanes(tickets) == {1: {"FRONTIER": [14, 15], "DECIDED": [2]}}
+    assert lanes(tickets) == {1: {"SPECS": [14], "FRONTIER": [15], "DECIDED": [2]}}
 
 
 def test_gitea_fetches_every_open_map_with_its_children_by_their_part_of_line(monkeypatch):
@@ -344,7 +345,7 @@ def test_gitea_fetches_every_open_map_with_its_children_by_their_part_of_line(mo
     assert asked == [("open", "wayfinder:map"), ("all", "wayfinder:research"), ("all", "wayfinder:task"),
                      ("search", "Part of"), ("search", "Parent")]
     assert [t.number for t in tickets] == [1, 20, 5, 3, 2, 21, 40]
-    assert lanes(tickets) == {1: {"BLOCKED": [5], "FRONTIER": [40], "CLAIMED": [2], "DECIDED": [3]},
+    assert lanes(tickets) == {1: {"SPECS": [40], "BLOCKED": [5], "CLAIMED": [2], "DECIDED": [3]},
                               20: {"FRONTIER": [21]}}
 
 
@@ -771,9 +772,10 @@ def assert_lane_family(tickets, map_url):
     for n in (3, 4, 5):
         assert (by_number[n].map_number, by_number[n].map_url) == (1, map_url), n
     assert [by_number[n].spec_kind for n in (2, 3, 4, 5)] == [None, "spec", "impl", "impl"]
+    assert [by_number[n].has_tickets for n in (1, 2, 3, 4, 5)] == [False, False, True, False, False]
     # The body's blockers, after any native ones.
     assert (by_number[4].blocked_by[-1:], by_number[5].blocked_by[-1:]) == (("#2",), ("#4",))
-    assert lanes(tickets) == {1: {"BLOCKED": [4, 5], "FRONTIER": [2, 3]}}
+    assert lanes(tickets) == {1: {"SPECS": [3], "BLOCKED": [4, 5], "FRONTIER": [2]}}
 
 
 def assert_map_family(tickets, map_url, spec_url):
@@ -861,7 +863,7 @@ def test_gitlab_shows_a_closed_map_whose_spec_is_still_open(monkeypatch):
     asked = gitlab_board(monkeypatch, ["wayfinder::map", "wayfinder::grilling"], issues, named=issues[0])
     tickets = gitlab.GitLabProvider("g/p").fetch(Query())
     assert ("named", "1") in asked
-    assert lanes(tickets) == {1: {"FRONTIER": [14, 15], "DECIDED": [2]}}
+    assert lanes(tickets) == {1: {"SPECS": [14], "FRONTIER": [15], "DECIDED": [2]}}
 
 
 def test_github_map_order_is_the_maps_sub_issue_order(monkeypatch):
@@ -1034,6 +1036,29 @@ def test_resolve_maps_follows_ticket_to_spec_to_map_fetching_each_issue_once():
     assert sorted(fetched) == [1, 3, 20, 21, 22, 404]  # each chain issue off the board fetched once
 
 
+def test_a_spec_has_tickets_when_an_open_or_a_closed_implementation_ticket_names_it():
+    def spec(number):
+        return Ticket(number=number, title="Spec", url=f"u{number}", is_open=True, body="Part of #1",
+                      map_number=1, map_url="u1")
+
+    def impl(number, parent, **kw):
+        base = dict(number=number, title="Slice", url=f"u{number}", is_open=True, body=f"## Parent\n\n#{parent}",
+                    map_number=1, map_url="u1")
+        return Ticket(**{**base, **kw})
+
+    tickets = [spec(3), spec(4), spec(5), impl(6, 3, is_open=False), impl(7, 0, body="", parent_number=4)]
+    marked = {t.number: t.has_tickets for t in providers.with_spec_tickets(tickets)}
+    assert marked == {3: True, 4: True, 5: False, 6: False, 7: False}
+
+
+def test_a_linear_spec_has_tickets_by_its_teams_parent_section():
+    spec = Ticket(number=3, title="Spec", url="u3", is_open=True, key="TM-3", body="Part of TM-1",
+                  map_number=1, map_url="u1")
+    impl = Ticket(number=6, title="Slice", url="u6", is_open=False, key="TM-6", body="## Parent\n\nTM-3",
+                  map_number=1, map_url="u1")
+    assert [t.has_tickets for t in providers.with_spec_tickets([spec, impl])] == [True, False]
+
+
 # ---------- the fetch limit: maps per board and tickets per map, and what a fetch cut off ----------
 
 def test_github_reads_at_most_the_limit_of_maps_and_of_each_maps_tickets_and_says_what_it_cut(monkeypatch):
@@ -1064,6 +1089,17 @@ def test_gitea_reads_at_most_the_limit_of_maps_and_of_each_maps_tickets_and_says
     assert lanes(provider.fetch(Query(limit=2))) == {1: {"FRONTIER": [2, 3]}, 20: {}}
     assert provider.cut_off == ["open maps", "#1's tickets"]
     assert len(provider.fetch(Query(limit=3))) == 6 and provider.cut_off == []
+
+
+def test_a_spec_whose_tickets_the_limit_cuts_still_has_tickets(monkeypatch):
+    lean_board(monkeypatch)
+    tickets = github.GitHubProvider("o/r").fetch(Query(limit=2))  # each lane keeps its decision ticket and spec
+    assert {t.number: t.has_tickets for t in tickets if t.spec_kind} == {3: True, 12: True, 22: True}
+    issues = [gl_issue(1, ["wayfinder::map"]), gl_issue(2, ["wayfinder::grilling"], "Part of #1"),
+              gl_issue(3, [], "Part of #1"), gl_issue(4, [], "## Parent\n\n#3")]
+    gitlab_board(monkeypatch, GITLAB_LABELS, issues)
+    assert {t.number: t.has_tickets for t in gitlab.GitLabProvider("g/p").fetch(Query(limit=2))} == \
+        {1: False, 2: False, 3: True}
 
 
 def test_a_cut_map_lane_keeps_its_first_tickets_in_map_order():
@@ -1104,7 +1140,7 @@ def test_github_searches_lean_then_fetches_the_hits_and_every_maps_and_specs_chi
                           ("children", [1, 10, 20, 3, 12, 22])]
     for search in queries[:2]:
         assert "title" not in search and "assignees" not in search and "blockedBy" not in search
-    assert lanes(tickets) == {m: {"FRONTIER": [m + 1, m + 2, m + 3, m + 4]} for m in (1, 10, 20)}
+    assert lanes(tickets) == {m: {"SPECS": [m + 2], "FRONTIER": [m + 1, m + 3, m + 4]} for m in (1, 10, 20)}
 
 
 def test_github_reports_what_its_last_fetch_cost_and_the_points_left(monkeypatch):

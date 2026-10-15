@@ -97,7 +97,7 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 | Key            | Column            | Effect                                                              |
 | -------------- | ----------------- | ------------------------------------------------------------------- |
 | `Enter` / double-click | any       | go to the card's most urgent session, else its worktree with a shell; with neither, the status line says what `s` would do there or why it refuses. It never starts or resumes Claude |
-| `s`            | all but Decided   | start `/wayfinder` for the ticket, or `/implement` on an `impl` card, in its own `issue-<n>` worktree, or continue Claude in it when it has no agent (asks first); refused when closed, blocked, assigned to someone else or live (press `Enter`), and on a spec |
+| `s`            | all but Decided   | start `/wayfinder` for the ticket, `/implement` on an `impl` card, or `/to-tickets` on a map card whose spec has no tickets yet, in its own `issue-<n>` worktree, or continue Claude in it when it has no agent (asks first); refused when closed, blocked, assigned to someone else or live (press `Enter`) |
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | free-text filter, clear every filter, refresh now, quit             |
 | `f`            | any               | filter picker: type, HITL/AFK, assignee, map, author ([Filters](#filters); saved per repo) |
@@ -118,13 +118,13 @@ claude -n "#<n> <title>" "<prompt>"
 
 | Card                                                          | Prompt                                         |
 | ------------------------------------------------------------- | ---------------------------------------------- |
-| a map (`wayfinder:map`)                                       | its first frontier ticket's; with an empty frontier `/mattpocock-skills:wayfinder <map-url>`; see below |
+| a map (`wayfinder:map`) whose spec has no tickets yet         | `/mattpocock-skills:to-tickets <spec-url>` in the spec's worktree; see below |
+| any other map                                                 | its first frontier ticket's; with an empty frontier `/mattpocock-skills:wayfinder <map-url>`; see below |
 | has a `wayfinder:<type>` label (`research`, `prototype`, `grilling`, `task`; GitLab's `wayfinder::<type>` too) | `/mattpocock-skills:wayfinder <map-url> <ticket-url>` |
 | an implementation ticket (`impl`)                             | `/mattpocock-skills:implement <ticket-url>`, see below |
-| a spec (`spec`)                                               | never started; `s` starts its implementation tickets |
 | closed, blocked, assigned to someone else, a live session     | never started; the status line says why        |
 
-The skills are `wayfinder_command` and `implement_command` in `.ticketmaster.toml`. Each ticket gets
+The skills are `wayfinder_command`, `implement_command` and `to_tickets_command` in `.ticketmaster.toml`. Each ticket gets
 one worktree, never a `-2` copy: when it exists without an agent, `s` opens it and runs
 `claude -n "#<n> <title>" --continue` there. Maps and HITL tickets (grilling, prototype, task) take
 focus; research and `impl` cards start unfocused, and the status line says so.
@@ -134,7 +134,13 @@ in a `tm-<n>` worktree. `s` also refuses an `impl` card with an open PR that clo
 claimed starts, even while its spec is open. The session owns review, push and PR; the board starts
 nothing else.
 
-`s` on a lane's map card starts the map's first **frontier** ticket: open, unblocked, unassigned, not
+`s` on a lane's map card whose open spec has no implementation ticket yet, open or closed, breaks the
+spec into tickets: it starts `/mattpocock-skills:to-tickets <spec-url>`, focused, in the spec's own
+`issue-<spec>` worktree (`tm-<spec>` on Linear, on the issue's branch name), also when the map is
+closed. It refuses a blocked spec, one assigned to someone else, and one with a live session (`Enter`
+on the map card goes to the map's session, else the spec's); a spec closed without tickets is passed
+over. The board never removes the spec's
+worktree. Otherwise `s` on a lane's map card starts the map's first **frontier** ticket: open, unblocked, unassigned, not
 being started from this board and with no live session, in map order (GitHub's sub-issue order,
 asked for when you press `s`; else issue number). That ticket gets its own `issue-<n>` worktree,
 card and `/mattpocock-skills:wayfinder <map-url> <ticket-url>` session, so a second press starts the
@@ -166,7 +172,7 @@ and the board narrows as you go. Every value comes from the tracker data on the 
 
 | Section   | Values                                                    | A card shows when            |
 | --------- | --------------------------------------------------------- | ---------------------------- |
-| Type      | `research`, `prototype`, `grilling`, `task`, `spec`, `impl` (those on the board) | its type is selected |
+| Type      | `research`, `prototype`, `grilling`, `task`, `spec`, `impl` (those on the board) | its type is selected; `spec` keeps a lane whose map card carries a spec |
 | HITL/AFK  | `HITL`, `AFK`                                             | its wayfinder mode is selected |
 | Assignee  | `me` (your tracker login), `unassigned`, `anyone` (the default); one at a time | it is assigned to you, or to nobody |
 | Map       | each lane's map                                           | its lane's map is selected   |
@@ -236,14 +242,15 @@ Once the map is resolved, its destination becomes a spec (`/to-spec`) and then i
 (`/to-tickets`). The spec's first line is `Part of #<map>` (`Part of TM-<map>` on Linear); its
 implementation tickets are its sub-issues (GitHub and Linear) or name it in a `## Parent` section (every
 store). They carry no `wayfinder:` label,
-so they are no decision tickets: they sit in the map's lane tagged `spec` and `impl`. The board reads
-these links, and never writes them.
+so they are no decision tickets. The spec is a line of the map card, and its implementation tickets sit
+in the map's lane tagged `impl`. The board reads these links, and never writes them.
 
 Settings in `.ticketmaster.toml`:
 
 ```toml
 wayfinder_command = "/wayfinder"          # if wayfinder is installed under another name
 implement_command = "/implement"          # default /mattpocock-skills:implement
+to_tickets_command = "/to-tickets"        # default /mattpocock-skills:to-tickets
 ```
 
 ## Lanes and columns
@@ -254,8 +261,10 @@ title and its counts, **decided** (closed tickets, less those out of scope), **o
 open, since the decisions are made but the work goes on. Otherwise it shows only when named
 (`ticketmaster <map>`), shrunk to its header card.
 The lane holds the map's decision tickets (`wayfinder:research`, `prototype`, `grilling` or `task`),
-then its spec and the spec's implementation tickets, each in the first column whose rule matches.
-The map card's counts are of its decision tickets only.
+then the spec's implementation tickets, each in the first column whose rule matches. The spec itself
+is no card: the map card shows it on a line of its own, `▣ #<spec> open` (or `closed`) with its
+tickets' counts, `N done · N open · N blocked` (done is closed, less canceled), or `no tickets yet`,
+and the badges of the spec's sessions. The map card's own counts are of its decision tickets only.
 
 | Column   | Rule                                                                                   |
 | -------- | -------------------------------------------------------------------------------------- |
@@ -273,7 +282,7 @@ section when it has one), and then:
 
 - its type and who it needs: `HITL` (you at the keyboard) for `grilling` and `prototype`, `AFK` (the
   agent alone) for `research`, and for a `task` whichever of the words `HITL` / `AFK` its body names
-  first (no badge when it names neither); `spec` or `impl` for a spec and its implementation tickets
+  first (no badge when it names neither); `impl` for a spec's implementation ticket
 - `PR open` on an open card when an open pull or merge request will close its issue
 - `out of scope`, in Decided
 - its open blockers (`⛔ #3 other/lib#12`, `⛔ TM-3` on Linear)

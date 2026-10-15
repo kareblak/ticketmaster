@@ -24,7 +24,7 @@ from email.utils import parsedate_to_datetime
 from ..model import Ticket, parse_time
 from . import (LABEL_LIMIT, LIMIT, OPEN_MAPS, SPEC_SEARCHES, IssueStates, NotFound, ProviderError, Query,
                RateLimited, blocker_ref, cap_lanes, capped, closed_map_refs, map_board, resolve_maps, run_json,
-               tracker_error, wayfinder_labels, with_body_blockers, with_specs)
+               tracker_error, wayfinder_labels, with_body_blockers, with_spec_tickets, with_specs)
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -112,7 +112,8 @@ class GiteaProvider:
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
         tickets = [with_native_blockers(t, blockers.get(t.number)) for t in tickets]
-        tickets = cap_lanes(resolve_maps(tickets, functools.cache(self._issue)), limit, cut)
+        # A spec has tickets by its whole family, also when the lane is cut before them.
+        tickets = cap_lanes(with_spec_tickets(resolve_maps(tickets, functools.cache(self._issue))), limit, cut)
         tickets = with_body_blockers(tickets, self.states)
         self.cut_off = cut
         return tickets

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from ..model import Ticket, parse_time, part_of
 from . import (LIMIT, OPEN_MAPS, IssueStates, NotFound, ProviderError, Query, Quota, RateLimited, as_spec,
                blocker_ref, capped, closed_map_refs, is_spec, lane_cut, names_parent, resolve_maps, run_cli, run_json,
-               tracker_error, under_spec, with_body_blockers)
+               tracker_error, under_spec, with_body_blockers, with_spec_tickets)
 
 MAP_LABEL = "wayfinder:map"
 
@@ -235,7 +235,8 @@ class GitHubProvider:
                                               lambda node: names_parent(node.get("body"), spec.number)), spec)
         if more or len(tickets) > limit:
             cut.append(lane_cut(map_ticket))
-        return [replace(t, order=index) for index, t in enumerate(tickets[:limit])]
+        # A spec has tickets by its whole family, also when the lane is cut before them.
+        return [replace(t, order=index) for index, t in enumerate(with_spec_tickets(tickets)[:limit])]
 
     def _children(self, numbers: list[int], limit: int) -> dict[int, Children]:
         """Each issue's first `limit` sub-issues and the issues of this repo among its first `limit` references, by

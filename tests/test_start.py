@@ -36,9 +36,10 @@ SPEC = ticket(parent_number=680, parent_url="https://gh/680", parent_labels=MAP,
 SLICE = ticket(parent_number=690, parent_url="https://gh/690", map_number=680, map_url="https://gh/680")
 
 
-def test_a_spec_runs_wayfinder_on_its_map():
-    assert build_prompt(SPEC) == "/mattpocock-skills:wayfinder https://gh/680 https://gh/686"
-    assert build_prompt(SPEC, "/wayfinder") == "/wayfinder https://gh/680 https://gh/686"
+def test_a_spec_runs_to_tickets_on_the_spec_focused():
+    assert build_prompt(SPEC) == "/mattpocock-skills:to-tickets https://gh/686"
+    assert build_prompt(SPEC, "/wayfinder", "/implement", "/to-tickets") == "/to-tickets https://gh/686"
+    assert start.takes_focus(SPEC)
 
 
 def test_an_implementation_ticket_runs_implement_on_the_ticket_alone():
@@ -94,3 +95,10 @@ def test_workbench_reads_the_wayfinder_command_from_config():
 def test_only_wayfinder_starts_remain():
     assert not hasattr(start, "review_prompt")
     assert not any(hasattr(start.Workbench, action) for action in ("review", "remove", "auto_remove"))
+
+
+def test_workbench_reads_the_to_tickets_command_from_ticketmaster_toml(tmp_path):
+    (tmp_path / ".git").mkdir()
+    assert workbench_for(tmp_path, load_config(tmp_path)).to_tickets_command == "/mattpocock-skills:to-tickets"
+    (tmp_path / ".ticketmaster.toml").write_text('to_tickets_command = "/to-tickets"\n')
+    assert workbench_for(tmp_path, load_config(tmp_path)).to_tickets_command == "/to-tickets"
