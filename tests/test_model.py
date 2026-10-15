@@ -284,3 +284,23 @@ def test_frontier_follows_the_trackers_map_order_when_given():
 def test_a_ticket_with_a_map_has_no_map_missing():
     t = Ticket(number=4, title="Slice", url="u", is_open=True, parent_number=3, map_number=1, map_url="https://gh/1")
     assert not t.map_missing
+
+
+def spec_or_impl(kind, **kw):
+    return ticket(map_number=9, map_url="u9", body="Part of #9" if kind == "spec" else "## Parent\n\n#8", **kw)
+
+
+def test_start_refusal_refuses_a_closed_ticket_and_a_spec():
+    assert ticket(is_open=False, labels=("wayfinder:map",)).start_refusal("me") == "#1 is closed"
+    assert spec_or_impl("spec").start_refusal("me") == "#1 is a spec: s starts /implement on its implementation tickets"
+
+
+def test_start_refusal_refuses_an_implementation_ticket_with_an_open_closing_pr():
+    assert spec_or_impl("impl", has_open_change_request=True).start_refusal("me") == \
+        "#1 has an open PR that closes it"
+    assert spec_or_impl("impl").start_refusal("me") is None
+    assert spec_or_impl("impl", assignees=("me",)).start_refusal("me") is None
+
+
+def test_a_ticket_is_named_by_its_tracker_key_else_its_number():
+    assert ticket().ref == "#1" and ticket(key="TM-1").ref == "TM-1"
