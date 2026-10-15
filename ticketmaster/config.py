@@ -1,4 +1,8 @@
-"""Pick a provider for the current repo from the git remote, `.ticketmaster.toml`, or flags."""
+"""Pick a provider for the current repo from the git remote, `.ticketmaster.toml`, or flags.
+
+Linear has no remote to detect it by: `.ticketmaster.toml` names it with `provider = "linear"` and `team = "<key>"`,
+plus `key_env` when the API key is in another `LINEAR_` variable than LINEAR_API_KEY.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +18,8 @@ from .providers import Provider, ProviderError
 
 KNOWN_HOSTS = {"github.com": "github", "gitlab.com": "gitlab", "codeberg.org": "gitea", "gitea.com": "gitea"}
 CONFIG_FILE = ".ticketmaster.toml"
+# Seconds between refreshes. Linear's key allows 2,500 requests an hour, shared by everything using the key's user.
+DEFAULT_INTERVAL = {"linear": 30.0}
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,11 @@ def save_settings(path: Path, settings: dict) -> None:
     path.write_text(json.dumps(settings, indent=2) + "\n")
 
 
+def default_interval(kind: str) -> float:
+    """The refresh interval when `--interval` is not given: 30 s on Linear, 5 s elsewhere."""
+    return DEFAULT_INTERVAL.get(kind, 5.0)
+
+
 def git_remote(cwd: Path, name: str) -> str:
     result = subprocess.run(["git", "remote", "get-url", name], cwd=cwd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -82,6 +93,8 @@ def resolve_provider(
 ) -> Provider:
     """Flags win over `.ticketmaster.toml`, which wins over the detected `origin` remote."""
     config = load_config(cwd)
+    if (provider or config.get("provider")) == "linear":
+        return linear_provider(config)
     remote = None
     if not repo and not config.get("repo"):
         remote = parse_remote(git_remote(cwd, config.get("remote", "origin")))
@@ -91,6 +104,16 @@ def resolve_provider(
     if kind is None:
         raise ProviderError(f"cannot tell which tracker {host} is; set provider in {CONFIG_FILE} or pass --provider")
     return make_provider(kind, repo, host)
+
+
+def linear_provider(config: dict) -> Provider:
+    """The team's Linear provider; without a team, the error holds the lines to add."""
+    if not config.get("team"):
+        raise ProviderError(f'Linear has no repo to detect its team from; add to {CONFIG_FILE}:\n\n'
+                            f'provider = "linear"\nteam = "<key>"  # the team\'s issue key: TM for TM-12\n')
+    from .providers.linear import LinearProvider
+
+    return LinearProvider(str(config["team"]), config.get("key_env"))
 
 
 def make_provider(kind: str, repo: str, host: str | None) -> Provider:
@@ -108,4 +131,4 @@ def make_provider(kind: str, repo: str, host: str | None) -> Provider:
         if not host:
             raise ProviderError("gitea/forgejo needs a host")
         return GiteaProvider(repo, host)
-    raise ProviderError(f"unknown provider '{kind}' (github, gitlab, gitea, forgejo)")
+    raise ProviderError(f"unknown provider '{kind}' (github, gitlab, gitea, forgejo, linear)")

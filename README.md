@@ -20,7 +20,8 @@ grilling ·  HITL  ◆ Pick a stack
 ## Install
 
 Needs [herdr](https://herdr.dev), Python 3.11+ as `python3`, Claude Code, and the CLI for your
-tracker (`gh`, `glab`, or a `tea` login for Gitea/Forgejo). In Claude Code:
+tracker (`gh`, `glab`, a `tea` login for Gitea/Forgejo, or a Linear API key, see
+[Providers](#providers)). In Claude Code:
 
 ```
 /plugin marketplace add kareblak/ticketmaster
@@ -55,7 +56,7 @@ so code changes apply on the next `/ticketmaster` without rebuilding. Changing `
 ## Usage
 
 ```
-ticketmaster [open] [map] [--repo OWNER/NAME] [--provider github|gitlab|gitea|forgejo]
+ticketmaster [open] [map] [--repo OWNER/NAME] [--provider github|gitlab|gitea|forgejo|linear]
              [--host HOST] [--columns auto|one|all] [--interval SECONDS]
 ```
 
@@ -70,7 +71,9 @@ Issues that are not wayfinder work are not shown. `map` (`42`, `#42`, the issue'
 key like `TM-1` or a Linear issue URL) opens the full board with the [map filter](#filters) preset to
 that map, for this run only; `Esc` clears it and shows every open map. A key matches the map card
 whose tracker key it is, never issue number 1; a key no map carries shows an empty board. A closed map
-shows only when you name it by number or URL, as its header card alone.
+shows only when you name it by number or URL, or on Linear by its team's key, as its header card alone.
+
+The board refreshes every 5 s, every 30 s on Linear; `--interval` sets another.
 
 The board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
 switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` sets the start).
@@ -111,7 +114,7 @@ one worktree, never a `-2` copy: when it exists without an agent, `s` opens it a
 `claude -n "#<n> <title>" --continue` there. Maps and HITL tickets (grilling, prototype, task) take
 focus; research and `impl` cards start unfocused, and the status line says so.
 
-`s` on an `impl` card starts `/implement` AFK. On Linear its branch is the issue's `gitBranchName`,
+`s` on an `impl` card starts `/implement` AFK. On Linear its branch is the issue's branch name (`branchName`),
 in a `tm-<n>` worktree. `s` also refuses an `impl` card with an open PR that closes it. A card you
 claimed starts, even while its spec is open. The session owns review, push and PR; the board starts
 nothing else.
@@ -175,12 +178,17 @@ The board reads wayfinder's links between tickets; it never writes them, and nev
 | GitHub          | native sub-issue of the map, else `Part of #<map>` as the body's first line | native issue dependency (`blocked_by`) | closed as not planned, or linked from the map's `## Out of scope` section |
 | GitLab          | `Part of #<map>` as the description's first line | native `blocks` issue link (GitLab Premium) | linked from the map's `## Out of scope` section, closed |
 | Gitea / Forgejo | `Part of #<map>` as the body's first line | native issue dependency (`/dependencies`)  | linked from the map's `## Out of scope` section, closed |
+| Linear          | native sub-issue of the map, else `Part of TM-<map>` as the description's first line | native `blocks` relation | canceled or duplicate |
 
 The `## Out of scope` section links a ticket as `#<n>` or by its issue URL in the map's repo.
 
+On Linear a typed `TM-1` is stored as a mention, a link to the issue, so `Part of`, `## Parent` and
+`Blocked by` accept the key, the mention or the issue URL.
+
 Once the map is resolved, its destination becomes a spec (`/to-spec`) and then implementation tickets
-(`/to-tickets`). The spec's first line is `Part of #<map>`; its implementation tickets are its
-sub-issues (GitHub) or name it in a `## Parent` section (every store). They carry no `wayfinder:` label,
+(`/to-tickets`). The spec's first line is `Part of #<map>` (`Part of TM-<map>` on Linear); its
+implementation tickets are its sub-issues (GitHub and Linear) or name it in a `## Parent` section (every
+store). They carry no `wayfinder:` label,
 so they are no decision tickets: they sit in the map's lane tagged `spec` and `impl`. The board reads
 these links, and never writes them.
 
@@ -211,7 +219,7 @@ Labels play no part: there is no `blocked`, `review:` or `wontfix` rule, and no 
 column. Within a column, cards sort by the map's sub-issue order, then issue number, so a map's first
 Frontier card is the one `/wayfinder <map>` would pick.
 
-A ticket card shows its number and title, the first ~90 characters of the body (the `## Question`
+A ticket card shows its number (its key, `TM-<n>`, on Linear) and title, the first ~90 characters of the body (the `## Question`
 section when it has one), and then:
 
 - its type and who it needs: `HITL` (you at the keyboard) for `grilling` and `prototype`, `AFK` (the
@@ -219,8 +227,8 @@ section when it has one), and then:
   first (no badge when it names neither); `spec` or `impl` for a spec and its implementation tickets
 - `PR open` on an open card when an open pull or merge request will close its issue
 - `out of scope`, in Decided
-- its open blockers (`⛔ #3 other/lib#12`)
-- its assignees (`@kare`)
+- its open blockers (`⛔ #3 other/lib#12`, `⛔ TM-3` on Linear)
+- its assignees (`@kare`; Linear's display name, `@kaare.blakstad`)
 - its map's title (`◆ Pick a stack`)
 
 ## Providers
@@ -238,16 +246,35 @@ remote = "upstream"         # optional; defaults to origin
 
 Flags override the file, and the file overrides the remote.
 
+Linear has no remote to detect, so name it and its team:
+
+```toml
+provider = "linear"
+team = "TM"                 # the team's issue key, as in TM-12
+key_env = "LINEAR_API_KEY"  # optional; the env var holding the API key
+```
+
+The board reads a Linear personal API key (Linear: Settings, Security & access; the Read permission
+is enough) from `LINEAR_API_KEY`, or from the variable `key_env` names. That name must start with
+`LINEAR_`, so no other secret is sent to Linear; without a key the board refuses and names the
+option. `--provider linear` without a `team` fails and prints the lines to add.
+
 | Provider        | Access                                   | Blocking                  | Maps and their tickets              |
 | --------------- | ---------------------------------------- | ------------------------- | ----------------------------------- |
 | GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | a search for open `wayfinder:map` issues, then per map its sub-issues in order and the typed tickets and spec whose `Part of #<map>` line names it, then the spec's sub-issues and the issues whose `## Parent` names it |
 | GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | the project's `wayfinder:` labels (`wayfinder:map` or `wayfinder::map`, and the four types), one query per label; a typed ticket joins the map its `Part of #<map>` line names; a description search for `Part of` and `Parent` finds the specs and their implementation tickets |
 | Gitea / Forgejo | REST with the `tea` login token, or `GITEA_TOKEN` / `FORGEJO_TOKEN` | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names; an issue search (`q`) for `Part of` and `Parent` finds the specs and their implementation tickets |
+| Linear          | GraphQL with the API key (`Authorization: <key>`) | `blocks` relations (`inverseRelations`) | the team's open `wayfinder:map` issues, then per map its sub-issues in sub-issue order; one description search for `Part of` and `Parent` finds the typed tickets and spec linked by `Part of`, and the spec's sub-issues and `## Parent` tickets |
+
+On Linear only the workflow state's type counts, never its team-renamable name: `completed` is
+closed, `canceled` and `duplicate` closed as not planned. Only the assignee claims a ticket; the
+delegate does not. Users are their display name, and the board's "me" is the key's user.
 
 Every provider only reads: the board has no way to close, label, assign or comment.
 
 Besides native links, every provider counts the open issues a body lists on a `Blocked by: #3, #4`
-line (or the older Norwegian `Blokkert av: #3`) or under a `## Blocked by` heading as `- #3` bullets.
+line (or the older Norwegian `Blokkert av: #3`) or under a `## Blocked by` heading as `- #3` bullets
+(`TM-3` on Linear).
 A ticket leaves Blocked once every listed blocker is closed. `s` refuses to start a blocked ticket,
 naming its blockers, and a ticket assigned to someone other than the tracker login the board runs
 as; your own claimed tickets still start.
@@ -258,8 +285,13 @@ GitHub's GraphQL budget is 5,000 points an hour. Every refresh makes one search 
 query per open map (and per spec a map led to). Lengthen `--interval` if you run several boards at
 once or have many open maps.
 
-When the tracker rate-limits the board (GitHub's primary or secondary limit, or an HTTP 429 from
-GitLab or Gitea/Forgejo), ticket fetches drop to once a minute and herdr session states to every
+A Linear API key allows 2,500 requests an hour, shared by everything using its user's key, which is why
+the board polls Linear every 30 s. Every refresh lists the maps, then makes one query per open map and
+one search for specs and implementation tickets; each stays under half of Linear's 10,000-point
+complexity cap per query.
+
+When the tracker rate-limits the board (GitHub's primary or secondary limit, an HTTP 429 from
+GitLab or Gitea/Forgejo, or Linear's HTTP 400 `RATELIMITED`), ticket fetches drop to once a minute and herdr session states to every
 10s; the status line shows `rate-limited · next fetch in 42s · secondary limit`, and `r` refreshes
 only the sessions. The first good fetch restores `--interval`, once: a second rate limit keeps the
 board at once a minute until you restart it.
@@ -272,7 +304,8 @@ after a good fetch; `r` repeats it. On GitHub the board asks the `rate_limit` en
 quota) which limit it hit: an hourly quota at 0 is named with the time it resets, otherwise it is the
 secondary limit (too many calls per minute, shared by every board and agent on the account). Gitea and
 Forgejo say when a 429 lifts when the response's `Retry-After`, `X-RateLimit-Reset` or `RateLimit-Reset` does
-(GitLab's `glab` does not pass the headers on, so a GitLab 429 gives the status and message). `gh` and
+Linear names the hourly request or complexity limit that ran out and when it resets
+(`X-RateLimit-*-Reset`). (GitLab's `glab` does not pass the headers on, so a GitLab 429 gives the status and message). `gh` and
 `glab` do not always print the HTTP status; then the notification gives the message alone.
 
 ## Development

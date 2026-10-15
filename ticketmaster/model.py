@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -59,6 +60,11 @@ class Ticket:
     # gitBranchName); None on trackers that key issues by number alone.
     key: str | None = None
     branch_name: str | None = None
+
+    @property
+    def team_key(self) -> str | None:
+        """The tracker's key prefix, `TM` of Linear's `TM-26`, else None."""
+        return self.key.rpartition("-")[0] or None if self.key else None
 
     @property
     def is_blocked(self) -> bool:
@@ -120,7 +126,7 @@ class Ticket:
         None; either is untyped and has a map the provider resolved."""
         if self.map_number is None or wayfinder_kinds(self.labels):
             return None
-        return "spec" if part_of(self.body) == self.map_number else "impl"
+        return "spec" if part_of(self.body, self.team_key) == self.map_number else "impl"
 
     @property
     def map_missing(self) -> bool:
@@ -148,11 +154,26 @@ def wayfinder_kinds(labels: tuple[str, ...]) -> list[str]:
     return [m.group("kind").lower() for label in labels if (m := WAYFINDER_LABEL.match(label))]
 
 
-def part_of(body: str) -> int | None:
-    """The map number from a body whose first non-blank line is `Part of #<map>`."""
+@functools.cache
+def key_ref(key: str) -> re.Pattern[str]:
+    """`<key>-<n>` (Linear's `TM-12`) as a word, so `XTM-12` and another team's `ENG-12` are not it."""
+    return re.compile(rf"(?<![\w-]){re.escape(key)}-(\d+)\b")
+
+
+@functools.cache
+def _part_of_key(key: str) -> re.Pattern[str]:
+    """`Part of TM-<n>`, which Linear stores as a mention, `[TM-<n>](<issue URL>)`, or the issue's URL."""
+    k = re.escape(key)
+    return re.compile(rf"^Part of (?:\[?{k}-(?P<key>\d+)\]?(?:\(\S+\))?"
+                      rf"|<?https?://\S+?/issue/{k}-(?P<url>\d+)(?:/\S*?)?>?)\.?$")
+
+
+def part_of(body: str, key: str | None = None) -> int | None:
+    """The map number from a body whose first non-blank line is `Part of #<map>`, or with the tracker's `key`
+    (Linear's `TM`) `Part of TM-<map>` as the key, a mention or the issue URL."""
     first = next((line.strip() for line in (body or "").splitlines() if line.strip()), "")
-    match = PART_OF.match(first)
-    return int(match.group("map")) if match else None
+    match = PART_OF.match(first) or (_part_of_key(key).match(first) if key else None)
+    return int(next(group for group in match.groups() if group)) if match else None
 
 
 def map_tickets(map_ticket: Ticket, tickets: list[Ticket]) -> list[Ticket]:
@@ -304,10 +325,12 @@ _BLOCKED_SECTION = re.compile(r"^##+[ \t]*(?:blocked by|blokkert av)[ \t]*:?[ \t
 _REF = re.compile(r"(?<![\w&/])#(\d+)\b")
 
 
-def parse_blockers(body: str) -> tuple[int, ...]:
-    """Issue numbers in this repo that a body's `Blocked by:` lines and `## Blocked by` sections list, in order."""
+def parse_blockers(body: str, key: str | None = None) -> tuple[int, ...]:
+    """Issue numbers in this repo that a body's `Blocked by:` lines and `## Blocked by` sections list, in order;
+    with the tracker's `key` (Linear's `TM`) as `<key>-<n>`, a mention's link included, else as `#<n>`."""
+    ref = key_ref(key) if key else _REF
     refs = [m.group("refs") for pattern in (_BLOCKED_LINE, _BLOCKED_SECTION) for m in pattern.finditer(body or "")]
-    return tuple(dict.fromkeys(int(n) for text in refs for n in _REF.findall(text)))
+    return tuple(dict.fromkeys(int(n) for text in refs for n in ref.findall(text)))
 
 
 def parse_time(value: str | None) -> datetime | None:

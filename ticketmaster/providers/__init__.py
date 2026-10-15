@@ -11,9 +11,9 @@ from datetime import datetime
 from http import HTTPStatus
 from typing import Literal, Protocol
 
-from ..model import WAYFINDER_TYPES, Ticket, parse_blockers, part_of, wayfinder_kinds
+from ..model import WAYFINDER_TYPES, Ticket, key_ref, parse_blockers, part_of, wayfinder_kinds
 
-TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo"}
+TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo", "linear": "Linear"}
 
 
 class ProviderError(RuntimeError):
@@ -179,11 +179,6 @@ def run_json(args: list[str], stdin: str | None = None):
         raise ProviderError(f"`{args[0]}` returned non-JSON output: {out[:200]}") from exc
 
 
-def mentions_parent(body: str, parent: int) -> bool:
-    """The body mentions `#<parent>`."""
-    return re.search(rf"(?<![\w&])#{parent}\b", body or "") is not None
-
-
 # An issue by number (its URL, labels and body), or None when there is no such issue.
 IssueLookup = Callable[[int], Ticket | None]
 
@@ -259,12 +254,13 @@ class IssueStates:
         return states
 
 
-def with_body_blockers(tickets: list[Ticket], states: IssueStates) -> list[Ticket]:
-    """Adds the open issues a ticket's `Blocked by:` line or `## Blocked by` section lists to its native blockers.
+def with_body_blockers(tickets: list[Ticket], states: IssueStates, key: str | None = None) -> list[Ticket]:
+    """Adds the open issues a ticket's `Blocked by:` line or `## Blocked by` section lists to its native blockers,
+    as `#<n>`, or as `<key>-<n>` on a tracker with issue keys (Linear's `TM`).
 
     Issues outside the fetched tickets are looked up; one not found does not block.
     """
-    listed = {t.number: parse_blockers(t.body) for t in tickets if t.is_open}
+    listed = {t.number: parse_blockers(t.body, key) for t in tickets if t.is_open}
     known = {t.number: t.is_open for t in tickets}
     missing = sorted({n for numbers in listed.values() for n in numbers} - known.keys())
     if missing:
@@ -276,7 +272,7 @@ def with_body_blockers(tickets: list[Ticket], states: IssueStates) -> list[Ticke
             out.append(ticket)
             continue
         refs = list(ticket.blocked_by)
-        refs += [ref for n in numbers if known.get(n) and (ref := f"#{n}") not in refs]
+        refs += [ref for n in numbers if known.get(n) and (ref := f"{key}-{n}" if key else f"#{n}") not in refs]
         out.append(replace(ticket, blocked_by=tuple(refs), open_blockers=len(refs)))
     return out
 
@@ -287,25 +283,32 @@ def blocker_ref(number: int, repo: str, own_repo: str) -> str:
 
 
 # How a map's spec and the spec's implementation tickets link back: the
-# spec's first line is `Part of #<map>`, an implementation ticket's `## Parent` section names the spec.
+# spec's first line is `Part of #<map>`, an implementation ticket's `## Parent` section names the spec, as `#<n>`,
+# by issue URL, or with the tracker's key as Linear's `TM-<n>` (a mention links it, `[TM-<n>](…/issue/TM-<n>/…)`).
 _PARENT_SECTION = re.compile(r"^##\s*Parent\s*$(?P<text>.*?)(?=^#{1,2}\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
-_PARENT_REF = re.compile(r"(?<![\w&])#(?P<hash>\d+)\b|/issues/(?P<url>\d+)\b")
+_PARENT_REF = re.compile(r"(?<![\w&])#(\d+)\b|/issues/(\d+)\b")
 
 
-def names_parent(body: str, parent: int) -> bool:
-    """The body's `## Parent` section refers to `#<parent>` or to the parent's issue URL."""
+def parent_refs(body: str, key: str | None = None) -> list[int]:
+    """The issues the body's `## Parent` section names, in order: `#<n>`, issue URLs, and with the tracker's `key`
+    (Linear's `TM`) `TM-<n>`."""
     match = _PARENT_SECTION.search(body or "")
     if match is None:
-        return False
+        return []
     text = match.group("text")
-    return mentions_parent(text, parent) or re.search(rf"/issues/{parent}\b", text) is not None
+    patterns = (_PARENT_REF, key_ref(key)) if key else (_PARENT_REF,)
+    found = sorted((ref.start(), int(next(n for n in ref.groups() if n))) for p in patterns for ref in p.finditer(text))
+    return [number for _, number in found]
 
 
-def parent_ref(body: str) -> int | None:
-    """The issue the body's `## Parent` section names first, as `#<n>` or by its issue URL."""
-    match = _PARENT_SECTION.search(body or "")
-    ref = _PARENT_REF.search(match.group("text")) if match else None
-    return int(ref.group("hash") or ref.group("url")) if ref else None
+def names_parent(body: str, parent: int, key: str | None = None) -> bool:
+    """The body's `## Parent` section refers to `#<parent>`, to the parent's issue URL or to its key."""
+    return parent in parent_refs(body, key)
+
+
+def parent_ref(body: str, key: str | None = None) -> int | None:
+    """The issue the body's `## Parent` section names first."""
+    return next(iter(parent_refs(body, key)), None)
 
 
 def is_map(found: Ticket | None) -> bool:
@@ -313,8 +316,9 @@ def is_map(found: Ticket | None) -> bool:
 
 
 def is_spec(ticket: Ticket, map_number: int) -> bool:
-    """The spec a map led to: `Part of #<map>` and no `wayfinder:` label, so it is no decision ticket."""
-    return part_of(ticket.body) == map_number and not wayfinder_kinds(ticket.labels)
+    """The spec a map led to: `Part of #<map>` (`Part of TM-<map>` on Linear) and no `wayfinder:` label, so it is no
+    decision ticket."""
+    return part_of(ticket.body, ticket.team_key) == map_number and not wayfinder_kinds(ticket.labels)
 
 
 def as_spec(ticket: Ticket, map_ticket: Ticket) -> Ticket:

@@ -29,9 +29,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     # Read as text and converted below, so an unknown flag's value never fails as a map before the flag is named.
     parser.add_argument("map", nargs="?", help="a map to filter the board to (42, #42, TM-1 or its URL), shown also when closed")
     parser.add_argument("--repo", help="owner/name (default: from the git remote)")
-    parser.add_argument("--provider", choices=["github", "gitlab", "gitea", "forgejo"])
+    parser.add_argument("--provider", choices=["github", "gitlab", "gitea", "forgejo", "linear"])
     parser.add_argument("--host", help="tracker host, for self-hosted instances")
-    parser.add_argument("--interval", type=float, default=5.0, help="refresh seconds (default 5)")
+    parser.add_argument("--interval", type=float, help="refresh seconds (default 5, 30 on Linear)")
     parser.add_argument("--columns", choices=["auto", "one", "all"], default="auto",
                         help="one column at a time, all side by side, or auto by width (default)")
     if not argv or argv[0].startswith("-") or is_issue(argv[0]):
@@ -62,6 +62,17 @@ def parse_map(value: str) -> int | str:
     return int(match.group("number") or match.group("last"))
 
 
+def named_number(named: int | str | None, provider) -> int | None:
+    """The map number the provider is asked for, also when closed: a number, or a key of the Linear team the board
+    reads (`TM-1` is the team's issue 1). Another key is matched on the board alone."""
+    if isinstance(named, int):
+        return named
+    if named is not None and provider.name == "linear":
+        prefix, _, number = named.rpartition("-")
+        return int(number) if prefix == provider.team.upper() else None
+    return None
+
+
 def is_issue(value: str) -> bool:
     try:
         parse_map(value)
@@ -79,7 +90,8 @@ def passthrough(args: argparse.Namespace) -> list[str]:
             out += [f"--{flag}", getattr(args, flag)]
     if args.columns != "auto":
         out += ["--columns", args.columns]
-    out += ["--interval", f"{args.interval:g}"]
+    if args.interval is not None:
+        out += ["--interval", f"{args.interval:g}"]
     return out
 
 
@@ -92,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ticketmaster: `{args.command}` runs inside herdr; start herdr and run it from a herdr pane", file=sys.stderr)
         return 2
     cwd = Path.cwd()
-    from .config import resolve_provider
+    from .config import default_interval, resolve_provider
 
     try:
         provider = resolve_provider(cwd, args.provider, args.repo, args.host)
@@ -119,8 +131,8 @@ def main(argv: list[str] | None = None) -> int:
     workbench = workbench_for(cwd, load_config(cwd))
     BoardApp(
         provider,
-        Query(named_map=args.map if isinstance(args.map, int) else None),  # a key is matched on the board alone
-        interval=args.interval,
+        Query(named_map=named_number(args.map, provider)),
+        interval=args.interval if args.interval is not None else default_interval(provider.name),
         workbench=workbench,
         describe_start=lambda ticket: workbench.prompt(ticket)
         + f"\nworktree: {worktree_name(ticket)}, in its own herdr workspace",

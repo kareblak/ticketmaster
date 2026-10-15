@@ -74,6 +74,13 @@ def test_parse_blockers_ignores_none_mentions_and_other_repos():
     assert parse_blockers("") == ()
 
 
+def test_parse_blockers_reads_the_trackers_keys_only_when_given_one():
+    linked = "## Blocked by\n\n* [TM-16](https://linear.app/w/issue/TM-16/swimlanes) Swimlanes\n* TM-19\n"
+    assert parse_blockers(linked, key="TM") == (16, 19)
+    assert parse_blockers("Blocked by: TM-3, ENG-4, #5, XTM-6", key="TM") == (3,)
+    assert parse_blockers("Blocked by: TM-3") == ()
+
+
 DECISION = dict(parent_url="u9", parent_labels=("wayfinder:map",))  # with a wayfinder:<type> label, a ticket of map #9
 
 
@@ -129,6 +136,23 @@ def test_part_of_reads_the_first_line_of_the_body():
     assert part_of("Intro\nPart of #12") is None
     assert part_of("Part of #x") is None and part_of("") is None
     assert part_of("Part of #12, and of #13") is None
+
+
+def test_part_of_takes_the_trackers_key_mention_or_url():
+    assert part_of("Part of TM-1\n\n## Problem", "TM") == 1
+    # How Linear stores a typed `TM-1`: a mention, i.e. a link to the issue.
+    assert part_of("Part of [TM-1](https://linear.app/w/issue/TM-1/read-only-ticketmaster)\n\n## Problem", "TM") == 1
+    assert part_of("Part of https://linear.app/w/issue/TM-12/slug.", "TM") == 12
+    assert part_of("Part of <https://linear.app/w/issue/TM-12>", "TM") == 12
+    assert part_of("Part of TM-1 and TM-2", "TM") is None and part_of("Part of tm", "TM") is None
+    assert part_of("Part of ENG-1", "TM") is None  # another team's issue
+    assert part_of("Part of TM-1") is None  # a tracker without keys reads `#<n>` only
+
+
+def test_a_linear_tickets_spec_kind_reads_its_teams_part_of_line():
+    spec = ticket(key="TM-14", body="Part of [TM-1](https://linear.app/w/issue/TM-1/x)", map_number=1)
+    assert spec.spec_kind == "spec"
+    assert ticket(key="TM-15", body="## Parent\n\nTM-14", map_number=1).spec_kind == "impl"
 
 
 def test_wayfinder_label_prefix_is_case_insensitive():
