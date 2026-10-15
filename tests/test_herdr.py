@@ -585,3 +585,15 @@ def test_go_to_an_open_workspace_without_claude_focuses_it_without_resuming():
 def test_herdr_cannot_remove_or_adopt_worktrees():
     assert not any(hasattr(Herdr, action) for action in ("remove", "adopt"))
     assert not hasattr(herdr, "unsaved_work")
+
+
+def test_to_tickets_starts_focused_in_the_specs_own_worktree_with_the_exact_prompt():
+    spec = Ticket(number=686, title="Attach a  deviation reason", url="https://gh/686", is_open=True,
+                  body="Part of #679", map_number=679, map_url="https://gh/679")
+    fake = implement_fake()
+    message = bench(fake, to_tickets_command="/to-tickets").start(spec)
+    assert fake.first("worktree", "create") == ["worktree", "create", "--cwd", "/code/shiplog", "--branch", "issue-686",
+                                                "--label", "#686 Attach a deviation reason", "--focus"]
+    start = fake.first("agent", "start")
+    assert start[-3:] == ["-n", "#686 Attach a deviation reason", "/to-tickets https://gh/686"]
+    assert message == "Started /to-tickets on #686 in new worktree issue-686 as agent issue-686"

@@ -8,7 +8,8 @@ from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, 
 from ticketmaster.herdr import HerdrError, Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, RateLimited
-from ticketmaster.start import build_prompt
+from ticketmaster.config import load_config
+from ticketmaster.start import build_prompt, workbench_for
 
 
 class FakeProvider:
@@ -750,6 +751,9 @@ def test_help_explains_lanes_and_the_four_column_rules():
                 assert rule in text
             for gone in ("Review", "Done", "In progress", "Ready"):
                 assert gone not in text
+            assert "is a line of the map card, ▣ #<spec> open or closed" in text
+            assert ("s on the lane's header card, while its spec has no tickets (open or closed), starts "
+                    "to_tickets_command (default /mattpocock-skills:to-tickets)") in text
 
     run(scenario())
 
@@ -1404,11 +1408,10 @@ def test_a_maps_spec_and_its_implementation_tickets_sit_in_its_lane_tagged_and_c
         app = BoardApp(FakeProvider(tickets), Query(), interval=60)
         async with app.run_test(size=(200, 70)) as pilot:
             await loaded(app, pilot)
-            assert shown_lanes(app) == {9: {"BLOCKED": [3, 51], "FRONTIER": [1, 52], "CLAIMED": [2, 50, 54],
+            assert shown_lanes(app) == {9: {"BLOCKED": [3, 51], "FRONTIER": [1, 52], "CLAIMED": [2, 54],
                                             "DECIDED": [4, 53]},
-                                        20: {"FRONTIER": [60, 61]}}
-            assert chips_of(app, 50).startswith("spec ") and chips_of(app, 52).startswith("impl ")
-            assert "impl" not in chips_of(app, 50) and "spec" not in chips_of(app, 1)
+                                        20: {"FRONTIER": [61]}}  # the specs are no cards
+            assert chips_of(app, 52).startswith("impl ") and "spec" not in chips_of(app, 1)
             assert "◆ Pick a stack" in chips_of(app, 51) and "⛔ #52" in chips_of(app, 51)
             assert "1 decided · 3 open · 1 blocked" in card_text(app, 9)  # the counts are the map's decisions
             assert 70 not in [c.ticket.number for c in app.query(Card)]
@@ -1427,12 +1430,12 @@ def test_an_open_closing_pr_shows_as_a_badge_and_none_without_one():
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
             assert "PR open" in chips_of(app, 51) and "PR open" in chips_of(app, 5)
-            assert not any("PR open" in card_text(app, n) for n in (1, 2, 50, 52, 53, 9))
+            assert not any("PR open" in card_text(app, n) for n in (1, 2, 52, 53, 9))
 
     run(scenario())
 
 
-SPEC = spec_of(9, 50, assignees=("me",))
+SPEC = spec_of(9, 50, assignees=("me",), has_tickets=True)
 SLICES = [impl_of(SPEC, 51), impl_of(SPEC, 52, is_open=False, closed_at=datetime.now(timezone.utc)),
           impl_of(SPEC, 53, open_blockers=1, blocked_by=("#51",)), impl_of(SPEC, 54, assignees=("bob",)),
           impl_of(SPEC, 55), impl_of(SPEC, 56, has_open_change_request=True), impl_of(SPEC, 57, assignees=("me",))]
@@ -1500,17 +1503,137 @@ def test_s_on_my_claimed_impl_card_starts_while_its_spec_is_open_and_reuses_an_a
     run(scenario())
 
 
-def test_s_on_a_spec_card_still_refuses():
+def test_a_maps_spec_is_a_line_of_its_map_card_and_no_card_in_any_column():
+    bare, spec = spec_of(9, 80), spec_of(20, 60, has_tickets=True)
+    closed = dict(is_open=False, closed_at=datetime.now(timezone.utc))
+    tickets = [*TICKETS, bare, a_map(20, "Ship billing"), spec, impl_of(spec, 61), impl_of(spec, 62, **closed),
+               impl_of(spec, 63, not_planned=True, **closed), impl_of(spec, 64, open_blockers=1, blocked_by=("#61",))]
+
     async def scenario():
-        bench = FakeBench()
-        app = implement_app(bench)
+        app = BoardApp(FakeProvider(tickets), Query(), interval=60)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
-            await select(app, pilot, 50)
+            assert not {60, 80} & set(shown_numbers(app))
+            assert "▣ #80 open  no tickets yet" in card_text(app, 9)
+            assert "▣ #60 open  1 done · 2 open · 1 blocked" in card_text(app, 20)  # done less canceled
+            assert "1 decided · 3 open · 1 blocked" in card_text(app, 9)  # the map's own counts stay its decisions
+
+    run(scenario())
+
+
+def spec_app(bench, spec=None, describe_start=build_prompt, map_ticket=MAP):
+    tickets = [map_ticket, *TICKETS[1:], spec or spec_of(9, 80)]
+    return BoardApp(FakeProvider(tickets), Query(), interval=60, workbench=bench, describe_start=describe_start)
+
+
+def test_s_on_the_map_card_of_a_ticketless_spec_starts_to_tickets_on_the_spec():
+    async def scenario(map_ticket):
+        bench = FakeBench()
+        app = spec_app(bench, map_ticket=map_ticket)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 9)
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Start /to-tickets on #80 Spec 80 in a new worktree?"
+            assert app.screen.detail == "/mattpocock-skills:to-tickets u80"  # focused: no AFK note
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 80)]  # the spec, not the map's frontier ticket #1
+
+    run(scenario(MAP))
+    run(scenario(a_map(9, "Pick a stack", is_open=False)))  # a closed map whose spec is open
+
+
+def test_s_on_a_map_card_takes_to_tickets_command_from_ticketmaster_toml(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".ticketmaster.toml").write_text('to_tickets_command = "/to-tickets"\n')
+    workbench = workbench_for(tmp_path, load_config(tmp_path))
+
+    async def scenario():
+        bench = FakeBench()
+        app = spec_app(bench, describe_start=workbench.prompt)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 9)
+            await pilot.press("enter")
+            await pilot.pause()
+            assert notifications(app)[-1][0] == "#9 has no session here; s starts /to-tickets u80 on its spec #80"
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.detail == "/to-tickets u80"
+
+    run(scenario())
+
+
+def test_s_on_a_map_card_whose_spec_has_tickets_or_with_no_spec_starts_the_frontier_ticket():
+    with_open = spec_of(9, 80, has_tickets=True)
+    with_closed = spec_of(9, 80, has_tickets=True)
+    cases = [(with_open, [impl_of(with_open, 81)]), (with_closed, [impl_of(with_closed, 81, is_open=False)]),
+             (None, [])]
+
+    async def scenario(spec, impls):
+        bench = FakeBench()
+        tickets = [*TICKETS, *([spec] if spec else []), *impls]
+        app = BoardApp(FakeProvider(tickets), Query(), interval=60, workbench=bench, describe_start=build_prompt)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 9)
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.question == "Start #1 Ready one (next on map #9) in a new worktree?"
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 1)]
+
+    for spec, impls in cases:
+        run(scenario(spec, impls))
+
+
+def test_s_on_a_map_card_refuses_a_closed_or_someone_elses_spec_or_one_with_a_live_session():
+    live = {80: [Session(80, "/w/issue-80", "issue-80", "wA", "working", "wA:p1")]}
+
+    async def scenario(spec, sessions, refusal):
+        bench = FakeBench(sessions)
+        app = spec_app(bench, spec)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 9)
             await pilot.press("s")
             await pilot.pause()
             assert not is_confirm(app) and bench.calls == []
-            assert notifications(app)[-1][0] == "#50 is a spec: s starts /implement on its implementation tickets"
+            assert notifications(app)[-1][0] == refusal
+
+    run(scenario(spec_of(9, 80, is_open=False), {}, "#80 is closed"))
+    run(scenario(spec_of(9, 80, assignees=("bob",)), {}, "#80 is claimed by @bob"))
+    run(scenario(spec_of(9, 80), live, "#80 has a live session: press Enter to go to it"))
+
+
+def test_the_map_card_badges_its_specs_session_and_enter_goes_there_when_the_map_has_none():
+    async def scenario():
+        bench = FakeBench({80: [Session(80, "/w/issue-80", "issue-80", "wA", "working", "wA:p1")]})
+        app = spec_app(bench)
+        async with app.run_test(size=(200, 60)) as pilot:
+            await loaded(app, pilot)
+            assert "▣ #80 open  no tickets yet\n● working issue-80" in card_text(app, 9)
+            await select(app, pilot, 9)
+            await pilot.press("enter")
+            await loaded(app, pilot)
+            assert bench.calls == [("go_to", 9, "/w/issue-80")]
+
+    run(scenario())
+
+
+def test_the_spec_type_filter_keeps_a_lane_whose_map_card_carries_a_spec(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("f")
+            await pilot.pause()
+            await pick(pilot, app, "spec")
+            assert headers(app) == [20] and shown_numbers(app) == []
+            assert "▣ #30 open" in card_text(app, 20)
 
     run(scenario())
 
@@ -1551,11 +1674,12 @@ def test_a_linear_maps_lane_shows_keys_display_names_and_key_blockers():
         app = BoardApp(LinearProvider("TM", transport=fake), Query(), interval=30)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
-            assert shown_lanes(app) == {1: {"BLOCKED": [3, 5], "FRONTIER": [4], "CLAIMED": [2]}}
+            assert shown_lanes(app) == {1: {"BLOCKED": [3, 5], "CLAIMED": [2]}}
+            assert "▣ TM-4 open  0 done · 1 open · 1 blocked" in card_text(app, 1)
             assert "TM-1 Read-only ticketmaster" in card_text(app, 1) and "#1" not in card_text(app, 1)
             assert "TM-2 Survey" in card_text(app, 2) and "@kaare.blakstad" in card_text(app, 2)
             assert "TM-3 Decide" in card_text(app, 3) and "⛔ TM-2" in card_text(app, 3)
-            assert chips_of(app, 4).startswith("spec ") and "⛔ TM-3" in chips_of(app, 5)
+            assert chips_of(app, 5).startswith("impl ") and "⛔ TM-3" in chips_of(app, 5)
             assert "linear:TM" in app.sub_title and "every 30s" in status_of(app)
 
     run(scenario())
@@ -1630,22 +1754,22 @@ def test_f_picker_offers_values_from_the_board_and_each_filter_narrows_it(tmp_pa
             await pick(pilot, app, "me")
             assert shown_numbers(app) == [2, 31] and "assignee: me" in status_of(app)
             await pick(pilot, app, "unassigned")  # one choice at a time
-            assert shown_numbers(app) == [1, 21, 30] and app.filters["Assignee"] == {"unassigned": "include"}
+            assert shown_numbers(app) == [1, 21] and app.filters["Assignee"] == {"unassigned": "include"}
             await pick(pilot, app, "anyone")
-            assert shown_numbers(app) == [1, 2, 3, 21, 30, 31] and app.filters["Assignee"] == {}
+            assert shown_numbers(app) == [1, 2, 3, 21, 31] and app.filters["Assignee"] == {}
 
             await pick(pilot, app, "20")
-            assert headers(app) == [20] and shown_numbers(app) == [21, 30, 31] and "map: #20" in status_of(app)
+            assert headers(app) == [20] and shown_numbers(app) == [21, 31] and "map: #20" in status_of(app)
             await pick(pilot, app, "20")
 
             await pick(pilot, app, "bob")
             await pick(pilot, app, "dana")
-            assert shown_numbers(app) == [2, 3, 30, 31] and "author: bob, dana" in status_of(app)
+            assert shown_numbers(app) == [2, 3, 31] and "author: bob, dana" in status_of(app)
             await pilot.press("escape")
             await pilot.pause()
             assert not isinstance(app.screen, FilterPicker)
             assert "Blocked (0)" in str(app.query_one("#head-BLOCKED").render())
-            assert "Frontier (1)" in str(app.query_one("#head-FRONTIER").render())  # #30, the spec
+            assert "Frontier (0)" in str(app.query_one("#head-FRONTIER").render())  # #30, the spec, is no card
             assert "Claimed (3)" in str(app.query_one("#head-CLAIMED").render())
 
     run(scenario())
@@ -1682,7 +1806,7 @@ def test_text_filter_combines_with_the_picker_and_esc_clears_every_filter(tmp_pa
             assert shown_numbers(app) == [3] and "filter: sign" in status_of(app)
             await pilot.press("escape")
             await pilot.pause()
-            assert shown_numbers(app) == [1, 2, 3, 21, 30, 31] and headers(app) == [9, 20]
+            assert shown_numbers(app) == [1, 2, 3, 21, 31] and headers(app) == [9, 20]
             assert not any(app.filters.values()) and app.needle == ""
             for gone in ("filter:", "hitl/afk:", "map:"):
                 assert gone not in status_of(app)
@@ -1764,7 +1888,7 @@ def test_a_named_map_presets_the_map_filter_and_clearing_it_shows_every_open_map
             assert headers(app) == ([9, 20, 40] if named == 40 else [9, 20])  # a named closed map stays
             assert "map:" not in status_of(app)
 
-    run(scenario(20, [21, 30, 31]))
+    run(scenario(20, [21, 31]))
     run(scenario(40, []))  # closed: its header card alone
 
 

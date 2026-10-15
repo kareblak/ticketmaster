@@ -19,8 +19,10 @@ def board(fake, named_map=None):
 
 
 def lanes(tickets, named_map=None):
-    """{map: {column: [ticket numbers]}}, an empty column left out."""
-    return {lane.map.number: {column.name: [t.number for t in cards] for column, cards in lane.columns.items() if cards}
+    """{map: {SPECS: [spec numbers], column: [ticket numbers]}}, an empty one left out."""
+    return {lane.map.number: {**({"SPECS": [t.number for t in lane.specs]} if lane.specs else {}),
+                              **{column.name: [t.number for t in cards]
+                                 for column, cards in lane.columns.items() if cards}}
             for lane in build_board(list(tickets), named_map).lanes}
 
 
@@ -100,10 +102,11 @@ def test_the_spec_whose_part_of_names_the_map_and_its_implementation_tickets_are
         assert (ticket.map_number, ticket.map_url) == (1, "https://linear.app/fabricskill/issue/TM-1/slug")
     assert [tickets[n["number"]].spec_kind for n in (spec, native, by_parent)] == ["spec", "impl", "impl"]
     assert tickets[native["number"]].parent_number == spec["number"]
+    assert tickets[spec["number"]].has_tickets and not tickets[the_map["number"]].has_tickets
     assert tickets[typed["number"]].is_wayfinder_ticket and tickets[typed["number"]].mode == "AFK"
     assert tickets[by_parent["number"]].blocked_by == (f"TM-{native['number']}",)  # a body blocker
-    assert lanes(tickets.values()) == {1: {"BLOCKED": [by_parent["number"]],
-                                           "FRONTIER": [spec["number"], typed["number"], native["number"]],
+    assert lanes(tickets.values()) == {1: {"SPECS": [spec["number"]], "BLOCKED": [by_parent["number"]],
+                                           "FRONTIER": [typed["number"], native["number"]],
                                            "DECIDED": [decision["number"]]}}
 
 
@@ -147,7 +150,8 @@ def test_a_closed_map_whose_spec_is_still_open_is_shown_in_full():
     lane = build_board(tickets).lanes[0]
     assert lane.map.number == closed["number"] and not lane.collapsed
     assert [t.number for t in lane.columns[Column.DECIDED]] == [decided["number"]]
-    assert [t.number for t in lane.columns[Column.FRONTIER]] == [spec["number"], impl["number"]]
+    assert [t.number for t in lane.specs] == [spec["number"]]
+    assert [t.number for t in lane.columns[Column.FRONTIER]] == [impl["number"]]
 
 
 def test_the_viewer_is_the_keys_display_name():

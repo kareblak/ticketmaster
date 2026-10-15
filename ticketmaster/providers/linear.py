@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 from ..model import Ticket, parse_time, part_of, wayfinder_kinds
 from . import (IssueStates, ProviderError, Query, RateLimited, as_spec, closed_map_refs, is_spec, parent_ref,
-               under_spec, with_body_blockers, with_map)
+               under_spec, with_body_blockers, with_map, with_spec_tickets)
 
 if TYPE_CHECKING:
     from .linear_oauth import OAuthSession
@@ -265,7 +265,7 @@ class LinearProvider:
             tickets += [with_map(child, map_ticket) for child in self._children(found[number]["id"])]
         if maps:
             tickets += self._linked(maps, candidates, {t.number for t in tickets}, len(tickets))
-        return with_body_blockers(tickets, self.states, key=self.team)
+        return with_spec_tickets(with_body_blockers(tickets, self.states, key=self.team))
 
     def _children(self, issue_id: str) -> list[Ticket]:
         """The issue's sub-issues in sub-issue order, then by number; `order` is that position."""

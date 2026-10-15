@@ -97,8 +97,10 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
     return text
 
 
-def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False, claimed: bool = False) -> Text:
-    """A lane's header: the map's title and its decided / open / blocked counts."""
+def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False, claimed: bool = False,
+               spec_sessions: dict[int, list[Session]] | None = None, spec_starting: set[int] = frozenset()) -> Text:
+    """A lane's header: the map's title and its decided / open / blocked counts, then a line per spec with its
+    tickets' done / open / blocked counts, or that it has none yet, and its sessions' badges."""
     text = session_lines(sessions, starting, claimed)
     text.append(f"◆ {lane.map.ref} ", style=f"bold {MAP_COLOR}")
     text.append(lane.map.title, style="bold")
@@ -107,6 +109,17 @@ def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False,
     progress = lane.progress
     text.append(f"\n{progress.decided} decided · {progress.open} open · {progress.blocked} blocked",
                 style=f"bold {MAP_COLOR}")
+    for spec in lane.specs:
+        text.append(f"\n▣ {spec.ref} {'open' if spec.is_open else 'closed'}", style="bold")
+        done, still_open, blocked = counts = lane.spec_progress.get(spec.number, (0, 0, 0))
+        tickets = f"{done} done · {still_open} open · {blocked} blocked" if spec.has_tickets or any(counts) \
+            else "no tickets yet"
+        text.append(f"  {tickets}", style="grey62")
+        badges = session_lines((spec_sessions or {}).get(spec.number, []), spec.number in spec_starting)
+        badges.rstrip()
+        if badges.plain:
+            text.append("\n")
+            text.append(badges)
     return text
 
 
@@ -422,9 +435,10 @@ class FilterPicker(ModalScreen[None]):
 KEY_DETAILS = {
     "primary": "go to the card's most urgent session, else its worktree with a shell, else say what s would do; "
                "never starts or resumes Claude",
-    "start": "start /wayfinder for the ticket, or /implement on an impl card, in its own issue-<n> worktree, or "
-             "continue Claude in it when it has no agent; not when closed, blocked, claimed by someone else or live "
-             "(press Enter), never for a spec or an issue that is not wayfinder work",
+    "start": "start /wayfinder for the ticket, /implement on an impl card, or /to-tickets on a map card whose spec "
+             "has no tickets yet, in its own issue-<n> worktree, or continue Claude in it when it has no agent; not "
+             "when closed, blocked, claimed by someone else or live (press Enter), never for an issue that is not "
+             "wayfinder work",
     "open": "open the issue in the browser",
     "pick_filter": "narrow by type, HITL/AFK, assignee (me, unassigned, anyone), map and author; combines with /, "
                    "Esc on the board clears all, saved per repo",
@@ -467,8 +481,10 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  tracker key) filters this run's board to it, unsaved; Esc shows every open map again.\n"
                 "  A map named by number shows also when closed, as its header card\n"
                 f"  alone.{'  ← this board' if query.named_map else ''}\n"
-                "  A spec whose first line is `Part of #<map>` and its implementation tickets (sub-issues,\n"
-                "  or a `## Parent` section naming the spec) sit in the map's lane, tagged spec and impl.\n"
+                "  A spec whose first line is `Part of #<map>` is a line of the map card, ▣ #<spec> open or\n"
+                "  closed, with its tickets' done (closed, less canceled), open and blocked counts, or no\n"
+                "  tickets yet. Its implementation tickets (sub-issues, or a `## Parent` section naming the\n"
+                "  spec) sit in the map's lane, tagged impl. The spec type filter keeps a lane with a spec.\n"
                 "  Other issues are not shown. PR open: an open pull request will close the card's issue.\n")
 
     heading("Columns (the first rule that matches)")
@@ -490,9 +506,13 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  When the ticket's worktree exists without an agent, it runs claude --continue there instead;\n"
                 "  it never makes a second worktree. What it starts depends on the card:\n")
     for kind, prompt in [
-        ("wayfinder map", "s on the lane's header card starts the map's first frontier ticket\n"
-                          + " " * 22 + "(open, unblocked, unclaimed, no live session) on that ticket's own\n"
-                          + " " * 22 + "worktree; with an empty frontier, the map itself in its own worktree"),
+        ("wayfinder map", "s on the lane's header card, while its spec has no tickets (open or\n"
+                          + " " * 22 + "closed), starts to_tickets_command (default\n"
+                          + " " * 22 + "/mattpocock-skills:to-tickets) with the spec's URL, focused, in the\n"
+                          + " " * 22 + "spec's own worktree, also on a closed map. Else the map's first\n"
+                          + " " * 22 + "frontier ticket (open, unblocked, unclaimed, no live session) in\n"
+                          + " " * 22 + "that ticket's own worktree; with an empty frontier, the map itself\n"
+                          + " " * 22 + "in its own worktree"),
         ("wayfinder ticket", "a wayfinder:research/prototype/grilling/task ticket (or wayfinder::…);\n"
                              + " " * 22 + "its map is the native parent, else `Part of #<map>` on the body's\n"
                              + " " * 22 + "first line"),
@@ -500,9 +520,8 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                         + " " * 22 + "ticket's URL, unfocused (AFK). On Linear the branch is the issue's\n"
                         + " " * 22 + "gitBranchName. Not with an open PR that closes it. The session owns\n"
                         + " " * 22 + "review, push and PR; the board starts nothing else"),
-        ("refused", "a closed, blocked or someone else's ticket, one with a live session\n"
-                    + " " * 22 + "(press Enter instead), and a spec: s starts /implement on its\n"
-                    + " " * 22 + "implementation tickets"),
+        ("refused", "a closed, blocked or someone else's ticket or ticketless spec, and\n"
+                    + " " * 22 + "one with a live session (press Enter instead)"),
     ]:
         row(kind, 18, prompt)
     text.append("  A wayfinder ticket's card says who it needs: HITL (you at the keyboard) for grilling and\n"
@@ -516,7 +535,8 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  Each card shows a badge per session: ⚠ needs you, ● working, ◌ idle, ✓ done, or ○ no agent\n"
                 "  for a worktree without Claude; a claimed ticket with none says so. Enter, on any card, goes\n"
                 "  to the most urgent one, else opens its worktree with a shell; it never starts Claude.\n"
-                "  A map card goes to the map's own session, never a ticket's.\n")
+                "  A map card goes to the map's own session, else its spec's (badged on the spec line),\n"
+                "  never a ticket's.\n")
 
     heading("The board only reads")
     text.append("  It never writes to the tracker or the repo, and never removes a worktree. A session\n"
@@ -740,8 +760,7 @@ class BoardApp(App):
         return self.board.tickets()
 
     def _visible(self, lane: Lane, column: Column) -> list[Ticket]:
-        return [t for t in lane.columns[column]
-                if matches(t, self.needle) and passes_filters(t, self.filters, self.known, self.viewer)]
+        return [t for t in lane.columns[column] if self._passes(t)]
 
     def _chosen(self, section: str) -> list[str]:
         """The section's selected values that are on the board, in the picker's order. The preset map counts even
@@ -762,9 +781,15 @@ class BoardApp(App):
         maps = set(self._chosen(MAP))
         lanes = [lane for lane in self.board.lanes if not maps or maps & map_ids(lane.map)]
         if self.needle or any(self.filters[section] for section in CARD_FILTERS):
-            lanes = [lane for lane in lanes
-                     if lane.collapsed or any(self._visible(lane, column) for column in COLUMN_ORDER)]
+            lanes = [lane for lane in lanes if lane.collapsed or any(self._passes(spec) for spec in lane.specs)
+                     or any(self._visible(lane, column) for column in COLUMN_ORDER)]
         return lanes
+
+    def _passes(self, ticket: Ticket) -> bool:
+        return matches(ticket, self.needle) and passes_filters(ticket, self.filters, self.known, self.viewer)
+
+    def _lane(self, map_ticket: Ticket) -> Lane | None:
+        return next((lane for lane in self.board.lanes if lane.map.number == map_ticket.number), None)
 
     def _render_board(self) -> None:
         container = self.query_one("#lanes", VerticalScroll)
@@ -774,7 +799,8 @@ class BoardApp(App):
         self.grid, lanes = [], []
         for lane in self._shown_lanes():
             header = Card(lane.map, None, render_map(lane, self.sessions.get(lane.map.number, []),
-                                                     lane.map.number in self.starting, self._claimed(lane.map)))
+                                                     lane.map.number in self.starting, self._claimed(lane.map),
+                                                     self.sessions, self.starting))
             cells = [[Card(t, column, render_card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
                                                   lane.map.title, t.number in lane.out_of_scope, self._claimed(t)))
                       for t in self._visible(lane, column)] for column in COLUMN_ORDER]
@@ -971,6 +997,8 @@ class BoardApp(App):
         if card is None:
             return
         ticket, sessions = card.ticket, self.sessions.get(card.ticket.number, [])
+        if not sessions and (lane := self._lane(ticket)) is not None:  # a map card: else its spec's sessions
+            sessions = next((found for spec in lane.specs if (found := self.sessions.get(spec.number))), [])
         if sessions:
             session = min(sessions, key=lambda s: s.urgency)
             self._run(lambda: self.workbench.go_to(ticket, session))
@@ -978,6 +1006,9 @@ class BoardApp(App):
         plan = self._start_plan(ticket)
         if isinstance(plan, str):
             would = f"s refuses: {plan}"
+        elif plan.ticket.spec_kind == "spec":
+            prompt = self.describe_start(plan.ticket).partition("\n")[0]
+            would = f"s starts {prompt or '/to-tickets'} on its spec {plan.ticket.ref}"
         elif plan.ticket is not ticket:
             would = f"s starts {plan.ticket.ref} {plan.ticket.title}, next on the map"
         elif ticket.is_wayfinder_map:
@@ -989,14 +1020,15 @@ class BoardApp(App):
         self.notify(f"{ticket.ref} has no session here; {would}", severity="warning")
 
     def action_start(self) -> None:
-        """s: start /wayfinder on the card's ticket (/implement on an impl card), or on a map's first frontier
-        ticket, else on the map itself; or say why it refuses."""
+        """s: start /to-tickets on a map card's ticketless spec, /wayfinder on the card's ticket (/implement on an
+        impl card), or on a map's first frontier ticket, else on the map itself; or say why it refuses."""
         card = self._card()
         if card is None:
             return
         ticket = card.ticket
         map_order = getattr(self.provider, "map_order", None)
-        if not (ticket.is_wayfinder_map and ticket.is_open and map_order):
+        lane = self._lane(ticket)
+        if not (ticket.is_wayfinder_map and ticket.is_open and map_order) or (lane and lane.ticketless_spec):
             self._offer_start(ticket, None)
             return
 
@@ -1017,8 +1049,15 @@ class BoardApp(App):
             self._confirm_start(plan.ticket, plan.via)
 
     def _start_plan(self, ticket: Ticket, order: list[int] | None = None) -> StartPlan | str:
-        """What s does on a card, or why it refuses. A map is
-        worked through its first frontier ticket without a live session, else, with an empty frontier, itself."""
+        """What s does on a card, or why it refuses. A map whose spec has no tickets yet breaks the spec into tickets,
+        open or closed; else an open map is worked through its first frontier ticket without a live session, else,
+        with an empty frontier, itself."""
+        if (lane := self._lane(ticket)) is not None and (spec := lane.ticketless_spec) is not None:
+            if refusal := spec.start_refusal(self.viewer):
+                return refusal
+            if self._live(spec.number):
+                return f"{spec.ref} has a live session: press Enter to go to it"
+            return StartPlan(spec)
         if ticket.is_wayfinder_map and ticket.is_open:
             taken = {n for n in self.sessions if self._live(n)} | self.starting
             if ready := frontier(ticket, self._tickets(), taken, order):
@@ -1056,10 +1095,12 @@ class BoardApp(App):
                 self._render_board()
                 self._run(start)
 
-        if ticket.spec_kind == "impl":
+        if ticket.spec_kind:
             where = "its worktree with claude --continue" if worktree else "a new worktree"
-            question = f"Start /implement on {ticket.ref} {ticket.title} in {where}?"
-            detail, yes = self.describe_start(ticket) + "\nunfocused (AFK)", "Start"
+            skill = "/implement" if ticket.spec_kind == "impl" else "/to-tickets"
+            question = f"Start {skill} on {ticket.ref} {ticket.title} in {where}?"
+            unfocused = "\nunfocused (AFK)" if ticket.spec_kind == "impl" else ""
+            detail, yes = self.describe_start(ticket) + unfocused, "Start"
         elif worktree is None:
             question = f"Start {ticket.ref} {ticket.title}{via} in a new worktree?"
             detail, yes = self.describe_start(ticket), "Start"

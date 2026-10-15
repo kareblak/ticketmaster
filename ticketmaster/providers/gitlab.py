@@ -14,7 +14,8 @@ import json
 
 from ..model import Ticket, parse_time
 from . import (LABEL_LIMIT, LIMIT, SPEC_SEARCHES, IssueStates, ProviderError, Query, blocker_ref, closed_map_refs,
-               map_board, resolve_maps, run_json, tracker_error, wayfinder_labels, with_body_blockers, with_specs)
+               map_board, resolve_maps, run_json, tracker_error, wayfinder_labels, with_body_blockers,
+               with_spec_tickets, with_specs)
 
 ISSUE_FIELDS = """
   iid title webUrl description state closedAt
@@ -106,7 +107,7 @@ class GitLabProvider:
         tickets = map_board(maps, named, children)
         if any(t.is_wayfinder_map for t in tickets):
             tickets = with_specs(tickets, found)
-        return with_body_blockers(resolve_maps(tickets, functools.cache(self._issue)), self.states)
+        return with_spec_tickets(with_body_blockers(resolve_maps(tickets, functools.cache(self._issue)), self.states))
 
     def _named(self, iid: int) -> Ticket | None:
         issue = (self._graphql(NAMED, {"path": self.repo, "named": str(iid)}).get("project") or {}).get("issue")

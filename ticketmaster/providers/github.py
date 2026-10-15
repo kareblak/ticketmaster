@@ -14,7 +14,8 @@ from datetime import datetime, timezone
 
 from ..model import Ticket, parse_time, part_of
 from . import (LIMIT, IssueStates, NotFound, ProviderError, Query, RateLimited, as_spec, blocker_ref,
-               closed_map_refs, is_spec, names_parent, resolve_maps, run_cli, run_json, tracker_error, under_spec, with_body_blockers)
+               closed_map_refs, is_spec, names_parent, resolve_maps, run_cli, run_json, tracker_error, under_spec,
+               with_body_blockers, with_spec_tickets)
 
 MAP_LABEL = "wayfinder:map"
 
@@ -103,7 +104,7 @@ class GitHubProvider:
         tickets = list(maps)
         for map_ticket in maps:
             tickets += self._map_family(map_ticket, {t.number for t in tickets})
-        return with_body_blockers(resolve_maps(tickets, self._issue), self.states)
+        return with_spec_tickets(with_body_blockers(resolve_maps(tickets, self._issue), self.states))
 
     def map_order(self, number: int) -> list[int]:
         """The map's sub-issue numbers in the order set on GitHub; search results carry no such order."""

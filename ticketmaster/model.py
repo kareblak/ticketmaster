@@ -60,6 +60,8 @@ class Ticket:
     # gitBranchName); None on trackers that key issues by number alone.
     key: str | None = None
     branch_name: str | None = None
+    # A spec with an implementation ticket, open or closed, so it has been broken into tickets already.
+    has_tickets: bool = False
 
     @property
     def team_key(self) -> str | None:
@@ -80,8 +82,6 @@ class Ticket:
         session is the board's to check, since only herdr knows it."""
         if not self.is_open:
             return f"{self.ref} is closed"
-        if self.spec_kind == "spec":
-            return f"{self.ref} is a spec: s starts /implement on its implementation tickets"
         if self.blocked_by:
             return f"{self.ref} is blocked by {', '.join(self.blocked_by)}"
         if self.open_blockers:
@@ -129,6 +129,11 @@ class Ticket:
         return "spec" if part_of(self.body, self.team_key) == self.map_number else "impl"
 
     @property
+    def spec_number(self) -> int | None:
+        """The spec an implementation ticket names: its sub-issue parent, else its `## Parent` section."""
+        return self.parent_number or parent_ref(self.body, self.team_key)
+
+    @property
     def map_missing(self) -> bool:
         """A typed ticket whose map the board could not find: it starts neither wayfinder nor implement."""
         return self.wayfinder_type is not None and not self.is_wayfinder_ticket
@@ -166,6 +171,30 @@ def _part_of_key(key: str) -> re.Pattern[str]:
     k = re.escape(key)
     return re.compile(rf"^Part of (?:\[?{k}-(?P<key>\d+)\]?(?:\(\S+\))?"
                       rf"|<?https?://\S+?/issue/{k}-(?P<url>\d+)(?:/\S*?)?>?)\.?$")
+
+
+# How a map's spec and the spec's implementation tickets link back: the
+# spec's first line is `Part of #<map>`, an implementation ticket's `## Parent` section names the spec, as `#<n>`,
+# by issue URL, or with the tracker's key as Linear's `TM-<n>` (a mention links it, `[TM-<n>](…/issue/TM-<n>/…)`).
+_PARENT_SECTION = re.compile(r"^##\s*Parent\s*$(?P<text>.*?)(?=^#{1,2}\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
+_PARENT_REF = re.compile(r"(?<![\w&])#(\d+)\b|/issues/(\d+)\b")
+
+
+def parent_refs(body: str, key: str | None = None) -> list[int]:
+    """The issues the body's `## Parent` section names, in order: `#<n>`, issue URLs, and with the tracker's `key`
+    (Linear's `TM`) `TM-<n>`."""
+    match = _PARENT_SECTION.search(body or "")
+    if match is None:
+        return []
+    text = match.group("text")
+    patterns = (_PARENT_REF, key_ref(key)) if key else (_PARENT_REF,)
+    found = sorted((ref.start(), int(next(n for n in ref.groups() if n))) for p in patterns for ref in p.finditer(text))
+    return [number for _, number in found]
+
+
+def parent_ref(body: str, key: str | None = None) -> int | None:
+    """The issue the body's `## Parent` section names first."""
+    return next(iter(parent_refs(body, key)), None)
 
 
 def part_of(body: str, key: str | None = None) -> int | None:
@@ -209,6 +238,19 @@ class MapProgress(NamedTuple):
     blocked: int
 
 
+def spec_tickets(spec: Ticket, tickets: list[Ticket]) -> list[Ticket]:
+    """The spec's implementation tickets: those whose sub-issue parent, else `## Parent` section, is the spec."""
+    return [t for t in tickets if t.spec_kind == "impl" and t.spec_number == spec.number]
+
+
+def spec_progress(spec: Ticket, tickets: list[Ticket]) -> MapProgress:
+    """The spec's implementation tickets: done (closed, less canceled), open and blocked."""
+    children = spec_tickets(spec, tickets)
+    still_open = [t for t in children if t.is_open]
+    done = sum(not t.is_open and not t.not_planned for t in children)
+    return MapProgress(done, len(still_open), sum(t.is_blocked for t in still_open))
+
+
 def map_progress(map_ticket: Ticket, tickets: list[Ticket]) -> MapProgress:
     children = map_tickets(map_ticket, tickets)
     still_open = [t for t in children if t.is_open]
@@ -250,17 +292,27 @@ def classify(ticket: Ticket) -> Column:
 
 @dataclass
 class Lane:
-    """A map and its decision tickets, specs and implementation tickets by column; a closed map with no open spec or
-    implementation ticket is collapsed to its header. `progress` counts the decision tickets only."""
+    """A map and its decision tickets and implementation tickets by column; its specs are no cards but lines of the
+    map card, each with its tickets' progress. A closed map with no open spec or implementation ticket is collapsed
+    to its header. `progress` counts the decision tickets only."""
 
     map: Ticket
     columns: dict[Column, list[Ticket]] = field(default_factory=lambda: {c: [] for c in COLUMN_ORDER})
     progress: MapProgress = MapProgress(0, 0, 0)
     out_of_scope: set[int] = field(default_factory=set)
     collapsed: bool = False
+    specs: list[Ticket] = field(default_factory=list)
+    spec_progress: dict[int, MapProgress] = field(default_factory=dict)
 
     def tickets(self) -> list[Ticket]:
-        return [ticket for tickets in self.columns.values() for ticket in tickets]
+        """The map's specs, then its cards column by column."""
+        return [*self.specs, *(ticket for tickets in self.columns.values() for ticket in tickets)]
+
+    @property
+    def ticketless_spec(self) -> Ticket | None:
+        """The first spec without an implementation ticket, open or closed: the one s on the map card breaks into
+        tickets."""
+        return next((spec for spec in self.specs if not spec.has_tickets), None)
 
 
 @dataclass
@@ -289,12 +341,15 @@ def build_board(tickets: list[Ticket], named_map: int | None = None) -> Board:
     board = Board()
     for map_ticket in maps:
         children = lane_tickets(map_ticket, tickets)
+        specs = [t for t in children if t.spec_kind == "spec"]
         lane = Lane(map_ticket, progress=map_progress(map_ticket, tickets),
                     out_of_scope={t.number for t in children if is_out_of_scope(t, map_ticket)},
-                    collapsed=map_ticket.number not in live)
+                    collapsed=map_ticket.number not in live, specs=specs,
+                    spec_progress={spec.number: spec_progress(spec, tickets) for spec in specs})
         if not lane.collapsed:
             for ticket in children:
-                lane.columns[classify(ticket)].append(ticket)
+                if ticket.spec_kind != "spec":
+                    lane.columns[classify(ticket)].append(ticket)
         board.lanes.append(lane)
     return board
 

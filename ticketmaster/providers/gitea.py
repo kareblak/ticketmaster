@@ -24,7 +24,7 @@ from email.utils import parsedate_to_datetime
 from ..model import Ticket, parse_time
 from . import (LABEL_LIMIT, LIMIT, SPEC_SEARCHES, IssueStates, NotFound, ProviderError, Query, RateLimited,
                blocker_ref, closed_map_refs, map_board, resolve_maps, run_json, tracker_error, wayfinder_labels,
-               with_body_blockers, with_specs)
+               with_body_blockers, with_spec_tickets, with_specs)
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -108,7 +108,7 @@ class GiteaProvider:
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
         tickets = [with_native_blockers(t, blockers.get(t.number)) for t in tickets]
-        return with_body_blockers(resolve_maps(tickets, functools.cache(self._issue)), self.states)
+        return with_spec_tickets(with_body_blockers(resolve_maps(tickets, functools.cache(self._issue)), self.states))
 
     def _wayfinder_labels(self) -> dict[str, list[str]]:
         """The repo's and its org's label names for maps and for the four ticket types. Gitea drops a label filter

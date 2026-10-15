@@ -11,7 +11,8 @@ from datetime import datetime
 from http import HTTPStatus
 from typing import Literal, Protocol
 
-from ..model import WAYFINDER_TYPES, Ticket, key_ref, parse_blockers, part_of, wayfinder_kinds
+from ..model import (WAYFINDER_TYPES, Ticket, parent_ref, parent_refs, parse_blockers, part_of,
+                     wayfinder_kinds)
 
 TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo", "linear": "Linear"}
 
@@ -291,33 +292,9 @@ def blocker_ref(number: int, repo: str, own_repo: str) -> str:
     return f"#{number}" if not repo or repo.lower() == own_repo.lower() else f"{repo}#{number}"
 
 
-# How a map's spec and the spec's implementation tickets link back: the
-# spec's first line is `Part of #<map>`, an implementation ticket's `## Parent` section names the spec, as `#<n>`,
-# by issue URL, or with the tracker's key as Linear's `TM-<n>` (a mention links it, `[TM-<n>](…/issue/TM-<n>/…)`).
-_PARENT_SECTION = re.compile(r"^##\s*Parent\s*$(?P<text>.*?)(?=^#{1,2}\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
-_PARENT_REF = re.compile(r"(?<![\w&])#(\d+)\b|/issues/(\d+)\b")
-
-
-def parent_refs(body: str, key: str | None = None) -> list[int]:
-    """The issues the body's `## Parent` section names, in order: `#<n>`, issue URLs, and with the tracker's `key`
-    (Linear's `TM`) `TM-<n>`."""
-    match = _PARENT_SECTION.search(body or "")
-    if match is None:
-        return []
-    text = match.group("text")
-    patterns = (_PARENT_REF, key_ref(key)) if key else (_PARENT_REF,)
-    found = sorted((ref.start(), int(next(n for n in ref.groups() if n))) for p in patterns for ref in p.finditer(text))
-    return [number for _, number in found]
-
-
 def names_parent(body: str, parent: int, key: str | None = None) -> bool:
     """The body's `## Parent` section refers to `#<parent>`, to the parent's issue URL or to its key."""
     return parent in parent_refs(body, key)
-
-
-def parent_ref(body: str, key: str | None = None) -> int | None:
-    """The issue the body's `## Parent` section names first."""
-    return next(iter(parent_refs(body, key)), None)
 
 
 def is_map(found: Ticket | None) -> bool:
@@ -333,6 +310,13 @@ def is_spec(ticket: Ticket, map_number: int) -> bool:
 def as_spec(ticket: Ticket, map_ticket: Ticket) -> Ticket:
     """The map is the spec's parent, and the map its session starts wayfinder on."""
     return on_map(with_map(ticket, map_ticket), map_ticket.number, map_ticket.url)
+
+
+def with_spec_tickets(tickets: list[Ticket]) -> list[Ticket]:
+    """Marks each spec that an implementation ticket, open or closed, names as its parent: the sub-issue parent,
+    else the `## Parent` section."""
+    named = {t.spec_number for t in tickets if t.spec_kind == "impl"}
+    return [replace(t, has_tickets=True) if t.spec_kind == "spec" and t.number in named else t for t in tickets]
 
 
 def under_spec(tickets: list[Ticket], spec: Ticket) -> list[Ticket]:
