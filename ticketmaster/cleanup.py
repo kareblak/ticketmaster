@@ -63,7 +63,7 @@ class Outcome:
     removed: tuple[str, ...]
     note: str  # the kept reason, or what of a removed entry was left; "" when all of it went
     failed: bool = False  # git or herdr refused a step; a branch git calls unmerged is no failure
-    last: tuple[tuple[str, str], ...] = ()  # herdr closes that end cleanup itself, made after the summary
+    last: tuple[tuple[str, str], ...] = ()  # (group, target) herdr closes that would end cleanup, for after the summary
 
 
 @dataclass(frozen=True)
@@ -114,6 +114,10 @@ def leftover(ticket: Ticket, path: str | None, branch: str | None, agents: list[
                     tuple((a["pane_id"], a.get("workspace_id")) for a in agents if a.get("pane_id")), opened, current)
 
 
+def workspace_of(pane: str | None) -> str | None:
+    return pane.split(":")[0] if pane else None
+
+
 def ticket_branches(ticket: Ticket) -> set[str]:
     """The branches a ticket's session works on: the tracker's, `issue-<n>`/`tm-<n>`, or `claude -w`'s."""
     return {branch_name(ticket), worktree_name(ticket), f"worktree-{worktree_name(ticket)}"}
@@ -139,7 +143,7 @@ def leftovers(cwd: Path, map_ticket: Ticket, tickets: list[Ticket], bench: Herdr
     current."""
     uncommitted = uncommitted or has_uncommitted
     where = cwd.resolve()
-    own_workspace = own_pane.split(":")[0] if own_pane else None
+    own_workspace = workspace_of(own_pane)
     family = {t.number: t for t in (map_ticket, *lane_tickets(map_ticket, tickets))}
     by_branch = {name: t for t in family.values() for name in ticket_branches(t)}
     checkouts = bench.call("worktree", "list", "--cwd", str(cwd)).get("worktrees", [])
@@ -155,8 +159,8 @@ def leftovers(cwd: Path, map_ticket: Ticket, tickets: list[Ticket], bench: Herdr
             continue
         here = running.get(wt["path"], [])
         current = (where.is_relative_to(Path(wt["path"]).resolve())
-                    or (own_workspace is not None and wt.get("open_workspace_id") == own_workspace)
-                    or any(a.get("pane_id") == own_pane for a in here))
+                   or (own_workspace is not None and wt.get("open_workspace_id") == own_workspace)
+                   or any(a.get("pane_id") == own_pane for a in here))
         found.append(leftover(ticket, wt["path"], wt.get("branch"), here, uncommitted(wt["path"]),
                               current=current, opened=wt.get("open_workspace_id")))
     checked_out = {wt.get("branch") for wt in checkouts}
@@ -229,7 +233,7 @@ def remove(cwd: Path, found: list[Leftover], bench: Herdr, home: Path | None = N
     worktree git refuses to remove leaves them open. Outcomes come in the order entries were handled."""
     home = Path.home() if home is None else home
     checkout = main_checkout(cwd)
-    own_workspace = own_pane.split(":")[0] if own_pane else None
+    own_workspace = workspace_of(own_pane)
     ordered = [entry for entry in found if not entry.current] + [entry for entry in found if entry.current]
     return [remove_one(checkout, entry, bench, home, own_pane, own_workspace) for entry in ordered]
 
@@ -270,8 +274,10 @@ def remove_one(checkout: Path, entry: Leftover, bench: Herdr, home: Path, own_pa
             left.append(f"branch {entry.branch} kept: {complaint}")
             failed = True
     if ending:
-        removed += [label for _, _, label in ending]
-        left.append(f"cleanup runs in it: {' and '.join(label for _, _, label in ending)} closes after this summary")
+        labels = [label for _, _, label in ending]
+        left.append(f"cleanup runs in it: {' and '.join(labels)} close{'s' if len(labels) == 1 else ''} after this summary")
+    elif entry.current:
+        left.append("cleanup ran in it")  # with no herdr close of its own: whatever runs there is left in a removed directory
     return Outcome(entry, tuple(removed), ", ".join(left), failed, tuple((group, target) for group, target, _ in ending))
 
 

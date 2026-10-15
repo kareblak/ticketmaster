@@ -163,6 +163,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ticketmaster: {exc}", file=sys.stderr)
             return 1
         print(cleaned.summary, flush=True)  # all of it, before closing the workspace this runs in
+        if not cwd.exists():  # its own worktree went: herdr runs from somewhere that still is
+            os.chdir(Path.home())
         refused = close_last(cleaned, bench)
         for complaint in refused:
             print(f"ticketmaster: {complaint}", file=sys.stderr)

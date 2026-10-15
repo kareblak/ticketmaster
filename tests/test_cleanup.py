@@ -479,7 +479,7 @@ def test_from_inside_a_map_worktree_every_other_entry_goes_first(repo):
 def test_the_current_entry_is_summarised_last_with_its_workspace_closing_after(repo):
     lines = clean_from_40(repo, real_fake(repo)).summary.splitlines()
     assert lines[-2].startswith("removed  #40  worktree")
-    assert "branch issue-40, workspace w2" in lines[-2]
+    assert "branch issue-40 ·" in lines[-2]  # its workspace is not removed until it is closed
     assert lines[-2].endswith("· cleanup runs in it: workspace w2 closes after this summary")
     assert lines[-1] == "3 removed, 1 kept"
 
@@ -548,3 +548,13 @@ def test_main_reports_its_own_workspace_left_open(repo, monkeypatch, capsys):
     monkeypatch.setattr(cleanup, "has_uncommitted", lambda path: False)
     assert cli.main(["cleanup", "40"]) == 1
     assert "ticketmaster: workspace w2 not closed: boom" in capsys.readouterr().err
+
+
+def test_without_its_own_pane_the_current_worktree_still_goes_last_and_says_so(repo):
+    """Its directory is all cleanup knows of: workspace w2 is someone else's and closes like any other."""
+    spy = real_fake(repo)
+    cleaned = clean_from_40(repo, spy, own_pane=None)
+    assert not (repo.parent / "issue-40").exists()
+    assert ["workspace", "close", "w2"] in spy.calls
+    assert cleaned.last == ()
+    assert cleaned.summary.splitlines()[-2].endswith("· cleanup ran in it")
