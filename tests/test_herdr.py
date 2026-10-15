@@ -372,6 +372,22 @@ def test_implement_in_an_open_agentless_workspace_starts_claude_in_its_pane():
     assert fake.first("agent", "start")[6] == "wA:p2"
 
 
+def test_implement_in_a_workspace_that_gained_an_agent_starts_no_second_claude():
+    existing = {"path": "/code/wt/issue-686", "branch": "issue-686", "is_linked_worktree": True, "open_workspace_id": "wA"}
+    fake = implement_fake(existing, answers={("agent", "list"): {"agents": [agent("wA:p2", "working")]}})
+    with pytest.raises(HerdrError, match="live session now: press Enter"):
+        bench(fake).start(impl())
+    assert ("agent", "start") not in fake.verbs()
+
+
+def test_implement_in_a_workspace_without_panes_reopens_the_worktree():
+    existing = {"path": "/code/wt/issue-686", "branch": "issue-686", "is_linked_worktree": True, "open_workspace_id": "wA"}
+    fake = implement_fake(existing, answers={("pane", "list"): {"panes": [pane("wB:p1")]},
+                                             ("worktree", "open"): {"root_pane": {"pane_id": "wD:p1"}}})
+    bench(fake).start(impl())
+    assert fake.first("agent", "start")[6] == "wD:p1"
+
+
 def tree(path, branch=None, workspace=None):
     entry = {"path": path, "branch": branch or Path(path).name, "is_linked_worktree": True}
     if workspace:

@@ -1517,7 +1517,7 @@ def test_s_on_my_claimed_impl_card_starts_while_its_spec_is_open_and_reuses_an_a
             await select(app, pilot, 57)
             await pilot.press("s")
             await pilot.pause()
-            assert app.screen.question == "Start /implement on #57 Slice 57 in issue-57 with claude --continue?"
+            assert app.screen.question == "Start /implement on #57 Slice 57 in its worktree with claude --continue?"
             await pilot.press("y")
             await loaded(app, pilot)
             assert bench.calls == [("start", 57)]

@@ -18,7 +18,7 @@ class MapNotFound(ValueError):
 
 
 class NotWayfinderWork(ValueError):
-    """A ticket with no map: the board only ever starts /wayfinder, so it does not start this one."""
+    """A ticket with no map: the board starts /wayfinder or /implement only on a map, so it does not start this one."""
 
 
 def build_prompt(ticket: Ticket, wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND,
@@ -89,7 +89,8 @@ class Workbench:
         if ticket.spec_kind == "impl":
             return self.start_implement(ticket)
         where = self.herdr.start_in_new_worktree(
-            self.cwd, worktree_name(ticket), session_label(ticket), claude_args(ticket, self.prompt(ticket)), self.claude,
+            self.cwd, worktree_name(ticket), session_label(ticket),
+            claude_args(ticket, self.prompt(ticket)), self.claude,
         )
         return f"Started #{ticket.number} in {where}"
 

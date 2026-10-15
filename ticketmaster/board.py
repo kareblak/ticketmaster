@@ -884,7 +884,8 @@ class BoardApp(App):
         message = f"#{ticket.number} has no session here"
         if ticket.spec_kind == "impl":
             refusal = self._implement_refusal(ticket)
-            message += f"; s refuses: {refusal}" if refusal else f"; s starts {self.describe_start(ticket) or '/implement'}"
+            start = self.describe_start(ticket).partition("\n")[0] or "/implement"  # the prompt line alone
+            message += f"; s refuses: {refusal}" if refusal else f"; s starts {start}"
         self.notify(message, severity="warning")
 
     def action_start(self) -> None:
@@ -942,7 +943,7 @@ class BoardApp(App):
     def _confirm_start(self, ticket: Ticket, via: str = "") -> None:
         existing = [Path(s.path).name for s in self.sessions.get(ticket.number, [])]
         if ticket.spec_kind == "impl":  # one worktree per ticket, reused: the board refused a live session
-            where = f"{existing[0]} with claude --continue" if existing else "a new worktree"
+            where = "its worktree with claude --continue" if existing else "a new worktree"
             question, warn = f"Start /implement on #{ticket.number} {ticket.title} in {where}?", "\nunfocused (AFK)"
         else:
             question = f"Start #{ticket.number} {ticket.title}{via} in a new worktree?"

@@ -90,11 +90,11 @@ class Ticket:
 
     @property
     def not_wayfinder_work(self) -> str:
-        return f"#{self.number} is not wayfinder work: the board only starts /wayfinder"
+        return f"#{self.number} is not wayfinder work: the board only starts work on a map"
 
     @property
     def is_wayfinder_work(self) -> bool:
-        """A map, or a ticket on one: the only work the board starts, always with /wayfinder."""
+        """A map, or a ticket on one: the only work the board starts: /wayfinder, or /implement on an impl card."""
         return self.is_wayfinder_map or self.is_wayfinder_ticket or self.map_url is not None
 
     @property

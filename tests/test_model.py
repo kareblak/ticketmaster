@@ -143,7 +143,7 @@ def test_a_task_is_hitl_or_afk_by_the_first_of_those_words_in_its_body():
 
 
 def test_start_refusal_names_a_ticket_that_is_not_wayfinder_work_last():
-    assert ticket().start_refusal("me") == "#1 is not wayfinder work: the board only starts /wayfinder"
+    assert ticket().start_refusal("me") == "#1 is not wayfinder work: the board only starts work on a map"
     assert ticket(open_blockers=1).start_refusal("me") == "#1 is blocked by 1 open issue"
     assert ticket(labels=("wayfinder:map",)).start_refusal("me") is None
     assert ticket(map_number=9, map_url="u9").start_refusal("me") is None

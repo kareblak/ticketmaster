@@ -239,7 +239,7 @@ class Herdr:
         existing = next((w for w in self.worktrees(cwd)
                          if Path(w["path"]).name in (name, f"worktree-{name}") or w.get("branch") == branch), None)
         if existing is not None:
-            pane = self.workspace_pane(existing["open_workspace_id"]) if existing.get("open_workspace_id") else \
+            pane = self.idle_pane(existing.get("open_workspace_id")) or \
                 self.call("worktree", "open", "--cwd", str(cwd), "--path", existing["path"], "--label", label,
                           "--no-focus")["root_pane"]["pane_id"]
             note = self.start_claude(pane, name, claude, continue_args)
@@ -250,10 +250,15 @@ class Herdr:
         note = self.start_claude(result["root_pane"]["pane_id"], name, claude, claude_args)
         return f"new worktree {name}{note}"
 
-    def workspace_pane(self, workspace: str) -> str:
-        """The first pane of an open workspace, where Claude is started in an agentless worktree."""
+    def idle_pane(self, workspace: str | None) -> str | None:
+        """The first pane of a worktree's open workspace, where Claude is started; None when it has none open. An
+        agent that started there since the board last looked is a live session, which gets no second Claude."""
+        if workspace is None:
+            return None
+        if any(a.get("workspace_id") == workspace for a in self.call("agent", "list").get("agents", [])):
+            raise HerdrError("it has a live session now: press Enter")
         panes = self.call("pane", "list").get("panes", [])
-        return next(p["pane_id"] for p in panes if pane_workspace(p) == workspace)
+        return next((p["pane_id"] for p in panes if pane_workspace(p) == workspace), None)
 
     def go_to(self, cwd: Path, session: Session, label: str) -> str:
         """Focuses a live session's agent; for a worktree without one, its herdr workspace, opened with a shell
