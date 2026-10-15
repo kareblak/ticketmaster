@@ -1,4 +1,5 @@
-"""Linear via its GraphQL API, with a personal API key; a key with only the Read permission is enough.
+"""Linear via its GraphQL API, with a personal API key (only the Read permission is enough) or the token
+`ticketmaster login` stored (OAuth, scope `read`; see linear_oauth). The key wins when its env var is set.
 
 The board is every open `wayfinder:map` issue of the configured team, and every closed one an open spec still names,
 and, per map, its sub-issues in sub-issue order, plus the team's issues whose first line is `Part of <map>`: a typed ticket linked only that way, or the map's
@@ -25,10 +26,14 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 
 from ..model import Ticket, parse_time, part_of, wayfinder_kinds
 from . import (IssueStates, ProviderError, Query, RateLimited, as_spec, closed_map_refs, is_spec, parent_ref,
                under_spec, with_body_blockers, with_map)
+
+if TYPE_CHECKING:
+    from .linear_oauth import OAuthSession
 
 LINEAR_URL = "https://api.linear.app/graphql"
 LINEAR_HOST = "api.linear.app"
@@ -119,16 +124,20 @@ Transport = Callable[[str, dict], dict]
 
 
 class LinearHTTP:
-    """POSTs GraphQL to Linear with a personal API key (sent bare in Authorization, as Linear expects).
+    """POSTs GraphQL to Linear with a personal API key (sent bare in Authorization, as Linear expects) or an OAuth
+    session's token (sent as `Bearer`). A token Linear rejects is refreshed once and the request sent again.
 
     Only https://api.linear.app is accepted, and redirects are refused rather than followed, so the key is never
     sent anywhere else."""
 
-    def __init__(self, api_key: str, url: str = LINEAR_URL, timeout: float = 30):
+    def __init__(self, api_key: str | None = None, url: str = LINEAR_URL, timeout: float = 30,
+                 session: OAuthSession | None = None):
         parts = urllib.parse.urlsplit(url)
         if parts.scheme != "https" or parts.hostname != LINEAR_HOST or parts.port not in (None, 443):
             raise ProviderError(f"linear: refusing to send the API key to {url} (only https://{LINEAR_HOST})")
-        self.api_key, self.url, self.timeout = api_key, url, timeout
+        if (api_key is None) == (session is None):
+            raise ValueError("LinearHTTP takes an API key or an OAuth session")
+        self.api_key, self.session, self.url, self.timeout = api_key, session, url, timeout
 
     @staticmethod
     def opener() -> urllib.request.OpenerDirector:
@@ -139,9 +148,19 @@ class LinearHTTP:
         return urllib.request.build_opener(NoRedirect)
 
     def __call__(self, query: str, variables: dict) -> dict:
+        if self.session is None:
+            return self._post(query, variables, self.api_key)
+        authorization = self.session.authorization()
+        try:
+            return self._post(query, variables, authorization)
+        except Unauthenticated:
+            self.session.refresh(authorization.removeprefix("Bearer "))
+        return self._post(query, variables, self.session.authorization())
+
+    def _post(self, query: str, variables: dict, authorization: str) -> dict:
         request = urllib.request.Request(
             self.url, data=json.dumps({"query": query, "variables": variables}).encode(),
-            headers={"Content-Type": "application/json", "Authorization": self.api_key})
+            headers={"Content-Type": "application/json", "Authorization": authorization})
         status, headers = None, {}
         try:
             with self.opener().open(request, timeout=self.timeout) as response:
@@ -151,17 +170,25 @@ class LinearHTTP:
             try:
                 reply = json.load(exc)
             except ValueError:
-                raise ProviderError(f"linear: HTTP {exc.code} {exc.reason}", exc.code) from exc
+                error = Unauthenticated if exc.code == 401 else ProviderError
+                raise error(f"linear: HTTP {exc.code} {exc.reason}", exc.code) from exc
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise ProviderError(f"linear: {exc}") from exc
         if not isinstance(reply, dict):
             raise ProviderError("linear: the reply is not a GraphQL response", status)
         if errors := reply.get("errors"):
             message = "linear: " + "; ".join(str(error.get("message", "?")) for error in errors)
-            if any((error.get("extensions") or {}).get("code") == "RATELIMITED" for error in errors):
+            codes = {(error.get("extensions") or {}).get("code") for error in errors}
+            if "RATELIMITED" in codes:
                 raise rate_limited(message, status, headers)
+            if status == 401 or "AUTHENTICATION_ERROR" in codes:
+                raise Unauthenticated(message, status)
             raise ProviderError(message, status)
         return reply.get("data") or {}
+
+
+class Unauthenticated(ProviderError):
+    """Linear refused the credentials: HTTP 401, or an `AUTHENTICATION_ERROR` (which it sends with HTTP 400)."""
 
 
 def rate_limited(message: str, status: int | None, headers) -> RateLimited:
@@ -187,24 +214,33 @@ def check_key_env(var: str | None) -> str:
     return var
 
 
-def linear_key(var: str) -> str:
-    """The API key in env var `var`; the error names the var and the key_env option, never a value."""
-    api_key = os.environ.get(var)
-    if not api_key:
-        raise ProviderError(f"{var} is not set: put a Linear personal API key in it (Linear: Settings, Security & "
-                            f"access; the Read permission is enough), or name another variable with key_env in "
-                            f".ticketmaster.toml")
-    return api_key
+def linear_http(var: str, client_id: str | None) -> LinearHTTP:
+    """The key in env var `var` when it is set, else the token `ticketmaster login` stored for the OAuth app. The
+    refusal names both options, never a value."""
+    if api_key := os.environ.get(var):
+        return LinearHTTP(api_key)
+    from .linear_oauth import OAuthSession, TokenStore  # http.server and the rest only for an OAuth board
+
+    store = TokenStore.for_client(client_id) if client_id else None
+    if store is not None and store.load() is not None:
+        return LinearHTTP(session=OAuthSession(client_id, store))
+    login = "run `ticketmaster login`" if client_id else (
+        "set oauth_client_id in .ticketmaster.toml to a Linear OAuth app's client id and run `ticketmaster login`")
+    raise ProviderError(f"{var} is not set: put a Linear personal API key in it (Linear: Settings, Security & "
+                        f"access; the Read permission is enough), or name another variable with key_env in "
+                        f".ticketmaster.toml; or, to read with your own OAuth token instead (oauth_client_id), "
+                        f"{login}")
 
 
 class LinearProvider:
     name = "linear"
 
-    def __init__(self, team: str, key_env: str | None = None, transport: Transport | None = None):
+    def __init__(self, team: str, key_env: str | None = None, transport: Transport | None = None,
+                 oauth_client_id: str | None = None):
         self.team = team
         self.repo = team  # what the board shows as `linear:<team>` and keys saved filters by
         var = check_key_env(key_env)
-        self.transport = transport or LinearHTTP(linear_key(var))
+        self.transport = transport or linear_http(var, oauth_client_id)
         self.states = IssueStates(self._issue_states)
 
     def viewer(self) -> str | None:

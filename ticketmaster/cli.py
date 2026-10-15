@@ -1,5 +1,5 @@
 """Command line: `open` (the board in a herdr pane beside the caller, or right here when the caller is that
-pane). It runs inside herdr (HERDR_ENV=1).
+pane), which runs inside herdr (HERDR_ENV=1), and `login` (Linear OAuth, in the browser), which runs anywhere.
 """
 
 from __future__ import annotations
@@ -14,14 +14,14 @@ from . import __version__, herdr
 from .providers import ProviderError, Query
 
 
-COMMANDS = ("open",)
+COMMANDS = ("open", "login")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     """No command means `open`, so `ticketmaster 42` is `ticketmaster open 42`; any other word is an invalid command."""
     parser = argparse.ArgumentParser(
         prog="ticketmaster",
-        usage="ticketmaster [open] [map] [options]",
+        usage="ticketmaster [open] [map] [options] | ticketmaster login",
         description="Live swimlane board of wayfinder maps, in herdr.",
     )
     parser.add_argument("--version", action="store_true", help="print the version")
@@ -37,6 +37,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     if not argv or argv[0].startswith("-") or is_issue(argv[0]):
         argv = ["open", *argv]
     args = parser.parse_args(argv)
+    if args.command == "login" and args.map is not None:
+        parser.error("login takes no map")
     if args.map is not None:
         if not is_issue(args.map):
             parser.error(f"argument map: not an issue number, key or URL: {args.map!r}")
@@ -95,11 +97,40 @@ def passthrough(args: argparse.Namespace) -> list[str]:
     return out
 
 
+def login(cwd: Path, provider: str | None) -> int:
+    """Linear's OAuth login for `oauth_client_id`; without one, prints the line to add. The other trackers log in
+    with their own CLIs."""
+    from .config import CONFIG_FILE, load_config
+    from .providers import linear_oauth
+
+    config = load_config(cwd)
+    if (provider or config.get("provider")) != "linear":
+        print("ticketmaster: login is for Linear (provider = \"linear\" in .ticketmaster.toml); the other trackers "
+              "are read with their own CLI's login: `gh auth login`, `glab auth login` or `tea login add`",
+              file=sys.stderr)
+        return 2
+    client_id = config.get("oauth_client_id")
+    if not client_id:
+        print(f"ticketmaster: login needs a Linear OAuth app of your workspace (Linear: Settings, API, OAuth "
+              f"applications; callback URL {linear_oauth.CALLBACK_URL}); add its client id to {CONFIG_FILE}:\n\n"
+              f'oauth_client_id = "<client id>"\n', file=sys.stderr)
+        return 2
+    try:
+        store = linear_oauth.login(str(client_id))
+    except ProviderError as exc:
+        print(f"ticketmaster: {exc}", file=sys.stderr)
+        return 1
+    print(f"Logged in to Linear; the board reads with your OAuth token, stored in {store.path}.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(sys.argv[1:] if argv is None else argv)
     if args.version:
         print(f"ticketmaster {__version__}")
         return 0
+    if args.command == "login":
+        return login(Path.cwd(), args.provider)
     if not herdr.available():
         print(f"ticketmaster: `{args.command}` runs inside herdr; start herdr and run it from a herdr pane", file=sys.stderr)
         return 2

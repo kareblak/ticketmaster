@@ -20,7 +20,7 @@ grilling ·  HITL  ◆ Pick a stack
 ## Install
 
 Needs [herdr](https://herdr.dev), Python 3.11+ as `python3`, Claude Code, and the CLI for your
-tracker (`gh`, `glab`, a `tea` login for Gitea/Forgejo, or a Linear API key, see
+tracker (`gh`, `glab`, a `tea` login for Gitea/Forgejo, or a Linear API key or `ticketmaster login`, see
 [Providers](#providers)). In Claude Code:
 
 ```
@@ -58,12 +58,14 @@ so code changes apply on the next `/ticketmaster` without rebuilding. Changing `
 ```
 ticketmaster [open] [map] [--repo OWNER/NAME] [--provider github|gitlab|gitea|forgejo|linear]
              [--host HOST] [--columns auto|one|all] [--interval SECONDS]
+ticketmaster login
 ```
 
-`open` is the only command, and the default: it opens the board in a herdr pane right of the
+`open` is the default command: it opens the board in a herdr pane right of the
 calling pane (the focused pane when `HERDR_PANE_ID` is stale or another session's), labelled
 `ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there. It
-only runs inside herdr (`HERDR_ENV=1`).
+only runs inside herdr (`HERDR_ENV=1`). `login` logs in to Linear with OAuth instead of an API key
+(see [Providers](#providers)); it runs anywhere.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
 its spec and the spec's implementation tickets (see [Lanes and columns](#lanes-and-columns)).
@@ -255,23 +257,37 @@ Linear has no remote to detect, so name it and its team:
 provider = "linear"
 team = "TM"                 # the team's issue key, as in TM-12
 key_env = "LINEAR_API_KEY"  # optional; the env var holding the API key
+oauth_client_id = "…"       # optional; your OAuth app's client id, for `ticketmaster login`
 ```
 
 The board reads a Linear personal API key (Linear: Settings, Security & access; the Read permission
 is enough) from `LINEAR_API_KEY`, or from the variable `key_env` names. That name must start with
-`LINEAR_`, so no other secret is sent to Linear; without a key the board refuses and names the
-option. `--provider linear` without a `team` fails and prints the lines to add.
+`LINEAR_`, so no other secret is sent to Linear. `--provider linear` without a `team` fails and
+prints the lines to add.
+
+Without a personal key, read with your own OAuth token: register an OAuth application in your
+workspace (Linear: Settings, API, OAuth applications) with the callback URL
+`http://localhost:8719/callback`, put its client id in `oauth_client_id`, and run
+`ticketmaster login` (or `/ticketmaster login`) once. It opens Linear in the browser, takes the
+code on that localhost callback (OAuth 2.0 with PKCE, scope `read`; ticketmaster ships no client
+id and needs no client secret), and writes the token to `~/.config/ticketmaster/linear-<client id>.json`
+with mode 0600. The board refreshes an expired token itself and writes the rotated one back
+there, a local write; it never opens a browser, so when the refresh is refused it says to run
+`ticketmaster login` again. `login` without `oauth_client_id` fails and prints the line to add.
+
+When the `key_env` variable is set, the key wins over a stored token. With neither, the board
+refuses and names both options. The key goes bare in `Authorization`, the token as `Bearer <token>`.
 
 | Provider        | Access                                   | Blocking                  | Maps and their tickets              |
 | --------------- | ---------------------------------------- | ------------------------- | ----------------------------------- |
 | GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | a search for open `wayfinder:map` issues, then per map its sub-issues in order and the typed tickets and spec whose `Part of #<map>` line names it, then the spec's sub-issues and the issues whose `## Parent` names it |
 | GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | the project's `wayfinder:` labels (`wayfinder:map` or `wayfinder::map`, and the four types), one query per label; a typed ticket joins the map its `Part of #<map>` line names; a description search for `Part of` and `Parent` finds the specs and their implementation tickets |
 | Gitea / Forgejo | REST through `tea api`, with the `tea` login (token or OAuth) whose URL matches the repo host | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names; an issue search (`q`) for `Part of` and `Parent` finds the specs and their implementation tickets |
-| Linear          | GraphQL with the API key (`Authorization: <key>`) | `blocks` relations (`inverseRelations`) | the team's open `wayfinder:map` issues, then per map its sub-issues in sub-issue order; one description search for `Part of` and `Parent` finds the typed tickets and spec linked by `Part of`, and the spec's sub-issues and `## Parent` tickets |
+| Linear          | GraphQL with the API key (`Authorization: <key>`) or the `login` token (`Bearer`) | `blocks` relations (`inverseRelations`) | the team's open `wayfinder:map` issues, then per map its sub-issues in sub-issue order; one description search for `Part of` and `Parent` finds the typed tickets and spec linked by `Part of`, and the spec's sub-issues and `## Parent` tickets |
 
 On Linear only the workflow state's type counts, never its team-renamable name: `completed` is
 closed, `canceled` and `duplicate` closed as not planned. Only the assignee claims a ticket; the
-delegate does not. Users are their display name, and the board's "me" is the key's user.
+delegate does not. Users are their display name, and the board's "me" is the key's or the token's user.
 
 Every provider only reads: the board has no way to close, label, assign or comment.
 

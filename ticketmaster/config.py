@@ -1,7 +1,8 @@
 """Pick a provider for the current repo from the git remote, `.ticketmaster.toml`, or flags.
 
 Linear has no remote to detect it by: `.ticketmaster.toml` names it with `provider = "linear"` and `team = "<key>"`,
-plus `key_env` when the API key is in another `LINEAR_` variable than LINEAR_API_KEY.
+plus `key_env` when the API key is in another `LINEAR_` variable than LINEAR_API_KEY, or `oauth_client_id` for
+`ticketmaster login`.
 """
 
 from __future__ import annotations
@@ -113,7 +114,9 @@ def linear_provider(config: dict) -> Provider:
                             f'provider = "linear"\nteam = "<key>"  # the team\'s issue key: TM for TM-12\n')
     from .providers.linear import LinearProvider
 
-    return LinearProvider(str(config["team"]), config.get("key_env"))
+    client_id = config.get("oauth_client_id")
+    return LinearProvider(str(config["team"]), config.get("key_env"),
+                          oauth_client_id=str(client_id) if client_id else None)
 
 
 def make_provider(kind: str, repo: str, host: str | None) -> Provider:
