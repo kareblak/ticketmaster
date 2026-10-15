@@ -8,7 +8,7 @@ import time
 import webbrowser
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
@@ -21,12 +21,12 @@ from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static
 
-from .config import (board_fetch_limit, board_interval, load_settings, parse_fetch_limit, parse_interval,
-                     save_settings, seconds_text)
+from .config import (DEFAULT_BUDGET, board_budget, board_fetch_limit, board_interval, load_settings, parse_budget,
+                     parse_fetch_limit, parse_interval, save_settings, seconds_text)
 from .herdr import HerdrError, Session
 from .model import (COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, LaneKind, SpecProgress, Ticket, build_board,
                     frontier)
-from .providers import ErrorNotice, Provider, ProviderError, Query, RateLimited, error_notice
+from .providers import ErrorNotice, Provider, ProviderError, Query, Quota, RateLimited, error_notice
 from .start import branch_name, worktree_name
 
 NARROW_WIDTH = 100  # below this the "auto" view shows one column at a time
@@ -222,10 +222,24 @@ def load_filters(saved: dict) -> dict[str, dict[str, str]]:
     return filters
 
 
+def budget_pace(quota: Quota, budget: float, now: datetime) -> int:
+    """Whole seconds between ticket fetches that spend at most `budget` points an hour at the last fetch's cost, and
+    longer when the points left would run out before they reset at that pace; 0 for a fetch that cost nothing."""
+    if quota.cost <= 0:
+        return 0
+    pace = quota.cost * 3600 / budget
+    if quota.remaining is not None and quota.resets_at is not None:
+        until_reset = (quota.resets_at - now).total_seconds()
+        if until_reset > 0:
+            pace = max(pace, until_reset if quota.remaining <= 0 else quota.cost * until_reset / quota.remaining)
+    return math.ceil(pace)
+
+
 class Pacer:
     """When the board fetches tickets and herdr sessions, given the clock's `now`.
 
-    Normally both every `interval`. A rate limit slows tickets to once a minute and sessions to every 10s;
+    Normally both every `interval`; a pace (GitHub's budget, see budget_pace) longer than that stretches the ticket
+    fetches to it, never the session refreshes. A rate limit slows tickets to once a minute and sessions to every 10s;
     the first good fetch after that restores the interval, once. A rate limit after that recovery keeps
     the board slow until it restarts.
     """
@@ -235,6 +249,7 @@ class Pacer:
         self.limited = False  # backed off right now
         self.recovered = False  # the one recovery is used up
         self.stuck = False  # slow until restart
+        self.paced = 0.0  # seconds between ticket fetches the budget asks for; under `interval` it changes nothing
         self.next_tickets = now
         self.next_sessions = now
         self.last_tickets = self.last_sessions = now - interval  # when each fetch last started
@@ -243,9 +258,23 @@ class Pacer:
         """A new interval from the settings menu: the next fetches are due that long after the last ones started.
         A rate-limit back-off stays: tickets keep its minute, sessions its 10s at least."""
         self.interval = interval
-        if not self.limited:
-            self.next_tickets = self.last_tickets + interval
+        self._reschedule_tickets()
         self.next_sessions = self.last_sessions + self._sessions_every()
+
+    def pace(self, seconds: float) -> None:
+        """A new pace from the latest quota reading: the next ticket fetch is due `tickets_every` after the last one
+        started. A rate-limit back-off stays."""
+        self.paced = float(seconds)  # a float, as `seconds_text` shows it
+        self._reschedule_tickets()
+
+    def _reschedule_tickets(self) -> None:
+        if not self.limited:
+            self.next_tickets = self.last_tickets + self.tickets_every
+
+    @property
+    def tickets_every(self) -> float:
+        """Seconds between ticket fetches outside a back-off."""
+        return max(self.interval, self.paced)
 
     def _sessions_every(self) -> float:
         return max(LIMITED_SESSIONS_EVERY, self.interval) if self.limited else self.interval
@@ -259,7 +288,7 @@ class Pacer:
         self.last_sessions = now
         if tickets:
             self.last_tickets = now
-            self.next_tickets = now + (LIMITED_TICKETS_EVERY if self.limited else self.interval)
+            self.next_tickets = now + (LIMITED_TICKETS_EVERY if self.limited else self.tickets_every)
         self.next_sessions = now + self._sessions_every()
 
     def fetched(self, now: float, ok: bool, rate_limited: bool) -> None:
@@ -269,7 +298,7 @@ class Pacer:
             self.next_tickets = now + LIMITED_TICKETS_EVERY
         elif ok and self.limited and not self.stuck:
             self.limited, self.recovered = False, True
-            self.next_tickets = min(self.next_tickets, now + self.interval)
+            self.next_tickets = min(self.next_tickets, now + self.tickets_every)
             self.next_sessions = min(self.next_sessions, now + self.interval)
 
     def wait(self, now: float) -> int:
@@ -533,7 +562,8 @@ KEY_DETAILS = {
     "open": "open the issue in the browser",
     "pick_filter": "narrow by type, HITL/AFK, assignee (me, unassigned, anyone), map and author; combines with /, "
                    "Esc on the board clears all, saved per repo",
-    "settings": "the refresh interval, applied at once, and the fetch limit, from the next fetch; saved per repo",
+    "settings": "the refresh interval, applied at once, the fetch limit, from the next fetch, and the budget on "
+                "GitHub; saved per repo",
 }
 
 
@@ -645,7 +675,12 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  limit still slows the board down. Fetch limit: the open maps the board reads, and the\n"
                 "  tickets it reads per map (default 300), from the next fetch; a lower one asks the tracker\n"
                 "  less. A fetch that reaches it says so in the status line, e.g. `cut off at 300: open maps,\n"
-                "  #12's tickets`, so a missing ticket can be traced to the limit.\n")
+                "  #12's tickets`, so a missing ticket can be traced to the limit.\n"
+                "  GitHub budget: the board spends about 1,000 GraphQL points an hour by default (any\n"
+                "  positive number, saved per repo). Ticket fetches come every --interval, or every\n"
+                "  last fetch's cost × 3600 / budget when that is longer, and longer still when the points\n"
+                "  left would not last until the quota resets; the status line shows `every 22s · 3,412 pts\n"
+                "  left`. Session refreshes keep the interval; r fetches at once, the next fetch one pace later.\n")
 
     heading("The board only reads")
     text.append("  It never writes to the tracker or the repo, and never removes a worktree. A session\n"
@@ -722,9 +757,11 @@ class BoardApp(App):
         settings_path: Path | None = None,
         clock: Callable[[], float] = time.monotonic,
         map_key: str | None = None,
+        wall: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     ):
         """`query.named_map`, or `map_key` (a tracker key such as `TM-1`), presets the map filter for this run.
-        `interval` is `--interval`, which wins over the repo's saved interval for this run without replacing it."""
+        `interval` is `--interval`, which wins over the repo's saved interval for this run without replacing it.
+        `clock` schedules the fetches; `wall`, the time of day, tells how long until a tracker quota resets."""
         super().__init__()
         self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
         self.single = False
@@ -743,7 +780,10 @@ class BoardApp(App):
         self.cut_off: str | None = None  # what the last ticket fetch cut off at the fetch limit
         self.interval = board_interval(interval, self._repo_settings(), provider.name)
         self.clock = clock
+        self.wall = wall
         self.pacer = Pacer(self.interval, clock())
+        self.budget = board_budget(self._repo_settings())  # GitHub points an hour, see budget_pace
+        self.quota: Quota | None = None  # the provider's reading after the last good ticket fetch; GitHub only
         self.ticker: Timer | None = None
         self.fetching = False
         self.queued: bool | None = None  # a refresh asked for mid-fetch: whether it includes tickets
@@ -833,7 +873,8 @@ class BoardApp(App):
             board = build_board(self.provider.fetch(query), query.named_map)
             cut = getattr(self.provider, "cut_off", [])  # what the fetch cut off at the limit, when it says
             cut_off = f"cut off at {query.limit}: {', '.join(cut)}" if cut else None
-            self.call_from_thread(self._apply, board, None, sessions, herdr_error, cut_off=cut_off)
+            quota = getattr(self.provider, "quota", None)  # GitHub's, after this fetch
+            self.call_from_thread(self._apply, board, None, sessions, herdr_error, cut_off=cut_off, quota=quota)
         except RateLimited as exc:
             explain = getattr(self.provider, "explain", None)  # GitHub can say which limit it was
             self.call_from_thread(self._apply, None, explain(exc) if explain else exc, sessions, herdr_error,
@@ -854,11 +895,14 @@ class BoardApp(App):
 
     def _apply(self, board: Board | None, error: ProviderError | None, sessions: dict[int, list[Session]] | None = None,
                herdr_error: str | None = None, fetched_tickets: bool = True, rate_limited: bool = False,
-               cut_off: str | None = None) -> None:
+               cut_off: str | None = None, quota: Quota | None = None) -> None:
         self.fetching = False
         if fetched_tickets:
             self.pacer.fetched(self.clock(), ok=board is not None, rate_limited=rate_limited)
             self._tracker_error(error)
+            if quota is not None:
+                self.quota = quota
+            self._pace()
         if self.queued is not None:
             tickets, self.queued = self.queued and not self.pacer.limited, None
             self._fetch_in_background(tickets)
@@ -878,6 +922,11 @@ class BoardApp(App):
             self._render_board()  # rebuilding resets scroll, so only when tickets changed
         else:
             self._render_status()
+
+    def _pace(self) -> None:
+        """Paces the ticket fetches to the budget at the last quota reading; without one, they keep the interval."""
+        if self.quota is not None:
+            self.pacer.pace(budget_pace(self.quota, self.budget, self.wall()))
 
     def _tickets(self) -> list[Ticket]:
         return self.board.tickets()
@@ -975,7 +1024,9 @@ class BoardApp(App):
             status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)}"
                           + (f" · {specs} spec{'s' * (specs != 1)}" if specs else "") + f" · {tickets} tickets")
             if not self.pacer.limited:
-                status.append(f" · every {seconds_text(self.interval)}s")
+                status.append(f" · every {seconds_text(self.pacer.tickets_every)}s")
+                if self.quota is not None and self.quota.remaining is not None:
+                    status.append(f" · {self.quota.remaining:,} pts left")
             if self.cut_off:
                 status.append(f" · {self.cut_off}", style="bold yellow")
         if self.pacer.limited:
@@ -1293,6 +1344,9 @@ class BoardApp(App):
         fields = [Setting("interval", "Refresh interval (seconds)", seconds_text(self.interval), parse_interval),
                   Setting("fetch_limit", "Fetch limit (open maps, and tickets per map)", str(self.board_query.limit),
                           parse_fetch_limit)]
+        if self.provider.name == "github":
+            fields.append(Setting("budget", "GitHub budget (GraphQL points an hour)", seconds_text(self.budget),
+                                  parse_budget))
         self.push_screen(SettingsMenu(fields), self._apply_settings)
 
     def _apply_settings(self, values: dict | None) -> None:
@@ -1301,16 +1355,21 @@ class BoardApp(App):
         unchanged default fetch limit; Esc (None) changes nothing."""
         if values is None:
             return
-        interval, limit = values["interval"], values["fetch_limit"]
-        if interval != self.interval:
-            self.interval = interval
-            self.pacer.set_interval(interval)
-            self._start_ticker()
+        interval, limit, budget = values["interval"], values["fetch_limit"], values.get("budget", self.budget)
+        if interval != self.interval or budget != self.budget:
+            if interval != self.interval:
+                self.interval = interval
+                self.pacer.set_interval(interval)
+                self._start_ticker()
+            self.budget = budget
+            self._pace()
             self._render_status()
         saved = {"interval": int(interval) if interval.is_integer() else interval}
         if limit != self.board_query.limit or "fetch_limit" in self._repo_settings():
             self.board_query = replace(self.board_query, limit=limit)
             saved["fetch_limit"] = limit
+        if "budget" in values and (budget != DEFAULT_BUDGET or "budget" in self._repo_settings()):
+            saved["budget"] = int(budget) if budget.is_integer() else budget  # an untouched default stays a default
         if any(self._repo_settings().get(key) != value for key, value in saved.items()):
             self._repo_settings(create=True).update(saved)
             self._write_settings("settings")

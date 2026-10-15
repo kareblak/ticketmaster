@@ -91,7 +91,8 @@ whose spec is still open stays on the board in full. Any other closed map shows 
 number or URL, or on Linear by its team's key, as its header card alone.
 
 The board refreshes every 5 s, every 30 s on Linear; `--interval` sets another for one run, and the
-[settings menu](#settings) (`c`) saves one per repo.
+[settings menu](#settings) (`c`) saves one per repo. On GitHub, ticket fetches slow down further to stay
+within a [GraphQL budget](#providers).
 
 The board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
 switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` sets the start).
@@ -105,7 +106,7 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | free-text filter, clear every filter, refresh now, quit             |
 | `f`            | any               | filter picker: type, HITL/AFK, assignee, map, author ([Filters](#filters); saved per repo) |
-| `c`            | any               | settings menu: refresh interval, fetch limit ([Settings](#settings); saved per repo) |
+| `c`            | any               | settings menu: refresh interval, fetch limit, GitHub budget ([Settings](#settings); saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
 
 Arrows or `hjkl` move between cards: up and down walk each lane's map card and then its cards in the
@@ -199,7 +200,7 @@ that is no longer on the board is ignored until it comes back. There are no labe
 per user and repo, under `repos` in the same `settings.json`:
 
 ```json
-{"repos": {"github:owner/name": {"interval": 10, "fetch_limit": 100}}}
+{"repos": {"github:owner/name": {"interval": 10, "fetch_limit": 100, "budget": 1000}}}
 ```
 
 `Esc` closes the menu without changing anything. A field that is not valid stays open with a message
@@ -209,6 +210,7 @@ saying why, and a failed save shows a warning while the new value still applies 
 | ---------------- | ---------------------------- | --------------------------------------------------------- |
 | Refresh interval | any positive number of seconds, no floor | ticket and session fetches reschedule at once; the status line's `every Ns` shows it |
 | Fetch limit      | a whole number, 1 or more; default 300 | the open maps the board reads, and the tickets it reads per map, from the next ticket fetch |
+| GitHub budget    | any positive number of GraphQL points an hour, default 1,000; GitHub only | ticket fetches re-pace at once to the [budget](#providers) |
 
 The refresh interval is `--interval` for this run, then the repo's saved interval, then the
 default: 5 s, 30 s on Linear. `--interval` never overwrites the saved value; an interval changed in
@@ -372,9 +374,14 @@ as; your own claimed tickets still start.
 
 Where a tracker has no dependency support, only body-listed blockers mark a ticket Blocked.
 
-GitHub's GraphQL budget is 5,000 points an hour. Every refresh makes one search for the maps and one
-query per open map (and per spec a map led to). Lengthen the refresh interval if you run several boards at
-once or have many open maps.
+GitHub's GraphQL quota is 5,000 points an hour, shared by every board and every agent's `gh` call on the
+token, so a GitHub board paces itself to a budget: 1,000 points an hour by default, set per repo in the
+[settings menu](#settings). Ticket fetches come every `--interval` while that is cheap enough, or every
+`last fetch's cost × 3600 / budget` seconds when that is longer, and longer still when the points left
+would run out before the quota resets at that pace. The status line shows the pace and the points left,
+e.g. `every 22s · 3,412 pts left`. Herdr session refreshes keep the refresh interval, and `r` fetches at
+once, with the next scheduled fetch one paced interval after it. The rate-limit back-off below overrides
+the pace while it lasts.
 
 A Linear API key allows 2,500 requests an hour, shared by everything using its user's key, which is why
 the board polls Linear every 30 s. Every refresh lists the maps, then makes one query per open map and

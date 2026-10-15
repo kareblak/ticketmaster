@@ -1,15 +1,15 @@
 import json
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from textual.widgets import Input
 
 from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, SettingsMenu,
-                               passes_filters, render_card)
+                               budget_pace, passes_filters, render_card)
 from ticketmaster.herdr import HerdrError, Session
 from ticketmaster.model import Column, Ticket
-from ticketmaster.providers import ProviderError, Query, RateLimited
+from ticketmaster.providers import ProviderError, Query, Quota, RateLimited
 from ticketmaster.config import load_config
 from ticketmaster.start import build_prompt, workbench_for
 
@@ -1010,6 +1010,217 @@ def test_errors_without_a_status_notify_each_time_the_message_changes():
             await loaded(app, pilot)
             assert tracker_notices(app) == [("fake error\ngh: not logged in", "error"),
                                             ("fake error\n`gh` timed out", "error")]
+
+    run(scenario())
+
+
+NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
+
+
+def test_budget_pace_is_the_cost_spread_over_the_hourly_budget_in_whole_seconds():
+    assert budget_pace(Quota(cost=1, remaining=4000, resets_at=None), 1000, NOW) == 4  # 3.6
+    assert budget_pace(Quota(cost=12, remaining=4000, resets_at=None), 1000, NOW) == 44  # 43.2
+    assert budget_pace(Quota(cost=12, remaining=None, resets_at=None), 2000, NOW) == 22  # 21.6
+    assert budget_pace(Quota(cost=0, remaining=0, resets_at=NOW + timedelta(minutes=5)), 1000, NOW) == 0
+
+
+def test_budget_pace_stretches_until_the_points_left_last_to_the_reset():
+    reset = NOW + timedelta(minutes=50)
+    assert budget_pace(Quota(cost=12, remaining=4000, resets_at=reset), 1000, NOW) == 44  # plenty left
+    assert budget_pace(Quota(cost=12, remaining=100, resets_at=reset), 1000, NOW) == 12 * 3000 / 100
+    assert budget_pace(Quota(cost=12, remaining=0, resets_at=reset), 1000, NOW) == 3000  # wait for the reset
+    assert budget_pace(Quota(cost=12, remaining=0, resets_at=NOW - timedelta(seconds=1)), 1000, NOW) == 44
+
+
+def test_a_pace_slows_tickets_but_never_below_the_interval_and_never_sessions():
+    pacer = Pacer(5, now=0)
+    pacer.started(0, tickets=True)
+    pacer.pace(3.6)
+    assert pacer.tickets_every == 5 and pacer.due(5) == (True, True)
+    pacer.started(5, tickets=True)
+    pacer.pace(44)
+    assert pacer.tickets_every == 44
+    assert pacer.due(10) == (False, True) and pacer.due(48.9) == (False, True) and pacer.due(49) == (True, True)
+    pacer.started(10, tickets=False)
+    assert pacer.due(15) == (False, True)  # sessions keep the interval
+
+
+def test_a_rate_limit_overrides_the_pace_and_its_recovery_returns_to_it():
+    pacer = Pacer(5, now=0)
+    pacer.started(0, tickets=True)
+    pacer.pace(100)
+    pacer.started(100, tickets=True)
+    pacer.fetched(101, ok=False, rate_limited=True)
+    pacer.pace(100)  # a pace never cuts the back-off's minute short or stretches it
+    assert pacer.limited and pacer.wait(101) == 60
+    pacer.started(161, tickets=True)
+    pacer.fetched(162, ok=True, rate_limited=False)
+    pacer.pace(100)  # the board paces after every good fetch
+    assert not pacer.limited and pacer.due(260) == (False, True) and pacer.due(261) == (True, True)
+
+
+class QuotaProvider(FakeProvider):
+    """Like GitHub: each fetch leaves the next quota reading behind."""
+
+    name = "github"
+
+    def __init__(self, quotas):
+        super().__init__(TICKETS)
+        self.quotas = list(quotas)
+        self.quota = None
+
+    def fetch(self, query):
+        tickets = super().fetch(query)
+        self.quota = self.quotas.pop(0) if self.quotas else self.quota
+        return tickets
+
+
+def quota_app(quotas, wall=lambda: NOW, settings=None, workbench=None):
+    clock = Clock()
+    app = BoardApp(QuotaProvider(quotas), Query(), interval=5, clock=clock, wall=wall, settings_path=settings,
+                   workbench=workbench)
+    return app, clock
+
+
+async def tick(app, pilot, clock, seconds):
+    clock.now += seconds
+    app.tick()
+    await loaded(app, pilot)
+
+
+def test_the_github_board_stays_at_the_interval_while_cheap_and_stretches_when_dear():
+    async def scenario():
+        far = NOW + timedelta(hours=1)
+        app, clock = quota_app([Quota(1, 4999, far), Quota(12, 4987, far), Quota(1, 4986, far)])
+        async with app.run_test(size=(200, 30)) as pilot:
+            await loaded(app, pilot)
+            assert "every 5s · 4,999 pts left" in status_of(app)
+            await tick(app, pilot, clock, 5)
+            assert app.provider.calls == 2 and "every 44s · 4,987 pts left" in status_of(app)
+            await tick(app, pilot, clock, 43)
+            assert app.provider.calls == 2
+            await tick(app, pilot, clock, 1)
+            assert app.provider.calls == 3 and "every 5s · 4,986 pts left" in status_of(app)
+
+    run(scenario())
+
+
+def test_the_github_board_stretches_further_when_the_points_left_cannot_last_to_the_reset():
+    async def scenario():
+        app, clock = quota_app([Quota(12, 100, NOW + timedelta(minutes=50))])
+        async with app.run_test(size=(200, 30)) as pilot:
+            await loaded(app, pilot)
+            assert "every 360s · 100 pts left" in status_of(app)
+            await tick(app, pilot, clock, 359)
+            assert app.provider.calls == 1
+            await tick(app, pilot, clock, 1)
+            assert app.provider.calls == 2
+
+    run(scenario())
+
+
+def test_r_fetches_at_once_and_the_next_fetch_is_one_pace_later():
+    async def scenario():
+        far = NOW + timedelta(hours=1)
+        bench, calls = FakeBench(), []
+        app, clock = quota_app([Quota(20, 4000, far)] * 3, workbench=bench)
+        bench.sessions = lambda: calls.append(clock.now) or {}
+        async with app.run_test(size=(200, 30)) as pilot:
+            await loaded(app, pilot)
+            assert "every 72s" in status_of(app)
+            await tick(app, pilot, clock, 10)
+            assert app.provider.calls == 1 and calls[-1] == 1010  # sessions keep --interval
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert app.provider.calls == 2
+            await tick(app, pilot, clock, 71)
+            assert app.provider.calls == 2
+            await tick(app, pilot, clock, 1)
+            assert app.provider.calls == 3
+
+    run(scenario())
+
+
+def test_trackers_without_a_quota_show_the_interval_alone():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=5, clock=Clock())
+        async with app.run_test(size=(200, 30)) as pilot:
+            await loaded(app, pilot)
+            assert "every 5s" in status_of(app) and "pts left" not in status_of(app)
+
+    run(scenario())
+
+
+def test_the_budget_is_a_github_setting_saved_per_repo(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"repos": {"github:o/r": {"interval": 5}}}))
+
+    async def scenario():
+        far = NOW + timedelta(hours=1)
+        app, clock = quota_app([Quota(10, 4000, far)] * 3, settings=settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "every 36s" in status_of(app)
+            await open_settings(pilot, app)
+            field = app.screen.query_one("#budget", Input)
+            assert field.value == "1000"
+            for text in ("abc", "0", "-5"):
+                field.value = text
+                await pilot.press("enter")
+                await pilot.pause()
+                assert isinstance(app.screen, SettingsMenu)
+            field.value = "4000"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert "every 9s" in status_of(app)
+            await tick(app, pilot, clock, 9)
+            assert app.provider.calls == 2
+
+    run(scenario())
+    assert json.loads(settings.read_text()) == {"repos": {"github:o/r": {"interval": 5, "budget": 4000}}}
+
+    async def restored():
+        app, _ = quota_app([Quota(10, 4000, NOW + timedelta(hours=1))], settings=settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "every 9s" in status_of(app)
+
+    run(restored())
+
+
+def test_an_untouched_default_budget_is_not_saved(tmp_path):
+    settings = tmp_path / "settings.json"
+
+    async def scenario():
+        app, _ = quota_app([Quota(10, 4000, NOW + timedelta(hours=1))], settings=settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await enter_interval(pilot, app, "7")
+
+    run(scenario())
+    assert json.loads(settings.read_text()) == {"repos": {"github:o/r": {"interval": 7}}}
+
+
+def test_other_trackers_have_no_budget_setting(tmp_path):
+    async def scenario():
+        app = settings_app(tmp_path / "settings.json")
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await open_settings(pilot, app)
+            assert not app.screen.query("#budget")
+
+    run(scenario())
+
+
+def test_help_describes_the_github_pace_and_its_default_budget():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            text = " ".join(app.screen.text.plain.split())
+            assert "1,000 GraphQL points an hour" in text and "cost × 3600 / budget" in text
 
     run(scenario())
 
