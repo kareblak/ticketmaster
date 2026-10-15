@@ -298,7 +298,7 @@ BLOCKED = on(9, 5, "Waits", blocked_by=("#1", "#9"), open_blockers=2)
 THEIRS = on(9, 6, "Bob's", assignees=("bob",))
 
 
-def test_s_and_enter_refuse_a_blocked_ticket_naming_its_blockers():
+def test_s_refuses_a_blocked_ticket_naming_its_blockers_and_enter_says_it_has_no_session():
     async def scenario():
         bench = FakeBench()
         app = bench_app(bench, [MAP, BLOCKED])
@@ -311,13 +311,12 @@ def test_s_and_enter_refuse_a_blocked_ticket_naming_its_blockers():
                 assert not is_confirm(app)
             await loaded(app, pilot)
             assert bench.calls == []
-            messages = [n.message for n in app._notifications]
-            assert messages.count("#5 is blocked by #1, #9") == 2
+            assert [m for m, _ in notifications(app)][-2:] == ["#5 is blocked by #1, #9", "#5 has no session here"]
 
     run(scenario())
 
 
-def test_s_and_enter_refuse_a_ticket_claimed_by_someone_else():
+def test_s_refuses_a_ticket_claimed_by_someone_else_and_enter_says_it_has_no_session():
     async def scenario():
         bench = FakeBench()
         app = bench_app(bench, [MAP, THEIRS])
@@ -330,7 +329,7 @@ def test_s_and_enter_refuse_a_ticket_claimed_by_someone_else():
             await pilot.press("enter")
             await pilot.pause()
             assert not is_confirm(app) and bench.calls == []
-            assert [n.message for n in app._notifications].count("#6 is claimed by @bob") == 2
+            assert [m for m, _ in notifications(app)][-2:] == ["#6 is claimed by @bob", "#6 has no session here"]
 
     run(scenario())
 
@@ -398,7 +397,7 @@ def test_cancel_does_not_start():
     run(scenario())
 
 
-def test_enter_on_a_card_without_session_never_starts_and_says_s_does():
+def test_enter_on_a_card_without_session_never_starts_and_says_so():
     async def scenario():
         bench = FakeBench()
         app = bench_app(bench)
@@ -408,7 +407,7 @@ def test_enter_on_a_card_without_session_never_starts_and_says_s_does():
             await pilot.press("enter")
             await loaded(app, pilot)
             assert not is_confirm(app) and bench.calls == []
-            assert notifications(app)[-1][0] == "#1 has no session here; s starts one"
+            assert notifications(app)[-1][0] == "#1 has no session here"
 
     run(scenario())
 
@@ -423,7 +422,118 @@ def test_double_click_acts_like_enter_and_never_starts():
             await pilot.click(card, times=2)
             await loaded(app, pilot)
             assert not is_confirm(app) and bench.calls == []
-            assert notifications(app)[-1][0] == "#1 has no session here; s starts one"
+            assert notifications(app)[-1][0] == "#1 has no session here"
+
+    run(scenario())
+
+
+def live(number, path, status, pane="w5:p1"):
+    return Session(number, path, workspace=pane.split(":")[0], status=status, pane=pane)
+
+
+def test_each_session_shows_its_badge_and_a_claimed_ticket_without_one_says_so():
+    async def scenario():
+        bench = FakeBench({
+            1: [live(1, "/w/tm-1", "working"), live(1, "/code/r", "idle", "w6:p2"), Session(1, "/w/issue-1-2")],
+            3: [live(3, "/w/issue-3", "blocked")],
+        })
+        tickets = [*TICKETS, on(9, 7, "Bob works", assignees=("bob",)), on(9, 8, "Mine, live", assignees=("me",))]
+        bench.current[8] = [live(8, "/w/tm-8", "idle")]
+        app = bench_app(bench, tickets)
+        async with app.run_test(size=(160, 60)) as pilot:
+            await loaded(app, pilot)
+            one = card_text(app, 1)
+            assert "● working tm-1" in one and "◌ idle r" in one and "○ no agent issue-1-2" in one
+            assert "⚠ needs you issue-3" in card_text(app, 3)
+            for claimed in (2, 7):  # mine or someone else's, with no session found
+                assert "claimed, no session here" in card_text(app, claimed)
+            for other in (1, 3, 4, 8, 9):  # a session, unclaimed, or closed
+                assert "claimed, no session here" not in card_text(app, other)
+
+    run(scenario())
+
+
+def test_without_herdr_a_claimed_card_does_not_claim_there_is_no_session():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "no session here" not in card_text(app, 2)
+
+    run(scenario())
+
+
+def test_enter_focuses_the_most_urgent_live_session_on_any_card():
+    """Closed, blocked, claimed by someone else or a map: a live session is always where Enter goes."""
+    sessions = {
+        number: [Session(number, f"/w/dead-{number}", workspace="wD"), live(number, f"/w/idle-{number}", "idle"),
+                 live(number, f"/w/needs-{number}", "blocked"), live(number, f"/w/busy-{number}", "working")]
+        for number in (9, 3, 4, 6)
+    }
+
+    async def scenario():
+        bench = FakeBench(sessions)
+        app = bench_app(bench, [*TICKETS, THEIRS])
+        async with app.run_test(size=(160, 50)) as pilot:
+            await loaded(app, pilot)
+            for number in (9, 3, 4, 6):
+                await select(app, pilot, number)
+                await pilot.press("enter")
+                await loaded(app, pilot)
+            assert not is_confirm(app)
+            assert bench.calls == [("go_to", n, f"/w/needs-{n}") for n in (9, 3, 4, 6)]
+
+    run(scenario())
+
+
+def test_enter_prefers_working_over_idle_and_any_agent_over_a_dead_worktree():
+    async def scenario():
+        bench = FakeBench({1: [Session(1, "/w/dead", workspace="wD"), live(1, "/w/idle", "idle"),
+                               live(1, "/w/busy", "working")],
+                           2: [Session(2, "/w/dead-2"), live(2, "/w/idle-2", "idle")]})
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            for number in (1, 2):
+                await select(app, pilot, number)
+                await pilot.press("enter")
+                await loaded(app, pilot)
+            assert bench.calls == [("go_to", 1, "/w/busy"), ("go_to", 2, "/w/idle-2")]
+
+    run(scenario())
+
+
+def test_enter_on_a_dead_worktree_goes_to_it_and_never_starts():
+    async def scenario():
+        bench = FakeBench({1: [Session(1, "/w/issue-1")]})
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("enter")
+            await loaded(app, pilot)
+            assert not is_confirm(app) and bench.calls == [("go_to", 1, "/w/issue-1")]
+
+    run(scenario())
+
+
+def test_enter_on_a_map_card_targets_the_maps_own_session_never_a_tickets():
+    async def scenario():
+        bench = FakeBench({1: [live(1, "/w/tm-1", "blocked")], 2: [live(2, "/w/tm-2", "working")]})
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 9)
+            await pilot.press("enter")
+            await loaded(app, pilot)
+            assert bench.calls == [] and notifications(app)[-1][0] == "#9 has no session here"
+            bench.current = {**bench.current, 9: [live(9, "/w/tm-9", "idle")]}
+            await pilot.press("r")
+            await loaded(app, pilot)
+            await select(app, pilot, 9)
+            await pilot.press("enter")
+            await loaded(app, pilot)
+            assert bench.calls == [("go_to", 9, "/w/tm-9")]
 
     run(scenario())
 
@@ -1213,7 +1323,7 @@ def test_empty_frontier_says_so_and_starts_nothing():
             assert bench.calls == []
             warnings = [m for m, severity in notifications(app) if severity == "warning"]
             assert "#1" in warnings[0] and "frontier" in warnings[0]
-            assert warnings[1:] == ["#1 has no session here; s starts one"]  # Enter never starts
+            assert warnings[1:] == ["#1 has no session here"]  # Enter never starts
 
     run(scenario())
 

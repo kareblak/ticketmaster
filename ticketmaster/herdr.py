@@ -1,9 +1,10 @@
 """Herdr (herdr.dev): the board lives in a herdr pane, and every ticket session in a worktree workspace.
 
 Starting a ticket always creates a new git worktree (`herdr worktree create`) with Claude started in it
-as a named herdr agent. A ticket's sessions are found again through its worktrees (`issue-<n>`, from
-herdr or `claude -w`), so the board can show each agent's state, jump to it, and resume a dead one with
-`claude --continue`. The board never removes or adopts a worktree.
+as a named herdr agent. The board finds every session working a ticket, including ones it did not start:
+a worktree named after the ticket (`issue-<n>`/`tm-<n>`, from herdr or `claude -w`), or an agent in the
+repo whose terminal title starts with the ticket's key. It shows each agent's state and jumps to it, but
+never starts or resumes Claude there, and never removes or adopts a worktree.
 """
 
 from __future__ import annotations
@@ -25,8 +26,12 @@ BOARD_ENV = "TICKETMASTER_BOARD"  # set on the `open` a board pane runs, so it k
 WRAPPER_ENV = "TICKETMASTER_WRAPPER"  # the plugin's bin/ticketmaster, exported by the wrapper itself
 DATA_ENV = "CLAUDE_PLUGIN_DATA"  # the wrapper's venv lives here; exported with WRAPPER_ENV
 BOARD_RATIO = 0.7  # share the caller keeps; leaves the board ~1/3, i.e. single-column mode
-# `issue-12`, `worktree-issue-12` (claude -w), `issue-12-2` (a second start).
-WORKTREE_NAME = re.compile(r"^(?:worktree-)?issue-(?P<number>\d+)(?:-\d+)?$")
+# `issue-12`, `tm-12` (the lowercased Linear key), `worktree-issue-12` (claude -w), `issue-12-2` (a second start).
+WORKTREE_NAME = re.compile(r"^(?:worktree-)?(?:issue|tm)-(?P<number>\d+)(?:-\d+)?$", re.IGNORECASE)
+# A terminal title starting with the key, `TM-12 …` or `#12 …`, after any spinner glyph Claude puts first.
+TITLE_KEY = re.compile(r"^[^\w#]*(?:#|tm-)(?P<number>\d+)(?!\w)", re.IGNORECASE)
+# Which session Enter goes to first: needs you > working > idle, any agent before a worktree without one (None).
+URGENCY = {"blocked": 0, "working": 1, "idle": 2, "done": 3, "unknown": 4, None: 9}
 
 
 class HerdrError(RuntimeError):
@@ -57,13 +62,19 @@ def open_command(args: list[str], env: Mapping[str, str] | None = None) -> str:
 
 @dataclass(frozen=True)
 class Session:
-    """A worktree belonging to a ticket, with its herdr workspace and agent when they are open."""
+    """An agent working a ticket, in the worktree it runs in; or a ticket's worktree with no agent (status None)."""
 
     number: int
     path: str
     branch: str | None = None
-    workspace: str | None = None
+    workspace: str | None = None  # the agent's workspace, or the herdr workspace open on an agentless worktree
     status: str | None = None  # the agent's idle/working/blocked/done/unknown; None without one
+    pane: str | None = None  # the agent's pane
+
+    @property
+    def urgency(self) -> tuple[int, bool]:
+        """Sorts the one to go to first: needs you, working, idle, then a worktree without an agent."""
+        return URGENCY.get(self.status, URGENCY["unknown"]), self.workspace is None
 
 
 @dataclass(frozen=True)
@@ -92,6 +103,24 @@ def ticket_number(worktree: dict) -> int | None:
         if match := WORKTREE_NAME.match(name):
             return int(match["number"])
     return None
+
+
+def title_number(agent: dict) -> int | None:
+    """The ticket an agent's terminal title starts with (`TM-5 …`, `#5 …`), as `claude -n` sets it."""
+    title = agent.get("terminal_title_stripped") or agent.get("terminal_title") or ""
+    match = TITLE_KEY.match(title)
+    return int(match["number"]) if match else None
+
+
+def checkout_of(agent: dict, worktrees: list[dict]) -> dict | None:
+    """The repo checkout the agent runs in, by its foreground cwd (else its pane's cwd); the deepest wins, since
+    `claude -w` worktrees lie inside the main checkout. None: the agent is not in this repo."""
+    where = agent.get("foreground_cwd") or agent.get("cwd")
+    if not where:
+        return None
+    where = Path(where).resolve()
+    inside = [w for w in worktrees if where.is_relative_to(Path(w["path"]).resolve())]
+    return max(inside, key=lambda w: len(Path(w["path"]).parts), default=None)
 
 
 @dataclass
@@ -167,23 +196,26 @@ class Herdr:
         return [w for w in self.call("worktree", "list", "--cwd", str(cwd)).get("worktrees", []) if w.get("is_linked_worktree")]
 
     def sessions(self, cwd: Path) -> dict[int, list[Session]]:
-        """Every ticket worktree of the repo, by ticket number, with its agent's state."""
-        agents = self.call("agent", "list").get("agents", [])
-        rank = {"blocked": 0, "working": 1, "idle": 2, "done": 3, "unknown": 4}
-        status_by_workspace: dict[str, str] = {}
-        for agent in agents:
-            workspace, status = agent.get("workspace_id"), agent.get("agent_status", "unknown")
-            if workspace and rank.get(status, 9) < rank.get(status_by_workspace.get(workspace, ""), 9):
-                status_by_workspace[workspace] = status  # the one needing attention wins
+        """The sessions working each ticket, most urgent first. An agent in the repo works a ticket when its
+        worktree is named after it or its terminal title starts with its key; a ticket worktree without an
+        agent is a session too, with no status. Agents outside the repo's checkouts are ignored."""
+        checkouts = self.call("worktree", "list", "--cwd", str(cwd)).get("worktrees", [])
         found: dict[int, list[Session]] = {}
-        for wt in self.worktrees(cwd):
-            if (number := ticket_number(wt)) is None:
+        busy: set[str] = set()  # worktrees with an agent in them
+        for agent in self.call("agent", "list").get("agents", []):
+            if (checkout := checkout_of(agent, checkouts)) is None:
                 continue
-            workspace = wt.get("open_workspace_id")
-            found.setdefault(number, []).append(Session(
-                number, wt["path"], wt.get("branch"), workspace, status_by_workspace.get(workspace) if workspace else None,
-            ))
-        return found
+            busy.add(checkout["path"])
+            by_name = ticket_number(checkout) if checkout.get("is_linked_worktree") else None
+            for number in sorted({n for n in (by_name, title_number(agent)) if n is not None}):
+                found.setdefault(number, []).append(Session(
+                    number, checkout["path"], checkout.get("branch"), agent.get("workspace_id"),
+                    agent.get("agent_status") or "unknown", agent.get("pane_id"),
+                ))
+        for wt in checkouts:
+            if wt.get("is_linked_worktree") and wt["path"] not in busy and (number := ticket_number(wt)) is not None:
+                found.setdefault(number, []).append(Session(number, wt["path"], wt.get("branch"), wt.get("open_workspace_id")))
+        return {number: sorted(sessions, key=lambda s: s.urgency) for number, sessions in found.items()}
 
     def free_branch(self, cwd: Path, name: str) -> str:
         """`name`, or `name-2`, `name-3`… when a worktree or local branch already has it."""
@@ -198,18 +230,18 @@ class Herdr:
         note = self.start_claude(result["root_pane"]["pane_id"], branch, claude, claude_args)
         return f"new worktree {branch}{note}"
 
-    def go_to(self, cwd: Path, session: Session, label: str, claude: str = "claude") -> str:
-        """Focuses the session's workspace, opening it and resuming Claude (`--continue`) when needed."""
-        if session.workspace and session.status is not None:
+    def go_to(self, cwd: Path, session: Session, label: str) -> str:
+        """Focuses a live session's agent; for a worktree without one, its herdr workspace, opened with a shell
+        when none is open. It never starts or resumes Claude."""
+        name = Path(session.path).name
+        if session.status is not None and session.pane:
+            self.call("agent", "focus", session.pane)
+            return f"focused {name}"
+        if session.workspace:
             self.call("workspace", "focus", session.workspace)
-            return f"focused {session.workspace}"
-        if session.workspace:  # open, but Claude has exited: resume in a new tab
-            pane = self.call("tab", "create", "--workspace", session.workspace, "--cwd", session.path, "--label", "claude", "--focus")["root_pane"]["pane_id"]
-            self.call("workspace", "focus", session.workspace)
-        else:
-            pane = self.call("worktree", "open", "--cwd", str(cwd), "--path", session.path, "--label", label, "--focus")["root_pane"]["pane_id"]
-        note = self.start_claude(pane, Path(session.path).name, claude, ["--continue"])
-        return f"resumed {Path(session.path).name}{note}"
+            return f"focused {name}" if session.status is not None else f"focused {name} (no Claude running)"
+        self.call("worktree", "open", "--cwd", str(cwd), "--path", session.path, "--label", label, "--focus")
+        return f"opened {name} with a shell"
 
     def start_claude(self, pane: str, name: str, claude: str, claude_args: list[str]) -> str:
         """Starts Claude as the herdr agent `name`. Returns a short state note for the status line."""
