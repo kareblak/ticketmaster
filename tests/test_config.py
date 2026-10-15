@@ -198,3 +198,22 @@ def test_the_fetch_limit_is_the_repos_saved_one_else_the_default():
     assert board_fetch_limit({"fetch_limit": 50}) == 50 and board_fetch_limit({}) == 300
     for unusable in (0, -3, 2.5, "50", True, None):  # a hand-edited settings.json
         assert board_fetch_limit({"fetch_limit": unusable}) == 300
+
+
+@pytest.mark.parametrize("text", ["abc", "2.5", "1e3", "+5", "1_000", "-1", "off"])
+def test_a_decided_age_must_be_a_whole_number_of_days_or_empty(text):
+    from ticketmaster.config import parse_decided_age
+
+    with pytest.raises(ValueError):
+        parse_decided_age(text)
+
+
+def test_an_empty_decided_age_is_off_and_zero_is_a_valid_age():
+    from ticketmaster.config import board_decided_age, parse_decided_age
+
+    assert (parse_decided_age(""), parse_decided_age("  "), parse_decided_age(" 14 "), parse_decided_age("0")) \
+        == (None, None, 14, 0)
+    assert board_decided_age({"decided_age": 14}) == 14 and board_decided_age({"decided_age": 0}) == 0
+    assert board_decided_age({}) is None
+    for unusable in (-3, 2.5, "14", True, None):  # a hand-edited settings.json
+        assert board_decided_age({"decided_age": unusable}) is None

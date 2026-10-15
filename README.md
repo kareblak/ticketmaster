@@ -106,7 +106,7 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | free-text filter, clear every filter, refresh now, quit             |
 | `f`            | any               | filter picker: type, HITL/AFK, assignee, map, author ([Filters](#filters); saved per repo) |
-| `c`            | any               | settings menu: refresh interval, fetch limit, GitHub budget ([Settings](#settings); saved per repo) |
+| `c`            | any               | settings menu: refresh interval, fetch limit, Decided age, GitHub budget ([Settings](#settings); saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
 
 Arrows or `hjkl` move between cards: up and down walk each lane's map card and then its cards in the
@@ -200,7 +200,7 @@ that is no longer on the board is ignored until it comes back. There are no labe
 per user and repo, under `repos` in the same `settings.json`:
 
 ```json
-{"repos": {"github:owner/name": {"interval": 10, "fetch_limit": 100, "budget": 1000}}}
+{"repos": {"github:owner/name": {"interval": 10, "fetch_limit": 100, "decided_age": 14, "budget": 1000}}}
 ```
 
 `Esc` closes the menu without changing anything. A field that is not valid stays open with a message
@@ -210,6 +210,7 @@ saying why, and a failed save shows a warning while the new value still applies 
 | ---------------- | ---------------------------- | --------------------------------------------------------- |
 | Refresh interval | any positive number of seconds, no floor | ticket and session fetches reschedule at once; the status line's `every Ns` shows it |
 | Fetch limit      | a whole number, 1 or more; default 300 | the open maps the board reads, and the tickets it reads per map, from the next ticket fetch |
+| Decided age      | a whole number of days, 0 or more; empty (off) by default | Decided tickets closed more than that many days ago are hidden at once, without a fetch |
 | GitHub budget    | any positive number of GraphQL points an hour, default 1,000; GitHub only | ticket fetches re-pace at once to the [budget](#providers) |
 
 The refresh interval is `--interval` for this run, then the repo's saved interval, then the
@@ -226,6 +227,11 @@ closed map that an open spec names, or that the board was started on, comes on t
 On GitLab and Gitea/Forgejo, which have no sub-issues, a map's tickets are still found among every
 issue with a `wayfinder:` type label, so there the per-map limit trims the board, not the requests. A Linear
 map keeps its first sub-issues as Linear pages them.
+
+The Decided age hides old Decided tickets: those closed more than N days ago. Open tickets, however
+old, and closed ones without a close date always show; 0 hides every closed ticket with a close date.
+Column heads and tabs count only the cards shown, while lane headers keep the map's or spec's full
+progress. Emptying the field shows every Decided ticket again and removes the saved value.
 
 ## Wayfinding links
 

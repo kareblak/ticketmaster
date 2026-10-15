@@ -8,7 +8,7 @@ import time
 import webbrowser
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
@@ -21,8 +21,8 @@ from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static
 
-from .config import (DEFAULT_BUDGET, board_budget, board_fetch_limit, board_interval, load_settings, parse_budget,
-                     parse_fetch_limit, parse_interval, save_settings, seconds_text)
+from .config import (DEFAULT_BUDGET, board_budget, board_decided_age, board_fetch_limit, board_interval, load_settings,
+                     parse_budget, parse_decided_age, parse_fetch_limit, parse_interval, save_settings, seconds_text)
 from .herdr import HerdrError, Session
 from .model import (COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, LaneKind, SpecProgress, Ticket, build_board,
                     frontier)
@@ -220,6 +220,13 @@ def load_filters(saved: dict) -> dict[str, dict[str, str]]:
             values = [v for v in values if v in ASSIGNEES and v != ANYONE][:1]
         filters[section] = dict.fromkeys(values, INCLUDE)
     return filters
+
+
+def aged_out(ticket: Ticket, days: int | None, now: datetime) -> bool:
+    """A closed ticket closed more than `days` ago, which the Decided age hides; never an open ticket or one without a
+    close date, and nothing while the age is off (None)."""
+    return (days is not None and not ticket.is_open and ticket.closed_at is not None
+            and now - ticket.closed_at > timedelta(days=days))
 
 
 def budget_pace(quota: Quota, budget: float, now: datetime) -> int:
@@ -562,8 +569,8 @@ KEY_DETAILS = {
     "open": "open the issue in the browser",
     "pick_filter": "narrow by type, HITL/AFK, assignee (me, unassigned, anyone), map and author; combines with /, "
                    "Esc on the board clears all, saved per repo",
-    "settings": "the refresh interval, applied at once, the fetch limit, from the next fetch, and the budget on "
-                "GitHub; saved per repo",
+    "settings": "the refresh interval and the Decided age, applied at once, the fetch limit, from the next fetch, "
+                "and the budget on GitHub; saved per repo",
 }
 
 
@@ -676,6 +683,10 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 "  tickets it reads per map (default 300), from the next fetch; a lower one asks the tracker\n"
                 "  less. A fetch that reaches it says so in the status line, e.g. `cut off at 300: open maps,\n"
                 "  #12's tickets`, so a missing ticket can be traced to the limit.\n"
+                "  Decided age (days): hides Decided tickets closed more than N days ago, at once and without\n"
+                "  a fetch; column heads and tabs count only the cards shown, lane headers keep the full\n"
+                "  progress. Open tickets and those without a close date always show. Empty (the default)\n"
+                "  shows every Decided ticket; 0 hides every one with a close date.\n"
                 "  GitHub budget: the board spends about 1,000 GraphQL points an hour by default (any\n"
                 "  positive number, saved per repo). Ticket fetches come every --interval, or every\n"
                 "  last fetch's cost × 3600 / budget when that is longer, and longer still when the points\n"
@@ -783,6 +794,7 @@ class BoardApp(App):
         self.wall = wall
         self.pacer = Pacer(self.interval, clock())
         self.budget = board_budget(self._repo_settings())  # GitHub points an hour, see budget_pace
+        self.decided_age = board_decided_age(self._repo_settings())  # days; None shows every Decided ticket
         self.quota: Quota | None = None  # the provider's reading after the last good ticket fetch; GitHub only
         self.ticker: Timer | None = None
         self.fetching = False
@@ -932,7 +944,9 @@ class BoardApp(App):
         return self.board.tickets()
 
     def _visible(self, lane: Lane, column: Column) -> list[Ticket]:
-        return [t for t in lane.columns[column] if self._passes(t)]
+        """The column's cards that pass the filters, less those the Decided age hides."""
+        now = self.wall()
+        return [t for t in lane.columns[column] if self._passes(t) and not aged_out(t, self.decided_age, now)]
 
     def _chosen(self, section: str) -> list[str]:
         """The section's selected values that are on the board, in the picker's order. The preset map counts even
@@ -1343,16 +1357,19 @@ class BoardApp(App):
     def action_settings(self) -> None:
         fields = [Setting("interval", "Refresh interval (seconds)", seconds_text(self.interval), parse_interval),
                   Setting("fetch_limit", "Fetch limit (open maps, and tickets per map)", str(self.board_query.limit),
-                          parse_fetch_limit)]
+                          parse_fetch_limit),
+                  Setting("decided_age", "Decided age (days; empty shows every Decided ticket)",
+                          "" if self.decided_age is None else str(self.decided_age), parse_decided_age)]
         if self.provider.name == "github":
             fields.append(Setting("budget", "GitHub budget (GraphQL points an hour)", seconds_text(self.budget),
                                   parse_budget))
         self.push_screen(SettingsMenu(fields), self._apply_settings)
 
     def _apply_settings(self, values: dict | None) -> None:
-        """Applies the menu's values, the interval at once and the fetch limit from the next fetch, and saves those
-        that differ from the repo's saved ones, also a value that `--interval` already set for this run, but not an
-        unchanged default fetch limit; Esc (None) changes nothing."""
+        """Applies the menu's values, the interval and the Decided age at once and the fetch limit from the next
+        fetch, and saves those that differ from the repo's saved ones, also a value that `--interval` already set for
+        this run, but not an unchanged default fetch limit; an empty Decided age removes the saved one. Esc (None)
+        changes nothing."""
         if values is None:
             return
         interval, limit, budget = values["interval"], values["fetch_limit"], values.get("budget", self.budget)
@@ -1370,8 +1387,19 @@ class BoardApp(App):
             saved["fetch_limit"] = limit
         if "budget" in values and (budget != DEFAULT_BUDGET or "budget" in self._repo_settings()):
             saved["budget"] = int(budget) if budget.is_integer() else budget  # an untouched default stays a default
-        if any(self._repo_settings().get(key) != value for key, value in saved.items()):
-            self._repo_settings(create=True).update(saved)
+        age = values["decided_age"]
+        if age != self.decided_age:
+            self.decided_age = age
+            self._render_board()
+            self.call_after_refresh(self.action_move, 0, 0)
+        stale = age is None and "decided_age" in self._repo_settings()
+        if age is not None:
+            saved["decided_age"] = age
+        if stale or any(self._repo_settings().get(key) != value for key, value in saved.items()):
+            repo = self._repo_settings(create=True)
+            repo.update(saved)
+            if stale:
+                del repo["decided_age"]
             self._write_settings("settings")
 
     def _repo_settings(self, create: bool = False) -> dict:
