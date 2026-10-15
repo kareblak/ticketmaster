@@ -85,11 +85,11 @@ def test_removed_flags_are_unknown_arguments(flag, capsys, monkeypatch):
     assert f"unrecognized arguments: {flag[0]}" in capsys.readouterr().err
 
 
-def test_version_is_0_3_0(capsys):
+def test_version_is_0_3_1(capsys):
     from ticketmaster.cli import main
 
     assert main(["--version"]) == 0
-    assert capsys.readouterr().out.strip() == "ticketmaster 0.3.0"
+    assert capsys.readouterr().out.strip() == "ticketmaster 0.3.1"
 
 
 def linear_repo(tmp_path, toml):
