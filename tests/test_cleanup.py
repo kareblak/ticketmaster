@@ -287,17 +287,25 @@ def test_main_on_no_map_fails_with_the_reason(monkeypatch, capsys):
     assert "ticketmaster: #41 is not a wayfinder map in github:o/r" in capsys.readouterr().err
 
 
-def test_an_agent_in_the_pane_cleanup_runs_in_keeps_its_worktree():
+def test_the_worktree_of_the_agent_cleanup_runs_in_is_current_and_keeps_its_own_reasons():
     found = cleanup.leftovers(REPO, MAP, TICKETS, Herdr(fake()), uncommitted=lambda path: False, own_pane="w5:p1")
     entry = by_place(found)[f"{HERDR_HOME}/issue-42"]
-    assert "cleanup runs in it" in entry.reason
+    assert (entry.current, entry.removable, entry.reason) == (True, False, "open ticket")
 
 
-def test_the_worktree_cleanup_runs_in_is_kept():
+def test_the_worktree_cleanup_runs_in_is_current_and_removable():
     found = cleanup.leftovers(Path(f"{HERDR_HOME}/issue-40/sub"), MAP, TICKETS, Herdr(fake()),
                               uncommitted=lambda path: False)
     entry = by_place(found)[f"{HERDR_HOME}/issue-40"]
-    assert (entry.removable, entry.reason) == (False, "cleanup runs in it")
+    assert (entry.current, entry.removable, entry.reason) == (True, True, "ticket closed")
+    assert not any(other.current for other in found if other is not entry)
+
+
+def test_the_dry_run_says_the_current_worktree_goes_last():
+    found = cleanup.leftovers(Path(f"{HERDR_HOME}/issue-40"), MAP, TICKETS, Herdr(fake()),
+                              uncommitted=lambda path: False)
+    line = next(line for line in cleanup.render(MAP, found).splitlines() if "  #40  " in line)
+    assert line.startswith("removable") and line.endswith("ticket closed, removed last: cleanup runs in it")
 
 
 # --- cleanup without --dry-run, on a real git repo -------------------------------------------------
@@ -335,8 +343,10 @@ def real_fake(repo, agents=()):
     })
 
 
-def run_cleanup(repo, spy, tickets=TICKETS, own_pane=None):
-    return cleanup.clean(repo, FakeProvider(tickets), 40, Herdr(spy), own_pane=own_pane)
+def run_cleanup(repo, spy, tickets=TICKETS, own_pane=None, cwd=None):
+    """The summary and whether every step went through; what closes last is left unclosed."""
+    cleaned = cleanup.clean(cwd or repo, FakeProvider(tickets), 40, Herdr(spy), own_pane=own_pane)
+    return cleaned.summary, cleaned.ok
 
 
 def test_cleanup_removes_a_removable_worktree_its_workspace_and_its_merged_branch(repo):
@@ -438,7 +448,103 @@ def test_a_refused_herdr_close_fails_the_cleanup_and_main_exits_non_zero(repo, m
     assert "workspace w2 not closed: workspace_not_found" in capsys.readouterr().out
 
 
-def test_the_workspace_cleanup_runs_in_is_kept(repo):
-    text, _ = run_cleanup(repo, real_fake(repo), own_pane="w2:p4")
+def test_from_the_main_checkout_nothing_is_left_to_close_last(repo):
+    cleaned = cleanup.clean(repo, FakeProvider(TICKETS), 40, Herdr(real_fake(repo)))
+    assert cleaned.last == ()
+
+
+# --- cleanup run from inside one of the map's worktrees ---------------------------------------------
+
+
+def clean_from_40(repo, spy, own_pane="w2:p4", dirty=()):
+    return cleanup.clean(repo.parent / "issue-40", FakeProvider(TICKETS), 40, Herdr(spy),
+                         uncommitted=lambda path: Path(path).name in dirty, own_pane=own_pane)
+
+
+def test_from_inside_a_map_worktree_every_other_entry_goes_first(repo):
+    seen = {}
+    spy = real_fake(repo)
+    spy.answers[("workspace", "close")] = lambda argv: seen.setdefault(argv[2], (repo.parent / "issue-40").exists())
+    cleaned = clean_from_40(repo, spy)
+    assert seen == {"w3": True}  # issue-51's workspace closed while issue-40 still stood
+    assert not (repo.parent / "issue-51").exists()
+    assert "issue-50" not in REAL_LOCAL_BRANCHES(repo)
+    assert not (repo.parent / "issue-40").exists()
+    assert "issue-40" not in REAL_LOCAL_BRANCHES(repo)
+    assert ["workspace", "close", "w2"] not in spy.calls  # that is cleanup's own, closed after the summary
+    assert cleaned.last == (("workspace", "w2"),)
+    assert cleaned.ok
+
+
+def test_the_current_entry_is_summarised_last_with_its_workspace_closing_after(repo):
+    lines = clean_from_40(repo, real_fake(repo)).summary.splitlines()
+    assert lines[-2].startswith("removed  #40  worktree")
+    assert "branch issue-40, workspace w2" in lines[-2]
+    assert lines[-2].endswith("· cleanup runs in it: workspace w2 closes after this summary")
+    assert lines[-1] == "3 removed, 1 kept"
+
+
+def test_close_last_closes_cleanups_own_workspace(repo):
+    spy = real_fake(repo)
+    cleaned = clean_from_40(repo, spy)
+    assert cleanup.close_last(cleaned, Herdr(spy)) == []
+    assert spy.calls[-1] == ["workspace", "close", "w2"]
+
+
+def test_a_dirty_current_worktree_is_kept_with_the_reason_and_nothing_closes_last(repo):
+    spy = real_fake(repo)
+    cleaned = clean_from_40(repo, spy, dirty={"issue-40"})
     assert (repo.parent / "issue-40").exists()
-    assert any(line.startswith("kept") and "#40" in line and "cleanup runs in it" in line for line in text.splitlines())
+    assert "issue-40" in REAL_LOCAL_BRANCHES(repo)
+    assert not (repo.parent / "issue-51").exists()
+    assert cleaned.last == ()
+    assert any(line.startswith("kept") and "#40" in line and "uncommitted changes" in line
+               for line in cleaned.summary.splitlines())
+
+
+def test_an_unmerged_pr_keeps_the_current_worktree(repo):
+    spy = real_fake(repo, [{"pane_id": "w5:p1", "workspace_id": "w5", "agent_status": "working",
+                            "foreground_cwd": str(repo.parent / "issue-42")}])
+    in_review = [t if t.number != 42 else on_map(42, kind="research", has_open_change_request=True) for t in TICKETS]
+    cleaned = cleanup.clean(repo.parent / "issue-42", FakeProvider(in_review), 40, Herdr(spy),
+                            uncommitted=lambda path: False, own_pane="w5:p1")
+    assert (repo.parent / "issue-42").exists()
+    assert cleaned.last == ()
+    assert any(line.startswith("kept") and "#42" in line and "unmerged PR" in line
+               for line in cleaned.summary.splitlines())
+
+
+def test_a_current_worktree_git_refuses_to_remove_keeps_its_workspace_open(repo):
+    (repo.parent / "issue-40" / "new.txt").write_text("x")  # after the look: uncommitted says clean
+    cleaned = clean_from_40(repo, real_fake(repo))
+    assert (repo.parent / "issue-40").exists()
+    assert cleaned.last == ()
+    assert not cleaned.ok
+
+
+def test_main_prints_the_whole_summary_before_closing_its_own_workspace(repo, monkeypatch, capsys):
+    printed = {}
+    spy = real_fake(repo)
+    spy.answers[("workspace", "close")] = lambda argv: printed.setdefault(argv[2], capsys.readouterr().out)
+    monkeypatch.chdir(repo.parent / "issue-40")
+    monkeypatch.setenv("HERDR_PANE_ID", "w2:p4")
+    monkeypatch.setattr(herdr, "available", lambda: True)
+    monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(TICKETS))
+    monkeypatch.setattr(herdr, "Herdr", lambda: Herdr(spy))
+    monkeypatch.setattr(cleanup, "has_uncommitted", lambda path: False)
+    assert cli.main(["cleanup", "40"]) == 0
+    assert printed["w2"].endswith("3 removed, 1 kept\n")
+    assert spy.calls[-1] == ["workspace", "close", "w2"]
+
+
+def test_main_reports_its_own_workspace_left_open(repo, monkeypatch, capsys):
+    spy = real_fake(repo)
+    spy.answers[("workspace", "close")] = lambda argv: herdr.HerdrError("boom") if argv[2] == "w2" else {}
+    monkeypatch.chdir(repo.parent / "issue-40")
+    monkeypatch.setenv("HERDR_PANE_ID", "w2:p4")
+    monkeypatch.setattr(herdr, "available", lambda: True)
+    monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(TICKETS))
+    monkeypatch.setattr(herdr, "Herdr", lambda: Herdr(spy))
+    monkeypatch.setattr(cleanup, "has_uncommitted", lambda path: False)
+    assert cli.main(["cleanup", "40"]) == 1
+    assert "ticketmaster: workspace w2 not closed: boom" in capsys.readouterr().err

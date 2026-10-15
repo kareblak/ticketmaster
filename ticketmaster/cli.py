@@ -150,19 +150,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ticketmaster: {exc}", file=sys.stderr)
         return 2
     if args.command == "cleanup":
-        from .cleanup import CleanupError, clean, dry_run
+        from .cleanup import CleanupError, clean, close_last, dry_run
 
         pane = os.environ.get("HERDR_PANE_ID")
         try:
             if args.dry_run:
                 print(dry_run(cwd, provider, args.map, herdr.Herdr(), own_pane=pane))
                 return 0
-            summary, ok = clean(cwd, provider, args.map, herdr.Herdr(), own_pane=pane)
+            bench = herdr.Herdr()
+            cleaned = clean(cwd, provider, args.map, bench, own_pane=pane)
         except (CleanupError, ProviderError, herdr.HerdrError) as exc:
             print(f"ticketmaster: {exc}", file=sys.stderr)
             return 1
-        print(summary)
-        return 0 if ok else 1
+        print(cleaned.summary, flush=True)  # all of it, before closing the workspace this runs in
+        refused = close_last(cleaned, bench)
+        for complaint in refused:
+            print(f"ticketmaster: {complaint}", file=sys.stderr)
+        return 0 if cleaned.ok and not refused else 1
     try:
         board = herdr.Herdr().open_board(
             cwd, herdr.open_command(passthrough(args)), os.environ.get("HERDR_PANE_ID"), os.environ.get("CLAUDE_CODE_SESSION_ID"),

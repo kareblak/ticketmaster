@@ -78,9 +78,9 @@ decision, spec and implementation tickets (herdr's `~/.herdr/worktrees/<repo>/` 
 worktree, and an agent titled with one of the tickets that runs elsewhere. Each is **removable** when its
 ticket is closed, or a PR that closes it is merged (GitHub), and it has no uncommitted changes; otherwise it is
 **kept**, with the reasons: open ticket, unmerged PR, uncommitted changes. Merged comes from the tracker, never
-from unpushed commits, which a squash merge with its remote branch deleted leaves behind. Whatever the command
-runs in (its directory, or its herdr pane's agent) is kept. With `--dry-run` it changes nothing. It runs inside
-herdr.
+from unpushed commits, which a squash merge with its remote branch deleted leaves behind. The worktree the
+command runs in (its directory, or its herdr pane's workspace or agent) is judged like the others and marked to
+go last. With `--dry-run` it changes nothing. It runs inside herdr.
 
 `cleanup MAP` without `--dry-run` removes what the dry run marks removable, on a closed map only: an open map
 is refused with a non-zero exit and nothing changed, since a human closes the map in the tracker. For each
@@ -89,6 +89,11 @@ removes the worktree (`git worktree remove`, which refuses one changed since the
 branch too), and deletes the branch with `git branch -d`, which keeps a branch git calls unmerged into the
 checkout it runs from, such as one whose PR was squash-merged. Nothing is forced. Kept entries are left alone, and the summary lists what was
 removed and what was kept, with the reasons. It exits non-zero when git or herdr refused a step.
+
+Run from inside one of the map's worktrees, as a `tm-<n>` session's last step, cleanup removes every other entry
+first, then its own worktree and branch, prints the whole summary, and only then closes its own herdr workspace
+(or pane), which ends the session. If its own worktree is kept (uncommitted changes, an open ticket, an unmerged
+PR) or git refuses to remove it, the summary says why and the workspace stays open.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
 its spec and the spec's implementation tickets, and on GitHub, GitLab, Gitea/Forgejo and Linear every standalone spec
