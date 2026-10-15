@@ -47,3 +47,21 @@ _Avoid_: orphan ticket, unparented ticket
 **Board work**:
 What `s` starts a session on: wayfinder work (a map, a ticket on one, a map spec and its tickets) or standalone
 work (a standalone spec and the tickets in its spec lane), or a loose ticket. Anything else is refused.
+
+### Sessions
+
+**Session**:
+A Claude session whose working directory is a card's worktree, whichever backend or hand opened it.
+
+**Session status**:
+What the board knows of a session: working, needs you, idle, done (herdr only), or unknown. A worktree without a
+session has no status (no agent).
+_Avoid_: agent state
+
+**Unknown**:
+A live session whose status the session source reports but doesn't name. The session exists; only its state is
+unclear.
+
+**Status unavailable**:
+The session source itself can't be read and has never answered, so the board can't tell whether a worktree has a
+session at all. Not the same as unknown.
