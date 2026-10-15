@@ -1,12 +1,12 @@
-"""Provider-neutral ticket model, and the swimlane board: a lane per wayfinder map and per standalone spec, in four
-columns."""
+"""Provider-neutral ticket model, and the swimlane board: a lane per wayfinder map and per standalone spec, and the
+Loose lane, in four columns."""
 
 from __future__ import annotations
 
 import functools
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import NamedTuple
 
@@ -28,6 +28,8 @@ PART_OF = re.compile(r"^Part of #(?P<map>\d+)\.?$")
 # HITL: worked with a human; AFK: the agent alone. A task says which in its body.
 TYPE_MODES = {"grilling": "HITL", "prototype": "HITL", "research": "AFK"}
 _MODE_WORD = re.compile(r"\b(HITL|AFK)\b")  # the acronyms, not "afk" in prose
+# How long a closed spec or ticket stays a signature search hit, and a closed loose ticket in the Loose lane.
+RECENTLY_CLOSED = timedelta(days=7)
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,9 @@ class Ticket:
     # The standalone spec whose lane holds this ticket (its sub-issue parent, else its `## Parent` section), which
     # the provider resolved; None for any other ticket.
     lane_spec: int | None = None
+    # A ticket-signature issue whose parent is neither a map spec nor a standalone spec, or that has none, which the
+    # provider resolved: it goes in the Loose lane.
+    loose: bool = False
 
     @property
     def team_key(self) -> str | None:
@@ -96,13 +101,18 @@ class Ticket:
             return f"{self.ref} is claimed by {', '.join('@' + a for a in self.assignees)}"
         if self.spec_kind == "impl" and self.has_open_change_request:
             return f"{self.ref} has an open PR that closes it"
-        if not (self.is_wayfinder_work or self.map_missing):  # a typed ticket without its map is warned about apart
+        if not (self.is_board_work or self.map_missing):  # a typed ticket without its map is warned about apart
             return self.not_wayfinder_work
         return None
 
     @property
     def not_wayfinder_work(self) -> str:
         return f"{self.ref} is not wayfinder work: the board only starts work on a map"
+
+    @property
+    def is_board_work(self) -> bool:
+        """Wayfinder work, or a loose ticket, which s starts /implement on."""
+        return self.is_wayfinder_work or self.is_loose
 
     @property
     def is_wayfinder_work(self) -> bool:
@@ -129,15 +139,22 @@ class Ticket:
     @property
     def spec_kind(self) -> str | None:
         """`spec` for the spec a map led to (`Part of #<map>`) and for a standalone spec, `impl` for an implementation
-        ticket of either, else None. A map's are untyped and have a map the provider resolved; a standalone spec's
-        ticket carries the ticket signature and the spec the provider resolved as `lane_spec`."""
+        ticket of either and for a loose ticket, else None. A map's are untyped and have a map the provider resolved; a
+        standalone spec's ticket carries the ticket signature and the spec the provider resolved as `lane_spec`, a loose
+        ticket the signature and `loose`."""
         if wayfinder_kinds(self.labels):
             return None
         if self.map_number is not None:
             return "spec" if part_of(self.body, self.team_key) == self.map_number else "impl"
         if self.is_standalone_spec:
             return "spec"
-        return "impl" if self.lane_spec is not None and has_ticket_signature(self.body) else None
+        off_map = self.lane_spec is not None or self.loose
+        return "impl" if off_map and has_ticket_signature(self.body) else None
+
+    @property
+    def is_loose(self) -> bool:
+        """A loose ticket: the ticket signature, no map, no standalone spec, and the provider found no spec parent."""
+        return self.loose and self.map_number is None and self.lane_spec is None and self.spec_kind == "impl"
 
     @property
     def is_standalone_spec(self) -> bool:
@@ -286,9 +303,13 @@ class SpecProgress(NamedTuple):
 
 def spec_progress(spec: Ticket, tickets: list[Ticket]) -> SpecProgress:
     """The spec's implementation tickets: done (closed, less canceled), open and blocked."""
-    children = spec_tickets(spec, tickets)
-    still_open = [t for t in children if t.is_open]
-    done = sum(not t.is_open and not t.not_planned for t in children)
+    return ticket_progress(spec_tickets(spec, tickets))
+
+
+def ticket_progress(tickets: list[Ticket]) -> SpecProgress:
+    """The tickets done (closed, less canceled), open and blocked."""
+    still_open = [t for t in tickets if t.is_open]
+    done = sum(not t.is_open and not t.not_planned for t in tickets)
     return SpecProgress(done, len(still_open), sum(t.is_blocked for t in still_open))
 
 
@@ -334,6 +355,7 @@ def classify(ticket: Ticket) -> Column:
 class LaneKind(Enum):
     MAP = "map"
     SPEC = "spec"
+    LOOSE = "loose"
 
 
 @dataclass
@@ -341,9 +363,10 @@ class Lane:
     """A header issue and its tickets by column. A map lane holds the map's decision tickets and implementation
     tickets; its specs are no cards but lines of the map card, each with its tickets' progress, and `progress` counts
     the decision tickets only. A closed map with no open spec or implementation ticket is collapsed to its header. A
-    spec lane holds a standalone spec's tickets, and `progress` counts them."""
+    spec lane holds a standalone spec's tickets, and `progress` counts them. The Loose lane has no header issue; it
+    holds the loose tickets, and `progress` counts them."""
 
-    header: Ticket
+    header: Ticket | None
     kind: LaneKind = LaneKind.MAP
     columns: dict[Column, list[Ticket]] = field(default_factory=lambda: {c: [] for c in COLUMN_ORDER})
     progress: MapProgress | SpecProgress = MapProgress(0, 0, 0)
@@ -356,6 +379,11 @@ class Lane:
     def is_map(self) -> bool:
         return self.kind is LaneKind.MAP
 
+    def fill(self, tickets) -> None:
+        """Puts each ticket in the column its classification names."""
+        for ticket in tickets:
+            self.columns[classify(ticket)].append(ticket)
+
     def tickets(self) -> list[Ticket]:
         """A map lane's specs, then the lane's cards column by column."""
         return [*self.specs, *self.columns_tickets()]
@@ -366,6 +394,8 @@ class Lane:
 
     def spec_cards(self) -> list[Ticket]:
         """The specs the lane shows outside its columns: a map card's spec lines, or a spec lane's header."""
+        if self.kind is LaneKind.LOOSE:
+            return []
         return self.specs if self.is_map else [self.header]
 
     @property
@@ -384,8 +414,8 @@ class Board:
         return sum(len(lane.tickets()) for lane in self.lanes)
 
     def tickets(self) -> list[Ticket]:
-        """Every card: each lane's header, then its tickets."""
-        return [ticket for lane in self.lanes for ticket in (lane.header, *lane.tickets())]
+        """Every card: each lane's header issue, then its tickets."""
+        return [ticket for lane in self.lanes for ticket in ([lane.header] if lane.header else []) + lane.tickets()]
 
 
 def is_live_map(map_ticket: Ticket, tickets: list[Ticket]) -> bool:
@@ -399,9 +429,10 @@ def standalone_tickets(spec: Ticket, tickets: list[Ticket]) -> list[Ticket]:
                   key=lambda t: (t.order, t.number))
 
 
-def build_board(tickets: list[Ticket], named_map: int | None = None) -> Board:
+def build_board(tickets: list[Ticket], named_map: int | None = None, now: datetime | None = None) -> Board:
     """A lane per live map, by number, plus the named map when it is closed; then a lane per standalone spec, by
-    number, while the spec or any of its tickets is open. Anything else is not shown."""
+    number, while the spec or any of its tickets is open; then the Loose lane, of the open loose tickets and those
+    closed within `RECENTLY_CLOSED` of `now`, unless it has none. Anything else is not shown."""
     live = {t.number for t in tickets if t.is_wayfinder_map and is_live_map(t, tickets)}
     maps = sorted((t for t in tickets if t.is_wayfinder_map and (t.number in live or t.number == named_map)),
                   key=lambda t: t.number)
@@ -414,17 +445,20 @@ def build_board(tickets: list[Ticket], named_map: int | None = None) -> Board:
                     collapsed=map_ticket.number not in live, specs=specs,
                     spec_counts={spec.number: spec_progress(spec, tickets) for spec in specs})
         if not lane.collapsed:
-            for ticket in children:
-                if ticket.spec_kind != "spec":
-                    lane.columns[classify(ticket)].append(ticket)
+            lane.fill(t for t in children if t.spec_kind != "spec")
         board.lanes.append(lane)
     for spec in sorted((t for t in tickets if t.is_standalone_spec), key=lambda t: t.number):
         children = standalone_tickets(spec, tickets)
         if not (spec.is_open or any(t.is_open for t in children)):
             continue
         lane = Lane(spec, LaneKind.SPEC, progress=spec_progress(spec, tickets))
-        for ticket in children:
-            lane.columns[classify(ticket)].append(ticket)
+        lane.fill(children)
+        board.lanes.append(lane)
+    since = (now or datetime.now(timezone.utc)) - RECENTLY_CLOSED
+    recent = [t for t in tickets if t.is_loose and (t.is_open or t.closed_at is not None and t.closed_at >= since)]
+    if loose := sorted(recent, key=lambda t: (t.order, t.number)):
+        lane = Lane(None, LaneKind.LOOSE, progress=ticket_progress(loose))
+        lane.fill(loose)
         board.lanes.append(lane)
     return board
 
