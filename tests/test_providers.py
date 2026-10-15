@@ -1033,10 +1033,10 @@ def test_gitea_reads_at_most_the_limit_of_maps_and_of_each_maps_tickets_and_says
     assert len(provider.fetch(Query(limit=3))) == 6 and provider.cut_off == []
 
 
-def test_a_cut_map_family_keeps_its_first_tickets_in_map_order():
+def test_a_cut_map_lane_keeps_its_first_tickets_in_map_order():
     the_map = Ticket(number=1, title="", url="u1", is_open=True, labels=MAP_LABELS)
     kids = [Ticket(number=n, title="", url=f"u{n}", is_open=True, labels=("wayfinder:task",), parent_number=1,
                    parent_url="u1", parent_labels=MAP_LABELS, order=order) for n, order in ((7, 2), (8, 0), (9, 1))]
     cut: list[str] = []
-    assert [t.number for t in providers.cap_families([the_map, *kids], 2, cut)] == [1, 8, 9]
+    assert [t.number for t in providers.cap_lanes([the_map, *kids], 2, cut)] == [1, 8, 9]
     assert cut == ["#1's tickets"]

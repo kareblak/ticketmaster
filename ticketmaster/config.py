@@ -112,10 +112,9 @@ def board_interval(flag: float | None, saved: dict, kind: str) -> float:
 
 def parse_fetch_limit(text: str) -> int:
     """The fetch limit typed in the settings menu: a whole number, 1 or more; ValueError says what is wrong."""
-    try:
-        limit = int(text)
-    except ValueError:
-        raise ValueError(f"not a whole number: {text.strip()!r}") from None
+    if not (text.strip().isascii() and text.strip().isdigit()):
+        raise ValueError(f"not a whole number: {text.strip()!r}")
+    limit = int(text)
     if limit <= 0:
         raise ValueError(f"must be 1 or more: {text.strip()!r}")
     return limit

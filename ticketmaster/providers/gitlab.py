@@ -14,7 +14,7 @@ import json
 
 from ..model import Ticket, parse_time
 from . import (LABEL_LIMIT, LIMIT, OPEN_MAPS, SPEC_SEARCHES, IssueStates, ProviderError, Query, blocker_ref,
-               cap_families, capped, closed_map_refs, map_board, resolve_maps, run_json, tracker_error,
+               cap_lanes, capped, closed_map_refs, map_board, resolve_maps, run_json, tracker_error,
                wayfinder_labels, with_body_blockers, with_specs)
 
 ISSUE_FIELDS = """
@@ -110,7 +110,7 @@ class GitLabProvider:
         tickets = map_board(maps, named, children)
         if any(t.is_wayfinder_map for t in tickets):
             tickets = with_specs(tickets, found)
-        tickets = cap_families(resolve_maps(tickets, functools.cache(self._issue)), limit, cut)
+        tickets = cap_lanes(resolve_maps(tickets, functools.cache(self._issue)), limit, cut)
         tickets = with_body_blockers(tickets, self.states)
         self.cut_off = cut
         return tickets

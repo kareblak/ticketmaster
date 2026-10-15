@@ -183,7 +183,7 @@ def test_any_positive_interval_is_accepted():
     assert (parse_interval("0.25"), parse_interval(" 10 "), parse_interval("120")) == (0.25, 10, 120)
 
 
-@pytest.mark.parametrize("text", ["abc", "", "2.5", "1e3", "0", "-1"])
+@pytest.mark.parametrize("text", ["abc", "", "2.5", "1e3", "+5", "1_000", "0", "-1"])
 def test_a_fetch_limit_must_be_a_positive_whole_number(text):
     from ticketmaster.config import parse_fetch_limit
 

@@ -13,12 +13,11 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from ..model import Ticket, parse_time, part_of
-from . import (OPEN_MAPS, IssueStates, NotFound, ProviderError, Query, RateLimited, as_spec, blocker_ref, capped,
-               closed_map_refs, family_cut, is_spec, names_parent, resolve_maps, run_cli, run_json, tracker_error,
+from . import (LIMIT, OPEN_MAPS, IssueStates, NotFound, ProviderError, Query, RateLimited, as_spec, blocker_ref, capped,
+               closed_map_refs, lane_cut, is_spec, names_parent, resolve_maps, run_cli, run_json, tracker_error,
                under_spec, with_body_blockers)
 
 MAP_LABEL = "wayfinder:map"
-OPEN_SPECS = "open specs"  # the `Part of` search that finds closed maps with an open spec
 
 ISSUE_FIELDS = """
   number title url body state stateReason closedAt
@@ -93,15 +92,17 @@ class GitHubProvider:
     def fetch(self, query: Query) -> list[Ticket]:
         """Every open map, every closed map an open spec's `Part of #<map>` names, and their children; the
         sub-issue parent is the native child→map link, `Part of #<map>` the fallback. Each search and each map's
-        tickets stop at the query's limit."""
+        tickets stop at the query's limit. The `Part of` search, which only finds closed maps, keeps the default
+        cap: nearly every ticket says `Part of`, so a low limit would cut it on every fetch."""
         limit, cut = query.limit, []
 
-        def search(q: str, what: str) -> list[Ticket]:
-            nodes = capped(self._paginate(SEARCH, {"q": q}, ["search"], limit + 1), limit, what, cut)
-            return [to_ticket(node, order=0, repo=self.repo) for node in nodes]
+        def search(q: str, most: int) -> list[dict]:
+            return self._paginate(SEARCH, {"q": q}, ["search"], most)
 
-        maps = search(f'repo:{self.repo} is:issue is:open label:"{MAP_LABEL}"', OPEN_MAPS)
-        specs = search(f'repo:{self.repo} is:issue is:open in:body "Part of"', OPEN_SPECS)
+        q = f'repo:{self.repo} is:issue is:open label:"{MAP_LABEL}"'
+        maps = [to_ticket(node, order=0, repo=self.repo) for node in capped(search(q, limit + 1), limit, OPEN_MAPS, cut)]
+        q = f'repo:{self.repo} is:issue is:open in:body "Part of"'
+        specs = [to_ticket(node, order=0, repo=self.repo) for node in search(q, LIMIT)]
         wanted = closed_map_refs(specs, {m.number for m in maps})
         if query.named_map is not None and query.named_map not in {m.number for m in maps} | set(wanted):
             wanted.append(query.named_map)
@@ -181,7 +182,7 @@ class GitHubProvider:
             tickets += under_spec(new(subs), spec)
             tickets += under_spec(new(refs, lambda node: names_parent(node.get("body"), spec.number)), spec)
         if more or len(tickets) > limit:
-            cut.append(family_cut(map_ticket))
+            cut.append(lane_cut(map_ticket))
         return [replace(t, order=index) for index, t in enumerate(tickets[:limit])]
 
     def _children(self, number: int, limit: int) -> tuple[Ticket, list[dict], list[dict], bool]:

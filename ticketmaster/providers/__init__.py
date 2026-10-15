@@ -160,7 +160,7 @@ def closed_map_refs(candidates: list[Ticket], shown: set[int], key: str | None =
 OPEN_MAPS = "open maps"
 
 
-def family_cut(map_ticket: Ticket) -> str:
+def lane_cut(map_ticket: Ticket) -> str:
     return f"{map_ticket.ref}'s tickets"
 
 
@@ -172,13 +172,13 @@ def capped(items: list, limit: int, what: str, cut: list[str]) -> list:
     return items[:limit]
 
 
-def cap_families(tickets: list[Ticket], limit: int, cut: list[str]) -> list[Ticket]:
+def cap_lanes(tickets: list[Ticket], limit: int, cut: list[str]) -> list[Ticket]:
     """The board's tickets with each map's first `limit` in map order (its lane's tickets); a map with more goes on
     `cut`. Run after resolve_maps, which links specs and their tickets to their map."""
     dropped: set[int] = set()
     for map_ticket in [t for t in tickets if t.is_wayfinder_map]:
         family = lane_tickets(map_ticket, tickets)
-        kept = capped(family, limit, family_cut(map_ticket), cut)
+        kept = capped(family, limit, lane_cut(map_ticket), cut)
         dropped |= {t.number for t in family[len(kept):]}
     return [t for t in tickets if t.number not in dropped]
 
@@ -186,7 +186,8 @@ def cap_families(tickets: list[Ticket], limit: int, cut: list[str]) -> list[Tick
 class Provider(Protocol):
     name: str
     repo: str
-    cut_off: list[str]  # what the last fetch cut off at its query's limit, e.g. `open maps`, `#12's tickets`
+    # Each provider also sets `cut_off: list[str]` in fetch: what that fetch cut off at its query's limit, e.g.
+    # `open maps`, `#12's tickets`.
 
     def fetch(self, query: Query) -> list[Ticket]: ...
 

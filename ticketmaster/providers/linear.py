@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..model import Ticket, parse_time, part_of, wayfinder_kinds
-from . import (OPEN_MAPS, IssueStates, ProviderError, Query, RateLimited, as_spec, cap_families, capped,
+from . import (OPEN_MAPS, IssueStates, ProviderError, Query, RateLimited, as_spec, cap_lanes, capped,
                closed_map_refs, is_spec, parent_ref, under_spec, with_body_blockers, with_map)
 
 if TYPE_CHECKING:
@@ -269,7 +269,7 @@ class LinearProvider:
             tickets += [with_map(child, map_ticket) for child in self._children(found[number]["id"], limit + 1)]
         if maps:
             tickets += self._linked(maps, candidates, {t.number for t in tickets}, len(tickets))
-        tickets = with_body_blockers(cap_families(tickets, limit, cut), self.states, key=self.team)
+        tickets = with_body_blockers(cap_lanes(tickets, limit, cut), self.states, key=self.team)
         self.cut_off = cut
         return tickets
 

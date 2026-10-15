@@ -781,7 +781,7 @@ class BoardApp(App):
             if self.viewer is None:
                 self.viewer = self._viewer()
             board = build_board(self.provider.fetch(query), query.named_map)
-            cut = getattr(self.provider, "cut_off", [])
+            cut = getattr(self.provider, "cut_off", [])  # what the fetch cut off at the limit, when it says
             cut_off = f"cut off at {query.limit}: {', '.join(cut)}" if cut else None
             self.call_from_thread(self._apply, board, None, sessions, herdr_error, cut_off=cut_off)
         except RateLimited as exc:
