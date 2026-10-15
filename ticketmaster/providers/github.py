@@ -263,6 +263,7 @@ def to_ticket(node: dict, order: int, repo: str = "") -> Ticket:
         open_blockers=None if deps is None else len(blocked_by),
         blocked_by=blocked_by,
         has_open_change_request=any(pr.get("state") == "OPEN" for pr in prs),
+        has_merged_change_request=any(pr.get("state") == "MERGED" for pr in prs),
         order=order,
         parent_number=parent.get("number"),
         parent_url=parent.get("url"),

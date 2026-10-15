@@ -59,6 +59,7 @@ so code changes apply on the next `/ticketmaster` without rebuilding. Changing `
 ticketmaster [open] [map] [--repo OWNER/NAME] [--provider github|gitlab|gitea|forgejo|linear]
              [--host HOST] [--columns auto|one|all] [--interval SECONDS]
 ticketmaster login
+ticketmaster cleanup MAP --dry-run
 ```
 
 `open` is the default command: it opens the board in a herdr pane right of the
@@ -66,6 +67,15 @@ calling pane (the focused pane when `HERDR_PANE_ID` is stale or another session'
 `ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there. It
 only runs inside herdr (`HERDR_ENV=1`). `login` logs in to Linear with OAuth instead of an API key
 (see [Providers](#providers)); it runs anywhere.
+
+`cleanup MAP --dry-run` lists what a map, open or closed, leaves behind: the worktrees of the map and its
+decision, spec and implementation tickets (herdr's `~/.herdr/worktrees/<repo>/` and Claude's
+`.claude/worktrees/` alike) with their branches, herdr workspaces and agents, a ticket branch left without a
+worktree, and an agent titled with one of the tickets that runs elsewhere. Each is **removable** when its
+ticket is closed, or a PR that closes it is merged (GitHub), and it has no uncommitted changes; otherwise it is
+**kept**, with the reasons: open ticket, unmerged PR, uncommitted changes. Merged comes from the tracker, never
+from unpushed commits, which a squash merge with its remote branch deleted leaves behind. It changes nothing,
+and runs inside herdr.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
 its spec and the spec's implementation tickets (see [Lanes and columns](#lanes-and-columns)).
