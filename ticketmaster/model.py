@@ -48,6 +48,8 @@ class Ticket:
     # Those open blockers as `#<n>`, or `<owner>/<repo>#<n>` in another repo, native links first.
     blocked_by: tuple[str, ...] = ()
     has_open_change_request: bool = False
+    # A PR that closes it is merged; trackers that only close the issue on merge leave it False.
+    has_merged_change_request: bool = False
     # Position inside the parent (sub-issue order) or provider order; lower sorts first.
     order: int = 0
     parent_number: int | None = None

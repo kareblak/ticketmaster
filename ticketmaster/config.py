@@ -8,6 +8,7 @@ plus `key_env` when the API key is in another `LINEAR_` variable than LINEAR_API
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -15,7 +16,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .providers import Provider, ProviderError
+from .providers import LIMIT, Provider, ProviderError
 
 KNOWN_HOSTS = {"github.com": "github", "gitlab.com": "gitlab", "codeberg.org": "gitea", "gitea.com": "gitea"}
 CONFIG_FILE = ".ticketmaster.toml"
@@ -77,6 +78,55 @@ def save_settings(path: Path, settings: dict) -> None:
 def default_interval(kind: str) -> float:
     """The refresh interval when `--interval` is not given: 30 s on Linear, 5 s elsewhere."""
     return DEFAULT_INTERVAL.get(kind, 5.0)
+
+
+def parse_interval(text: str) -> float:
+    """Refresh seconds typed in the settings menu: any positive number, no floor; ValueError says what is wrong."""
+    try:
+        seconds = float(text)
+    except ValueError:
+        raise ValueError(f"not a number: {text.strip()!r}") from None
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError(f"must be a positive number of seconds: {text.strip()!r}")
+    return seconds
+
+
+def seconds_text(seconds: float) -> str:
+    """An interval as typed and shown, exactly: `10`, `0.5`, `1234567` (`:g` would round it)."""
+    return str(int(seconds)) if seconds.is_integer() else repr(seconds)
+
+
+def board_interval(flag: float | None, saved: dict, kind: str) -> float:
+    """`--interval` for this run, else the repo's saved interval (`saved` is its `repos` entry in settings.json),
+    else the provider's default. A saved value that is no positive number is ignored."""
+    if flag is not None:
+        return flag
+    value = saved.get("interval")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return parse_interval(str(value))
+        except ValueError:
+            pass
+    return default_interval(kind)
+
+
+def parse_fetch_limit(text: str) -> int:
+    """The fetch limit typed in the settings menu: a whole number, 1 or more; ValueError says what is wrong."""
+    if not (text.strip().isascii() and text.strip().isdigit()):
+        raise ValueError(f"not a whole number: {text.strip()!r}")
+    limit = int(text)
+    if limit <= 0:
+        raise ValueError(f"must be 1 or more: {text.strip()!r}")
+    return limit
+
+
+def board_fetch_limit(saved: dict) -> int:
+    """The repo's saved fetch limit (`saved` is its `repos` entry in settings.json), else the default. A saved value
+    that is no positive whole number is ignored."""
+    value = saved.get("fetch_limit")
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return LIMIT
 
 
 def git_remote(cwd: Path, name: str) -> str:

@@ -1,5 +1,6 @@
 """Command line: `open` (the board in a herdr pane beside the caller, or right here when the caller is that
-pane), which runs inside herdr (HERDR_ENV=1), and `login` (Linear OAuth, in the browser), which runs anywhere.
+pane) and `cleanup <map> --dry-run` (what a map leaves behind), which run inside herdr (HERDR_ENV=1), and `login`
+(Linear OAuth, in the browser), which runs anywhere.
 """
 
 from __future__ import annotations
@@ -14,14 +15,14 @@ from . import __version__, herdr
 from .providers import ProviderError, Query
 
 
-COMMANDS = ("open", "login")
+COMMANDS = ("open", "login", "cleanup")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     """No command means `open`, so `ticketmaster 42` is `ticketmaster open 42`; any other word is an invalid command."""
     parser = argparse.ArgumentParser(
         prog="ticketmaster",
-        usage="ticketmaster [open] [map] [options] | ticketmaster login",
+        usage="ticketmaster [open] [map] [options] | ticketmaster login | ticketmaster cleanup map --dry-run",
         description="Live swimlane board of wayfinder maps, in herdr.",
     )
     parser.add_argument("--version", action="store_true", help="print the version")
@@ -34,11 +35,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--interval", type=float, help="refresh seconds (default 5, 30 on Linear)")
     parser.add_argument("--columns", choices=["auto", "one", "all"], default="auto",
                         help="one column at a time, all side by side, or auto by width (default)")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="cleanup: list the map's worktrees, branches and herdr sessions, changing nothing")
     if not argv or argv[0].startswith("-") or is_issue(argv[0]):
         argv = ["open", *argv]
     args = parser.parse_args(argv)
     if args.command == "login" and args.map is not None:
         parser.error("login takes no map")
+    if args.command == "cleanup" and args.map is None:
+        parser.error("cleanup needs a map")
+    if args.command == "cleanup" and not args.dry_run:
+        parser.error("cleanup only lists for now: pass --dry-run")
+    if args.command != "cleanup" and args.dry_run:
+        parser.error("--dry-run is for cleanup")
     if args.map is not None:
         if not is_issue(args.map):
             parser.error(f"argument map: not an issue number, key or URL: {args.map!r}")
@@ -135,13 +144,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ticketmaster: `{args.command}` runs inside herdr; start herdr and run it from a herdr pane", file=sys.stderr)
         return 2
     cwd = Path.cwd()
-    from .config import default_interval, resolve_provider
+    from .config import resolve_provider
 
     try:
         provider = resolve_provider(cwd, args.provider, args.repo, args.host)
     except ProviderError as exc:
         print(f"ticketmaster: {exc}", file=sys.stderr)
         return 2
+    if args.command == "cleanup":
+        from .cleanup import CleanupError, dry_run
+
+        try:
+            print(dry_run(cwd, provider, args.map, herdr.Herdr()))
+        except (CleanupError, ProviderError, herdr.HerdrError) as exc:
+            print(f"ticketmaster: {exc}", file=sys.stderr)
+            return 1
+        return 0
     try:
         board = herdr.Herdr().open_board(
             cwd, herdr.open_command(passthrough(args)), os.environ.get("HERDR_PANE_ID"), os.environ.get("CLAUDE_CODE_SESSION_ID"),
@@ -163,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     BoardApp(
         provider,
         Query(named_map=named_number(args.map, provider)),
-        interval=args.interval if args.interval is not None else default_interval(provider.name),
+        interval=args.interval,
         workbench=workbench,
         describe_start=lambda ticket: workbench.prompt(ticket)
         + f"\nworktree: {worktree_name(ticket)}, in its own herdr workspace",

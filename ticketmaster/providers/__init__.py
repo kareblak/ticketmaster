@@ -11,7 +11,7 @@ from datetime import datetime
 from http import HTTPStatus
 from typing import Literal, Protocol
 
-from ..model import (WAYFINDER_TYPES, Ticket, parent_ref, parent_refs, parse_blockers, part_of,
+from ..model import (WAYFINDER_TYPES, Ticket, lane_tickets, parent_ref, parent_refs, parse_blockers, part_of,
                      wayfinder_kinds)
 
 TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo", "linear": "Linear"}
@@ -96,16 +96,31 @@ def error_notice(tracker: str, error: ProviderError) -> ErrorNotice:
                        reason)
 
 
+# The default fetch limit: open maps read per board, and tickets per map; a tracker page beyond these is not asked for.
+LIMIT = 300
+
+
 @dataclass(frozen=True)
 class Query:
     """What a board shows: every open wayfinder map with its tickets, every closed map with an open spec, plus
-    `named_map` when that map is closed."""
+    `named_map` when that map is closed; at most `limit` open maps, and `limit` tickets per map."""
 
     named_map: int | None = None
+    limit: int = LIMIT
 
 
-# Children read per map, and maps per board; a tracker page beyond these is not asked for.
-LIMIT = 300
+@dataclass(frozen=True)
+class Quota:
+    """What a provider's last fetch cost in the tracker's rate-limit points, and what the tracker has left.
+
+    Only GitHub reports one; a provider without a `quota` reading is not paced.
+    """
+
+    cost: int  # the points the last fetch spent, summed over its calls
+    remaining: int | None  # the points left, as the latest call saw them
+    resets_at: datetime | None  # when the points refill
+
+
 # Issues read per `wayfinder:` label on trackers without sub-issues: the whole repo's, open and closed, before
 # `Part of #<map>` picks a shown map's, so a map's tickets are not cut off by other maps' closed ones.
 LABEL_LIMIT = 5000
@@ -156,9 +171,38 @@ def closed_map_refs(candidates: list[Ticket], shown: set[int], key: str | None =
     return sorted(refs - shown)
 
 
+# What a fetch cut off at the limit, as the board's status line names it: the open maps, or a map's tickets.
+OPEN_MAPS = "open maps"
+
+
+def lane_cut(map_ticket: Ticket) -> str:
+    return f"{map_ticket.ref}'s tickets"
+
+
+def capped(items: list, limit: int, what: str, cut: list[str]) -> list:
+    """The first `limit` items; when there are more, `what` goes on `cut`. Callers read `limit + 1` items where they
+    can, so the one past the limit tells that the tracker had more."""
+    if len(items) > limit:
+        cut.append(what)
+    return items[:limit]
+
+
+def cap_lanes(tickets: list[Ticket], limit: int, cut: list[str]) -> list[Ticket]:
+    """The board's tickets with each map's first `limit` in map order (its lane's tickets); a map with more goes on
+    `cut`. Run after resolve_maps, which links specs and their tickets to their map."""
+    dropped: set[int] = set()
+    for map_ticket in [t for t in tickets if t.is_wayfinder_map]:
+        family = lane_tickets(map_ticket, tickets)
+        kept = capped(family, limit, lane_cut(map_ticket), cut)
+        dropped |= {t.number for t in family[len(kept):]}
+    return [t for t in tickets if t.number not in dropped]
+
+
 class Provider(Protocol):
     name: str
     repo: str
+    # Each provider also sets `cut_off: list[str]` in fetch: what that fetch cut off at its query's limit, e.g.
+    # `open maps`, `#12's tickets`.
 
     def fetch(self, query: Query) -> list[Ticket]: ...
 

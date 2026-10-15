@@ -59,6 +59,7 @@ so code changes apply on the next `/ticketmaster` without rebuilding. Changing `
 ticketmaster [open] [map] [--repo OWNER/NAME] [--provider github|gitlab|gitea|forgejo|linear]
              [--host HOST] [--columns auto|one|all] [--interval SECONDS]
 ticketmaster login
+ticketmaster cleanup MAP --dry-run
 ```
 
 `open` is the default command: it opens the board in a herdr pane right of the
@@ -66,6 +67,15 @@ calling pane (the focused pane when `HERDR_PANE_ID` is stale or another session'
 `ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there. It
 only runs inside herdr (`HERDR_ENV=1`). `login` logs in to Linear with OAuth instead of an API key
 (see [Providers](#providers)); it runs anywhere.
+
+`cleanup MAP --dry-run` lists what a map, open or closed, leaves behind: the worktrees of the map and its
+decision, spec and implementation tickets (herdr's `~/.herdr/worktrees/<repo>/` and Claude's
+`.claude/worktrees/` alike) with their branches, herdr workspaces and agents, a ticket branch left without a
+worktree, and an agent titled with one of the tickets that runs elsewhere. Each is **removable** when its
+ticket is closed, or a PR that closes it is merged (GitHub), and it has no uncommitted changes; otherwise it is
+**kept**, with the reasons: open ticket, unmerged PR, uncommitted changes. Merged comes from the tracker, never
+from unpushed commits, which a squash merge with its remote branch deleted leaves behind. It changes nothing,
+and runs inside herdr.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
 its spec and the spec's implementation tickets (see [Lanes and columns](#lanes-and-columns)).
@@ -76,7 +86,8 @@ whose tracker key it is, never issue number 1; a key no map carries shows an emp
 whose spec is still open stays on the board in full. Any other closed map shows only when you name it by
 number or URL, or on Linear by its team's key, as its header card alone.
 
-The board refreshes every 5 s, every 30 s on Linear; `--interval` sets another.
+The board refreshes every 5 s, every 30 s on Linear; `--interval` sets another for one run, and the
+[settings menu](#settings) (`c`) saves one per repo.
 
 The board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
 switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` sets the start).
@@ -90,6 +101,7 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | free-text filter, clear every filter, refresh now, quit             |
 | `f`            | any               | filter picker: type, HITL/AFK, assignee, map, author ([Filters](#filters); saved per repo) |
+| `c`            | any               | settings menu: refresh interval, fetch limit ([Settings](#settings); saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
 
 Arrows or `hjkl` move between cards: up and down walk each lane's map card and then its cards in the
@@ -176,6 +188,38 @@ The selection is saved per user and repo in `$XDG_CONFIG_HOME/ticketmaster/setti
 (`~/.config/…`) with every change and restored when the board reopens. A map named on the command
 line is never saved: while it stands, the map section keeps the selection saved before. A saved value
 that is no longer on the board is ignored until it comes back. There are no label or state filters.
+
+## Settings
+
+`c` opens the settings menu. `Enter` checks every field, applies the values at once and saves them
+per user and repo, under `repos` in the same `settings.json`:
+
+```json
+{"repos": {"github:owner/name": {"interval": 10, "fetch_limit": 100}}}
+```
+
+`Esc` closes the menu without changing anything. A field that is not valid stays open with a message
+saying why, and a failed save shows a warning while the new value still applies to this run.
+
+| Setting          | Values                       | Effect                                                    |
+| ---------------- | ---------------------------- | --------------------------------------------------------- |
+| Refresh interval | any positive number of seconds, no floor | ticket and session fetches reschedule at once; the status line's `every Ns` shows it |
+| Fetch limit      | a whole number, 1 or more; default 300 | the open maps the board reads, and the tickets it reads per map, from the next ticket fetch |
+
+The refresh interval is `--interval` for this run, then the repo's saved interval, then the
+default: 5 s, 30 s on Linear. `--interval` never overwrites the saved value; an interval changed in
+the menu is saved, also under `--interval`. A [rate limit](#providers) still slows the board on top
+of it.
+
+The fetch limit caps what the board reads from the tracker: at most that many open maps, and that
+many tickets per map, on every provider. A lower limit means fewer tracker requests on a large repo,
+so the board stays further from rate limits. The default fetch limit is not saved until it is
+changed. A fetch that reaches the limit does not hide tickets silently: the status line says what it
+cut off, e.g. `cut off at 300: open maps, #12's tickets`, until a fetch no longer reaches it. A
+closed map that an open spec names, or that the board was started on, comes on top of the open maps.
+On GitLab and Gitea/Forgejo, which have no sub-issues, a map's tickets are still found among every
+issue with a `wayfinder:` type label, so there the per-map limit trims the board, not the requests. A Linear
+map keeps its first sub-issues as Linear pages them.
 
 ## Wayfinding links
 
@@ -310,7 +354,7 @@ as; your own claimed tickets still start.
 Where a tracker has no dependency support, only body-listed blockers mark a ticket Blocked.
 
 GitHub's GraphQL budget is 5,000 points an hour. Every refresh makes one search for the maps and one
-query per open map (and per spec a map led to). Lengthen `--interval` if you run several boards at
+query per open map (and per spec a map led to). Lengthen the refresh interval if you run several boards at
 once or have many open maps.
 
 A Linear API key allows 2,500 requests an hour, shared by everything using its user's key, which is why
@@ -321,7 +365,7 @@ complexity cap per query.
 When the tracker rate-limits the board (GitHub's primary or secondary limit, an HTTP 429 from
 GitLab or Gitea/Forgejo, or Linear's HTTP 400 `RATELIMITED`), ticket fetches drop to once a minute and herdr session states to every
 10s; the status line shows `rate-limited · next fetch in 42s · secondary limit`, and `r` refreshes
-only the sessions. The first good fetch restores `--interval`, once: a second rate limit keeps the
+only the sessions. The first good fetch restores the refresh interval, once: a second rate limit keeps the
 board at once a minute until you restart it.
 
 Any tracker error while fetching (a rate limit, a 4xx such as `401 unauthorized`, a 5xx such as

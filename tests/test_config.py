@@ -156,3 +156,45 @@ def test_a_key_of_the_linear_team_asks_linear_for_that_map_also_when_closed():
     assert named_number(parse_args(["ENG-1"]).map, linear) is None  # another team's key: the board filter alone
     assert named_number(parse_args(["TM-1"]).map, github) is None
     assert named_number(parse_args(["#7"]).map, github) == 7 and named_number(None, linear) is None
+
+
+def test_the_interval_is_the_flag_then_the_repos_saved_one_then_the_providers_default():
+    from ticketmaster.config import board_interval
+
+    assert board_interval(12.0, {"interval": 20}, "github") == 12
+    assert board_interval(None, {"interval": 20}, "github") == 20
+    assert board_interval(None, {"interval": 0.5}, "linear") == 0.5  # no floor
+    assert board_interval(None, {}, "github") == 5 and board_interval(None, {}, "linear") == 30
+    for unusable in (0, -3, "abc", True, None, float("nan")):  # a hand-edited settings.json
+        assert board_interval(None, {"interval": unusable}, "linear") == 30
+
+
+@pytest.mark.parametrize("text", ["abc", "", "0", "-1", "nan", "inf"])
+def test_an_interval_must_be_a_positive_number(text):
+    from ticketmaster.config import parse_interval
+
+    with pytest.raises(ValueError):
+        parse_interval(text)
+
+
+def test_any_positive_interval_is_accepted():
+    from ticketmaster.config import parse_interval
+
+    assert (parse_interval("0.25"), parse_interval(" 10 "), parse_interval("120")) == (0.25, 10, 120)
+
+
+@pytest.mark.parametrize("text", ["abc", "", "2.5", "1e3", "+5", "1_000", "0", "-1"])
+def test_a_fetch_limit_must_be_a_positive_whole_number(text):
+    from ticketmaster.config import parse_fetch_limit
+
+    with pytest.raises(ValueError):
+        parse_fetch_limit(text)
+
+
+def test_the_fetch_limit_is_the_repos_saved_one_else_the_default():
+    from ticketmaster.config import board_fetch_limit, parse_fetch_limit
+
+    assert (parse_fetch_limit(" 50 "), parse_fetch_limit("1"), parse_fetch_limit("5000")) == (50, 1, 5000)
+    assert board_fetch_limit({"fetch_limit": 50}) == 50 and board_fetch_limit({}) == 300
+    for unusable in (0, -3, 2.5, "50", True, None):  # a hand-edited settings.json
+        assert board_fetch_limit({"fetch_limit": unusable}) == 300
