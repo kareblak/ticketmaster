@@ -21,7 +21,9 @@ ticketmaster $ARGUMENTS
   marked removable or kept with the reason; it changes nothing. Relay the list as printed.
 - `cleanup <map>`: removes what the dry run marks removable (worktree, herdr workspace and agents, merged
   branch), never forcing anything; it refuses an open map. Run it only when the user asks for the cleanup itself,
-  not just the list, and relay the summary as printed.
+  not just the list, and relay the summary as printed. Run from inside one of the map's worktrees, it removes that
+  worktree last, prints the summary, and then closes its own herdr workspace, which ends this session: make it the
+  session's last step, as there is no turn after it to relay anything.
 
 The first run, and the first after a plugin update, builds the plugin's venv, which takes a minute.
 
