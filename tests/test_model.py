@@ -178,7 +178,7 @@ def test_a_task_is_hitl_or_afk_by_the_first_of_those_words_in_its_body():
 
 def test_start_refusal_names_a_ticket_that_is_not_board_work_last():
     assert ticket().start_refusal("me") == (
-        "#1 is not board work: the board starts work on wayfinder maps and standalone specs")
+        "#1 is not board work: the board starts work on wayfinder maps, standalone specs and loose tickets")
     assert ticket(open_blockers=1).start_refusal("me") == "#1 is blocked by 1 open issue"
     assert ticket(labels=("wayfinder:map",)).start_refusal("me") is None
     assert ticket(**DECISION, labels=("wayfinder:grilling",)).start_refusal("me") is None
@@ -192,8 +192,8 @@ STANDALONE_TICKET = "## Parent\n\n#7\n\n## What to build\n\nx\n\n## Acceptance c
 def test_standalone_specs_and_their_tickets_are_board_work():
     assert ticket(number=7, body=STANDALONE).start_refusal("me") is None
     assert ticket(number=8, body=STANDALONE_TICKET, parent_number=7, lane_spec=7).start_refusal("me") is None
-    assert ticket(number=8, body=STANDALONE_TICKET).start_refusal("me") == (  # a loose ticket
-        "#8 is not board work: the board starts work on wayfinder maps and standalone specs")
+    assert ticket(number=8, body=STANDALONE_TICKET).start_refusal("me") == (  # neither in a spec lane nor loose
+        "#8 is not board work: the board starts work on wayfinder maps, standalone specs and loose tickets")
 
 
 def test_a_spec_with_tickets_is_refused_after_closed_blocked_and_claimed():

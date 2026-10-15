@@ -148,7 +148,7 @@ def github_board(monkeypatch, maps, subs=None, refs=None, named=None, specs=()):
 def lanes(tickets, named_map=None):
     from ticketmaster.model import build_board
 
-    return {lane.header.number: {**({"SPECS": [t.number for t in lane.specs]} if lane.specs else {}),
+    return {"loose" if lane.header is None else lane.header.number: {**({"SPECS": [t.number for t in lane.specs]} if lane.specs else {}),
                               **{c.name: [t.number for t in ts] for c, ts in lane.columns.items() if ts}}
             for lane in build_board(tickets, named_map).lanes}
 
@@ -1264,7 +1264,8 @@ def test_github_fills_each_spec_lane_from_its_children_and_a_closed_specs_from_i
     ]
     fake = FakeGitHub(monkeypatch, issues=[closed_spec], subs=subs, refs=refs, signed=signed)
     tickets = github.GitHubProvider("o/r").fetch(Query())
-    assert lanes(tickets) == {40: {"FRONTIER": [41, 42], "DECIDED": [43]}, 50: {"FRONTIER": [51, 54], "DECIDED": [52]}}
+    assert lanes(tickets) == {40: {"FRONTIER": [41, 42], "DECIDED": [43]}, 50: {"FRONTIER": [51, 54], "DECIDED": [52]},
+                              "loose": {"FRONTIER": [55]}}
     assert {t.number for t in tickets if t.has_tickets} == {40, 50}
     by_number = {t.number: t for t in tickets}
     assert (by_number[42].parent_number, by_number[42].lane_spec, by_number[42].spec_kind) == (40, 40, "impl")
@@ -1272,7 +1273,7 @@ def test_github_fills_each_spec_lane_from_its_children_and_a_closed_specs_from_i
     # one batched query: no call per spec.
     assert fake.asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
                           ("search", 'repo:o/r is:issue is:open in:body "Part of"'), signature_search(),
-                          ("issues", [40, 50, 51, 52, 54]), ("children", [40])]
+                          ("issues", [40, 50, 51, 52, 54, 55]), ("children", [40])]
 
 
 def test_github_signature_search_is_lean_and_capped(monkeypatch):
@@ -1286,3 +1287,41 @@ def test_github_signature_search_is_lean_and_capped(monkeypatch):
     assert "specs and tickets" in provider.cut_off
     search = next(q for q in queries if "ISSUE_ADVANCED" in q)
     assert "title" not in search and "assignees" not in search and "blockedBy" not in search
+
+
+def test_github_takes_a_ticket_without_a_spec_parent_as_loose_and_keeps_a_map_specs_ticket_on_the_map(monkeypatch):
+    def ticket(number, parent_line="", **kw):
+        return gh_issue(number, [], (f"## Parent\n\n{parent_line}\n\n" if parent_line else "") + TICKET_SIG, **kw)
+
+    map_spec = gh_issue(34, [], "Part of #1\n\n" + SPEC_SIG)
+    on_map_spec = ticket(74, "#34")
+    question = gh_issue(81, ["wayfinder:research"], "Part of #1", parent=1)
+    signed = [
+        ticket(71),  # no parent
+        ticket(72, "#80"),  # a plain issue
+        ticket(73, "#81"),  # a wayfinder ticket
+        on_map_spec,
+        ticket(75, parent=82, parent_labels=()),  # a plain issue as sub-issue parent
+        ticket(76, state="CLOSED", closed_at=ago(2)),
+        ticket(77, state="CLOSED", closed_at=ago(10)),  # closed before the window
+        ticket(78, "#404"),  # no such issue
+        ticket(79, "#83"),  # a ticket, no spec
+        ticket(83),
+        ticket(84, "#85"),  # a plain issue whose `Part of` names no map
+    ]
+    fake = FakeGitHub(monkeypatch, maps=[gh_issue(1, MAP_LABELS)], specs=[map_spec],
+                      issues=[gh_issue(80, [], "Plain."), gh_issue(82, [], "Plain too."), question,
+                              gh_issue(85, [], "Part of #80\n\nAn epic's child.")],
+                      subs={1: [question]}, refs={1: [map_spec], 34: [on_map_spec]}, signed=signed)
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert lanes(tickets) == {1: {"SPECS": [34], "FRONTIER": [81, 74]},
+                              "loose": {"FRONTIER": [71, 72, 73, 75, 78, 79, 83, 84], "DECIDED": [76]}}
+    by_number = {t.number: t for t in tickets}
+    assert {by_number[n].spec_kind for n in (71, 72, 73, 75, 76, 78, 79, 83, 84)} == {"impl"}
+    assert by_number[74].map_number == 1 and not by_number[74].loose
+    assert by_number[71].start_refusal("me") is None
+    # The loose tickets and the parents no search answered come in the one full fetch.
+    assert fake.asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
+                          ("search", 'repo:o/r is:issue is:open in:body "Part of"'), signature_search(),
+                          ("issues", [1, 80, 81, 82, 404, 85, 72, 73, 75, 78, 84, 71, 76, 79, 83]),
+                          ("children", [1, 34])]

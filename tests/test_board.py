@@ -71,21 +71,26 @@ def shown_lanes(app):
     lanes = {}
     for lane in app.query(".lane"):
         header = lane.query(Card).first()
-        lanes[header.ticket.number] = {cell.column.name: [c.ticket.number for c in cell.query(Card)]
+        lanes[number_of(header)] = {cell.column.name: [c.ticket.number for c in cell.query(Card)]
                                        for cell in lane.query(Cell) if cell.query(Card)}
     return lanes
 
 
+def number_of(card):
+    """The card's issue number; `loose` for the Loose lane's header, which has no issue."""
+    return "loose" if card.ticket is None else card.ticket.number
+
+
 def headers(app):
-    return [c.ticket.number for c in app.query(Card) if c.column is None]
+    return [number_of(c) for c in app.query(Card) if c.column is None]
 
 
 def card_text(app, number):
-    return str(next(c for c in app.query(Card) if c.ticket.number == number).render())
+    return str(next(c for c in app.query(Card) if number_of(c) == number).render())
 
 
 async def select(app, pilot, number):
-    next(c for c in app.query(Card) if c.ticket.number == number).focus()
+    next(c for c in app.query(Card) if number_of(c) == number).focus()
     await pilot.pause()
 
 
@@ -2597,6 +2602,112 @@ def test_the_map_named_on_the_command_line_hides_the_spec_lanes(tmp_path):
             await pilot.press("escape")
             await pilot.pause()
             assert headers(app) == [9, 20, 40, 70, 85]
+
+    run(scenario())
+
+
+# --- the Loose lane ----------------------------------------------------------------------------------
+
+
+def loose(number, title="", what="Fix the thing.", closed_days=None, **kw):
+    """A loose `/to-tickets` ticket: the ticket signature and no spec parent; closed `closed_days` ago when given."""
+    body = f"## What to build\n\n{what}\n\n## Acceptance criteria\n\n- [ ] Tests pass\n"
+    if closed_days is not None:
+        kw = dict(is_open=False, closed_at=datetime.now(timezone.utc) - timedelta(days=closed_days), **kw)
+    base = dict(number=number, title=title or f"Loose {number}", url=f"u{number}", is_open=True, body=body, loose=True)
+    return Ticket(**{**base, **kw})
+
+
+LOOSE_LANE = [
+    *SPEC_LANES, loose(90, what="Trim summaries."), loose(91, open_blockers=1, blocked_by=("#90",)),
+    loose(92, assignees=("bob",)), loose(93, closed_days=6), loose(94, closed_days=8),
+    loose(95, closed_days=1, not_planned=True),
+]
+
+
+def test_the_loose_lane_comes_last_with_its_header_counts_and_last_weeks_closed_tickets():
+    async def scenario():
+        app = BoardApp(FakeProvider(LOOSE_LANE), Query(), interval=60)
+        async with app.run_test(size=(200, 90)) as pilot:
+            await loaded(app, pilot)
+            assert headers(app) == [9, 20, 40, 70, 85, "loose"]
+            # #93 closed 6 days ago stays, #94 closed 8 days ago is gone
+            assert shown_lanes(app)["loose"] == {"BLOCKED": [91], "FRONTIER": [90], "CLAIMED": [92],
+                                                 "DECIDED": [93, 95]}
+            assert card_text(app, "loose").split("\n") == ["◇ Loose tickets  to-tickets output with no parent",
+                                                            "1 done · 3 open · 1 blocked"]  # #95 was canceled
+            assert chips_of(app, 90).startswith("impl ") and "◇ Loose tickets" in chips_of(app, 90)
+            assert "Trim summaries." in card_text(app, 90)
+            assert "2 maps · 3 specs · 16 tickets" in status_of(app)
+
+    run(scenario())
+
+
+def test_the_loose_lane_is_absent_when_it_has_nothing_to_show():
+    async def scenario():
+        app = BoardApp(FakeProvider([*SPEC_LANES, loose(94, closed_days=8)]), Query(), interval=60)
+        async with app.run_test(size=(200, 80)) as pilot:
+            await loaded(app, pilot)
+            assert headers(app) == [9, 20, 40, 70, 85]
+
+    run(scenario())
+
+
+def test_the_map_filter_hides_the_loose_lane_and_the_impl_filter_keeps_it(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path, Query(named_map=9), LOOSE_LANE)
+        async with app.run_test(size=(200, 90)) as pilot:
+            await loaded(app, pilot)
+            assert headers(app) == [9]
+            await pilot.press("escape")
+            await pilot.pause()
+            assert headers(app)[-1] == "loose"
+            await pilot.press("f")
+            await pilot.pause()
+            await pick(pilot, app, "impl")
+            assert headers(app) == [40, 70, "loose"]
+            await pick(pilot, app, "impl")
+            await pick(pilot, app, "spec")
+            assert "loose" not in headers(app)
+
+    run(scenario())
+
+
+def test_s_on_a_loose_ticket_starts_implement_and_the_loose_header_starts_nothing():
+    async def scenario():
+        bench = FakeBench()
+        app = BoardApp(FakeProvider(LOOSE_LANE), Query(), interval=60, workbench=bench, describe_start=build_prompt)
+        async with app.run_test(size=(200, 90)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, "loose")
+            for key in ("s", "enter"):
+                await pilot.press(key)
+                await pilot.pause()
+                assert not is_confirm(app)
+                assert notifications(app)[-1][0] == "The Loose lane has no issue; select one of its tickets"
+            await select(app, pilot, 90)
+            await pilot.press("s")
+            await pilot.pause()
+            assert is_confirm(app)
+            assert app.screen.detail == "/mattpocock-skills:implement u90\nunfocused (AFK)"
+            await pilot.press("y")
+            await loaded(app, pilot)
+            assert bench.calls == [("start", 90)]
+
+    run(scenario())
+
+
+def test_help_describes_the_loose_lane():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            text = " ".join(app.screen.text.plain.split())
+            assert "then spec lanes, by number, then the Loose lane" in text
+            assert ("The Loose lane (◇) holds /to-tickets tickets whose parent is no spec, or that have none: "
+                    "the open ones and those closed in the last 7 days") in text
 
     run(scenario())
 

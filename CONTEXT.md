@@ -43,4 +43,4 @@ _Avoid_: orphan ticket, unparented ticket
 
 **Board work**:
 What `s` starts a session on: wayfinder work (a map, a ticket on one, a map spec and its tickets) or standalone
-work (a standalone spec and the tickets in its spec lane). Anything else is refused.
+work (a standalone spec and the tickets in its spec lane), or a loose ticket. Anything else is refused.

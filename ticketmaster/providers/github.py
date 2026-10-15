@@ -4,7 +4,8 @@ The board is every open `wayfinder:map`, and every closed one an open spec still
 it only by a `Part of #<map>` line, the spec that links to it that way and the spec's implementation tickets:
 its sub-issues and the issues whose `## Parent` section names it. Body links show up as cross-references in
 the linked issue's timeline. Then every standalone spec with its tickets, found by their signatures: an open spec's
-tickets are its children the same way, a closed one's the open and recently closed tickets naming it.
+tickets are its children the same way, a closed one's the open and recently closed tickets naming it. Last, the
+loose tickets: the open and recently closed issues with the ticket signature that no lane took, whose parent is no spec.
 """
 
 from __future__ import annotations
@@ -14,9 +15,9 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import NamedTuple
 
-from ..model import Ticket, parse_time, part_of
-from . import (LIMIT, OPEN_MAPS, RECENTLY_CLOSED, SIGNATURE_HITS, IssueStates, NotFound, ProviderError, Query, Quota,
-               RateLimited, as_spec, blocker_ref, capped, closed_map_refs, in_spec_lane, is_signature_hit, is_spec,
+from ..model import Ticket, has_spec_signature, has_ticket_signature, parse_time, part_of, wayfinder_kinds
+from . import (LIMIT, LOOSE_TICKETS, OPEN_MAPS, RECENTLY_CLOSED, SIGNATURE_HITS, IssueStates, NotFound, ProviderError,
+               Query, Quota, RateLimited, as_spec, blocker_ref, capped, closed_map_refs, in_spec_lane, is_signature_hit, is_spec,
                is_spec_ticket, is_standalone_candidate, lane_cut, names_parent, resolve_maps, run_cli, run_json,
                tracker_error, under_spec, with_body_blockers, with_spec_tickets)
 
@@ -155,8 +156,10 @@ class GitHubProvider:
             wanted.append(query.named_map)
         hits = {t.number: t for t in self._signature_hits(cut)}
         wanted_specs = standalone_wanted(hits, set(open_maps), {s.number for s in specs})
+        known = {**{s.number: s for s in specs}, **hits}
+        loose, parents = loose_wanted(hits, known, set(open_maps), wanted_specs)
         full = {n: to_ticket(node, order=0, repo=self.repo) for n, node in
-                self._issues(open_maps + wanted + wanted_specs.all()).items()}
+                self._issues(open_maps + wanted + wanted_specs.all() + loose + parents).items()}
         open_specs, closed_specs, their_tickets = wanted_specs.open, wanted_specs.closed, wanted_specs.tickets
         maps = [full[n] for n in open_maps if n in full]
         maps += [full[n] for n in wanted if n in full and full[n].is_wayfinder_map]
@@ -177,7 +180,12 @@ class GitHubProvider:
             if spec.number not in {t.number for t in tickets}:
                 named = [full[n] for n in their_tickets if n in full]
                 tickets += self._spec_lane(spec, children, named, {t.number for t in tickets}, limit, cut)
-        tickets = with_body_blockers(resolve_maps(tickets, self._issue, tuple(full.values())), self.states)
+        tickets = resolve_maps(tickets, self._issue, tuple(full.values()))
+        taken = {t.number for t in tickets}
+        found = [replace(full[n], loose=True) for n in loose
+                 if n in full and n not in taken and not has_spec_parent(full[n], {**known, **full}, any_map)]
+        tickets += capped(found, limit, LOOSE_TICKETS, cut)
+        tickets = with_body_blockers(tickets, self.states)
         self.cut_off = cut
         return tickets
 
@@ -408,6 +416,26 @@ def standalone_wanted(hits: dict[int, Ticket], open_maps: set[int], part_of_spec
     maps = [n for p in closed if p in hits and (n := part_of(hits[p].body)) is not None]
     tickets = [n for n, t in hits.items() if t.spec_number in closed and is_spec_ticket(t, t.spec_number)]
     return StandaloneWanted(open_specs, closed, maps, tickets)
+
+
+def loose_wanted(hits: dict[int, Ticket], known: dict[int, Ticket], open_maps: set[int],
+                 specs: StandaloneWanted) -> tuple[list[int], list[int]]:
+    """From the signature search hits: the loose ticket candidates, the ticket signature hits whose parent is no
+    spec a search answered, and the parents of theirs that neither a search answered nor the full fetch reads already,
+    which the full fetch reads to tell whether they are specs."""
+    candidates = [n for n, t in hits.items() if has_ticket_signature(t.body) and not has_spec_signature(t.body)
+                  and t.spec_number not in specs.open and not has_spec_parent(t, known, open_maps)]
+    read = set(known) | open_maps | set(specs.all())
+    parents = [p for n in candidates if (p := hits[n].spec_number) is not None and p not in read]
+    return candidates, list(dict.fromkeys(parents))
+
+
+def has_spec_parent(ticket: Ticket, issues: dict[int, Ticket], maps: set[int]) -> bool:
+    """The ticket's parent, among `issues`, is a spec: a standalone spec (the spec signature) or a map's spec (a
+    `Part of` line naming one of `maps`), with no `wayfinder:` label. A parent not found is none."""
+    parent = issues.get(ticket.spec_number) if ticket.spec_number is not None else None
+    return (parent is not None and not wayfinder_kinds(parent.labels)
+            and (has_spec_signature(parent.body) or part_of(parent.body) in maps))
 
 
 def new_tickets(nodes: list[dict], taken: set[int], repo: str, links=lambda node: True) -> list[Ticket]:
