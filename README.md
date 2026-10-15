@@ -1,9 +1,10 @@
 # ticketmaster
 
-A live, read-only swimlane board of [wayfinder](https://github.com/mattpocock/skills) maps for
-[herdr](https://herdr.dev), packaged as a Claude Code plugin. Run `/ticketmaster` in a Claude session
-inside herdr and the board opens in a pane beside it. Every open map is a lane, and its decision
-tickets sit in Blocked · Frontier · Claimed · Decided. `s` starts `/wayfinder` for a ticket in its
+A live, read-only swimlane board of [wayfinder](https://github.com/mattpocock/skills) maps and
+standalone specs for [herdr](https://herdr.dev), packaged as a Claude Code plugin. Run `/ticketmaster` in a
+Claude session inside herdr and the board opens in a pane beside it. Every open map is a lane, and its
+decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub, so is every standalone spec
+written by `/to-spec`, with its `/to-tickets` tickets. `s` starts `/wayfinder` for a ticket in its
 own git worktree, opened as a herdr workspace with Claude running in it as a herdr agent, and each
 card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
 tracker or the repo, and never removes a worktree.
@@ -78,10 +79,11 @@ from unpushed commits, which a squash merge with its remote branch deleted leave
 and runs inside herdr.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
-its spec and the spec's implementation tickets (see [Lanes and columns](#lanes-and-columns)).
-Issues that are not wayfinder work are not shown. `map` (`42`, `#42`, the issue's URL, or a tracker
+its spec and the spec's implementation tickets, and on GitHub every standalone spec written by `/to-spec`
+as a lane of its own, with its `/to-tickets` tickets (see [Lanes and columns](#lanes-and-columns)).
+Other issues are not shown. `map` (`42`, `#42`, the issue's URL, or a tracker
 key like `TM-1` or a Linear issue URL) opens the full board with the [map filter](#filters) preset to
-that map, for this run only; `Esc` clears it and shows every open map. A key matches the map card
+that map, for this run only, which hides the spec lanes; `Esc` clears it and shows every lane. A key matches the map card
 whose tracker key it is, never issue number 1; a key no map carries shows an empty board. A closed map
 whose spec is still open stays on the board in full. Any other closed map shows only when you name it by
 number or URL, or on Linear by its team's key, as its header card alone.
@@ -172,10 +174,10 @@ and the board narrows as you go. Every value comes from the tracker data on the 
 
 | Section   | Values                                                    | A card shows when            |
 | --------- | --------------------------------------------------------- | ---------------------------- |
-| Type      | `research`, `prototype`, `grilling`, `task`, `spec`, `impl` (those on the board) | its type is selected; `spec` keeps a lane whose map card carries a spec |
+| Type      | `research`, `prototype`, `grilling`, `task`, `spec`, `impl` (those on the board) | its type is selected; `spec` keeps a lane whose map card carries a spec, and a spec lane |
 | HITL/AFK  | `HITL`, `AFK`                                             | its wayfinder mode is selected |
 | Assignee  | `me` (your tracker login), `unassigned`, `anyone` (the default); one at a time | it is assigned to you, or to nobody |
-| Map       | each lane's map                                           | its lane's map is selected   |
+| Map       | each map lane's map                                       | its lane's map is selected; spec lanes hide while a map is selected |
 | Author    | each card's author                                        | one of them opened it        |
 
 Values in a section are alternatives; a card must pass every section with a selection, and the `/`
@@ -255,7 +257,9 @@ to_tickets_command = "/to-tickets"        # default /mattpocock-skills:to-ticket
 
 ## Lanes and columns
 
-Each open `wayfinder:map` is a lane, ordered by issue number. Its header is the map card: the map's
+Map lanes come first, then spec lanes, each ordered by issue number.
+
+Each open `wayfinder:map` is a map lane. Its header is the map card (`◆`, cyan): the map's
 title and its counts, **decided** (closed tickets, less those out of scope), **open** and
 **blocked**. A closed map keeps its full lane while any of its spec or implementation tickets is
 open, since the decisions are made but the work goes on. Otherwise it shows only when named
@@ -265,6 +269,18 @@ then the spec's implementation tickets, each in the first column whose rule matc
 is no card: the map card shows it on a line of its own, `▣ #<spec> open` (or `closed`) with its
 tickets' counts, `N done · N open · N blocked` (done is closed, less canceled), or `no tickets yet`,
 and the badges of the spec's sessions. The map card's own counts are of its decision tickets only.
+
+On GitHub, each standalone spec is a spec lane. A standalone spec carries the spec **signature**, the
+headings `/to-spec` writes, `## Problem Statement` and `## Solution`, has no `Part of #<map>` line naming a
+map and no `wayfinder:` label. Both headings must be there, at `##` level, in any case; an issue that
+only mentions them in prose does not count, and one that also carries the ticket signature is a spec.
+Its header is the spec card (`▣`, magenta): `▣ #<n> <title>`, `spec closed` once it is closed, its
+assignees, and `spec · N done · N open · N blocked` (done is closed, less canceled). Its tickets are the
+issues with the ticket signature `/to-tickets` writes, `## What to build` and `## Acceptance criteria`,
+whose sub-issue parent, else first `## Parent` reference (`#<n>` or the issue's URL), is the spec. They
+fill the same four columns, every closed one in Decided however old. The lane stays while the spec or any
+of its tickets is open, so a closed spec with an open ticket keeps its lane; it leaves once all are
+closed. A ticket whose parent is a map spec stays in the map's lane.
 
 | Column   | Rule                                                                                   |
 | -------- | -------------------------------------------------------------------------------------- |
@@ -278,16 +294,17 @@ column. Within a column, cards sort by the map's sub-issue order, then issue num
 Frontier card is the one `/wayfinder <map>` would pick.
 
 A ticket card shows its number (its key, `TM-<n>`, on Linear) and title, the first ~90 characters of the body (the `## Question`
-section when it has one), and then:
+section when it has one, else the `## What to build` section), and then:
 
 - its type and who it needs: `HITL` (you at the keyboard) for `grilling` and `prototype`, `AFK` (the
   agent alone) for `research`, and for a `task` whichever of the words `HITL` / `AFK` its body names
-  first (no badge when it names neither); `impl` for a spec's implementation ticket
+  first (no badge when it names neither); `impl` for a spec's implementation ticket, a map spec's or a
+  standalone spec's
 - `PR open` on an open card when an open pull or merge request will close its issue
 - `out of scope`, in Decided
 - its open blockers (`⛔ #3 other/lib#12`, `⛔ TM-3` on Linear)
 - its assignees (`@kare`; Linear's display name, `@kaare.blakstad`)
-- its map's title (`◆ Pick a stack`)
+- its lane's title (`◆ Pick a stack` for a map, `▣ Board shows standalone work` for a spec)
 
 ## Providers
 

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ticketmaster"
 dynamic = ["version"]
-description = "Live swimlane board of wayfinder maps on GitHub, GitLab, Gitea/Forgejo and Linear in herdr, starting each ticket in its own worktree workspace with Claude Code"
+description = "Live swimlane board of wayfinder maps on GitHub, GitLab, Gitea/Forgejo and Linear, and of standalone specs on GitHub, in herdr, starting each ticket in its own worktree workspace with Claude Code"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = ["textual>=0.80,<9"]

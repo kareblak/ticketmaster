@@ -1,4 +1,4 @@
-"""Live Textual swimlane board: a lane per wayfinder map, its tickets in four columns."""
+"""Live Textual swimlane board: a lane per wayfinder map and per standalone spec, its tickets in four columns."""
 
 from __future__ import annotations
 
@@ -24,7 +24,8 @@ from textual.widgets import Button, Footer, Input, Label, Static
 from .config import (board_fetch_limit, board_interval, load_settings, parse_fetch_limit, parse_interval,
                      save_settings, seconds_text)
 from .herdr import HerdrError, Session
-from .model import COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, SpecProgress, Ticket, build_board, frontier
+from .model import (COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, LaneKind, SpecProgress, Ticket, build_board,
+                    frontier)
 from .providers import ErrorNotice, Provider, ProviderError, Query, RateLimited, error_notice
 from .start import branch_name, worktree_name
 
@@ -36,6 +37,8 @@ COLUMN_COLORS = {
     Column.DECIDED: "grey50",
 }
 MAP_COLOR = "cyan"
+SPEC_COLOR = "magenta"  # a standalone spec's lane
+LANE_GLYPHS = {LaneKind.MAP: "◆", LaneKind.SPEC: "▣"}
 STATUS_STYLES = {  # herdr agent states
     "working": ("● working", "bold yellow"),
     "blocked": ("⚠ needs you", "bold red"),
@@ -66,8 +69,9 @@ def session_lines(sessions: list[Session], starting: bool, claimed: bool = False
 
 
 def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
-                map_title: str = "", out_of_scope: bool = False, claimed: bool = False) -> Text:
-    """A ticket: type · HITL/AFK (or spec/impl), an open closing PR, assignee, open blockers and its map's title."""
+                lane_title: str = "", out_of_scope: bool = False, claimed: bool = False, glyph: str = "◆") -> Text:
+    """A ticket: type · HITL/AFK (or spec/impl), an open closing PR, assignee, open blockers and its lane's title
+    after the lane's `glyph`."""
     text = session_lines(sessions, starting, claimed)
     text.append(f"{ticket.ref} ", style=f"bold {COLUMN_COLORS[column]}")
     text.append(ticket.title, style="bold")
@@ -92,21 +96,24 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         chips.append(f"⛔ {' '.join(ticket.blocked_by) or ticket.open_blockers} ", style="red")
     if ticket.assignees:
         chips.append(" ".join("@" + a for a in ticket.assignees) + " ", style="italic cyan")
-    if map_title:
-        chips.append(f"◆ {map_title}", style="grey62")
+    if lane_title:
+        chips.append(f"{glyph} {lane_title}", style="grey62")
     if chips.plain:
         text.append("\n")
         text.append(chips)
     return text
 
 
-def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False, claimed: bool = False,
+def render_lane_header(lane: Lane, sessions: list[Session] = (), starting: bool = False, claimed: bool = False,
                spec_sessions: dict[int, list[Session]] | None = None, spec_starting: set[int] = frozenset()) -> Text:
-    """A lane's header: the map's title and its decided / open / blocked counts, then a line per spec with its
-    tickets' done / open / blocked counts, or that it has none yet, and its sessions' badges."""
+    """A lane's header. A map's: its title and its decided / open / blocked counts, then a line per spec with its
+    tickets' done / open / blocked counts, or that it has none yet, and its sessions' badges. A standalone spec's: its
+    title, whether it is closed, its assignees and its tickets' done / open / blocked counts."""
     text = session_lines(sessions, starting, claimed)
-    text.append(f"◆ {lane.map.ref} ", style=f"bold {MAP_COLOR}")
-    text.append(lane.map.title, style="bold")
+    if not lane.is_map:
+        return render_spec_lane(lane, text)
+    text.append(f"◆ {lane.header.ref} ", style=f"bold {MAP_COLOR}")
+    text.append(lane.header.title, style="bold")
     if lane.collapsed:
         text.append("  closed", style="grey50")
     progress = lane.progress
@@ -123,6 +130,21 @@ def render_map(lane: Lane, sessions: list[Session] = (), starting: bool = False,
         if badges.plain:
             text.append("\n")
             text.append(badges)
+    return text
+
+
+def render_spec_lane(lane: Lane, text: Text) -> Text:
+    """A spec lane's header after `text` (its sessions' badges): the spec, `spec closed` once it is, its assignees,
+    then its tickets' done / open / blocked counts."""
+    spec, progress = lane.header, lane.progress
+    text.append(f"▣ {spec.ref} ", style=f"bold {SPEC_COLOR}")
+    text.append(spec.title, style="bold")
+    if not spec.is_open:
+        text.append("  spec closed", style="grey50")
+    if spec.assignees:
+        text.append("  " + " ".join("@" + a for a in spec.assignees), style="italic cyan")
+    text.append(f"\nspec · {progress.done} done · {progress.open} open · {progress.blocked} blocked",
+                style=f"bold {SPEC_COLOR}")
     return text
 
 
@@ -164,8 +186,8 @@ def passes_filters(ticket: Ticket, filters: dict[str, dict[str, str]], known: di
 
 
 def known_values(board: Board) -> dict[str, set[str]]:
-    """The types, modes and authors the lanes' cards carry, which the picker offers."""
-    cards = [ticket for lane in board.lanes for ticket in lane.tickets()]
+    """The types, modes and authors the lanes' cards carry, a spec lane's header included, which the picker offers."""
+    cards = [ticket for lane in board.lanes for ticket in (*lane.spec_cards(), *lane.columns_tickets())]
     return {
         TYPE: {kind for t in cards if (kind := card_type(t))},
         MODE: {t.mode for t in cards if t.mode},
@@ -546,16 +568,23 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     text.append("  Click selects a card, double-click acts like Enter.\n", style="dim")
 
     heading("Lanes")
-    text.append("  Each open wayfinder map is a lane, headed by its map card: its decided (closed, not out\n"
-                "  of scope), open and blocked tickets. Naming a map (ticketmaster <map>, a number or a\n"
-                "  tracker key) filters this run's board to it, unsaved; Esc shows every open map again.\n"
+    text.append("  Map lanes come first, by number, then spec lanes, by number. A map lane is an open\n"
+                "  wayfinder map, headed by its map card (◆): its decided (closed, not out of scope), open\n"
+                "  and blocked tickets. Naming a map (ticketmaster <map>, a number or a tracker key) filters\n"
+                "  this run's board to it, unsaved, and hides the spec lanes; Esc shows every lane again.\n"
                 "  A map named by number shows also when closed, as its header card\n"
                 f"  alone.{'  ← this board' if query.named_map else ''}\n"
                 "  A spec whose first line is `Part of #<map>` is a line of the map card, ▣ #<spec> open or\n"
                 "  closed, with its tickets' done (closed, less canceled), open and blocked counts, or no\n"
                 "  tickets yet. Its implementation tickets (sub-issues, or a `## Parent` section naming the\n"
                 "  spec) sit in the map's lane, tagged impl. The spec type filter keeps a lane with a spec.\n"
-                "  Other issues are not shown. PR open: an open pull request will close the card's issue.\n")
+                "  A spec lane is a standalone spec, from /to-spec with no map link: `## Problem Statement`\n"
+                "  and `## Solution`, no wayfinder: label. Its header card (▣) shows the spec's assignees,\n"
+                "  spec closed once it is, and `spec · N done · N open · N blocked`. Its tickets, from\n"
+                "  /to-tickets (`## What to build` and `## Acceptance criteria`, the spec as sub-issue parent\n"
+                "  or in `## Parent`), fill the columns, tagged impl; the spec is tagged spec. The lane stays\n"
+                "  while the spec or any of its tickets is open.\n"
+                "  PR open: an open pull request will close the card's issue.\n")
 
     heading("Columns (the first rule that matches)")
     for column, rule in [
@@ -864,26 +893,26 @@ class BoardApp(App):
         selected = self.filters[section]
         chosen = [value for value, _ in self._picker_values(section) if value in selected]
         if section == MAP:
-            on_board = {value for lane in self.board.lanes for value in map_ids(lane.map)}
+            on_board = {value for lane in self.board.lanes if lane.is_map for value in map_ids(lane.header)}
             preset = self.map_preset is not None and selected == self.map_preset
             chosen += [value for value in selected if value not in chosen and (preset or value in on_board)]
         return chosen
 
     def _shown_lanes(self) -> list[Lane]:
-        """The lanes the map filter keeps; while cards are filtered, only those with a card that passes, and a named
-        closed map, which has no cards to pass."""
+        """The lanes the map filter keeps, which are map lanes only; while cards are filtered, only those with a card
+        that passes (a spec lane's header is its spec card), and a named closed map, which has no cards to pass."""
         maps = set(self._chosen(MAP))
-        lanes = [lane for lane in self.board.lanes if not maps or maps & map_ids(lane.map)]
+        lanes = [lane for lane in self.board.lanes if not maps or lane.is_map and maps & map_ids(lane.header)]
         if self.needle or any(self.filters[section] for section in CARD_FILTERS):
-            lanes = [lane for lane in lanes if lane.collapsed or any(self._passes(spec) for spec in lane.specs)
+            lanes = [lane for lane in lanes if lane.collapsed or any(self._passes(spec) for spec in lane.spec_cards())
                      or any(self._visible(lane, column) for column in COLUMN_ORDER)]
         return lanes
 
     def _passes(self, ticket: Ticket) -> bool:
         return matches(ticket, self.needle) and passes_filters(ticket, self.filters, self.known, self.viewer)
 
-    def _lane(self, map_ticket: Ticket) -> Lane | None:
-        return next((lane for lane in self.board.lanes if lane.map.number == map_ticket.number), None)
+    def _lane(self, header: Ticket) -> Lane | None:
+        return next((lane for lane in self.board.lanes if lane.header.number == header.number), None)
 
     def _render_board(self) -> None:
         container = self.query_one("#lanes", VerticalScroll)
@@ -892,11 +921,12 @@ class BoardApp(App):
         container.remove_children()
         self.grid, lanes = [], []
         for lane in self._shown_lanes():
-            header = Card(lane.map, None, render_map(lane, self.sessions.get(lane.map.number, []),
-                                                     lane.map.number in self.starting, self._claimed(lane.map),
-                                                     self.sessions, self.starting))
+            head = lane.header
+            header = Card(head, None, render_lane_header(lane, self.sessions.get(head.number, []), head.number in self.starting,
+                                                 self._claimed(head), self.sessions, self.starting))
             cells = [[Card(t, column, render_card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
-                                                  lane.map.title, t.number in lane.out_of_scope, self._claimed(t)))
+                                                  head.title, t.number in lane.out_of_scope, self._claimed(t),
+                                                  LANE_GLYPHS[lane.kind]))
                       for t in self._visible(lane, column)] for column in COLUMN_ORDER]
             self.grid.append((header, cells))
             if lane.collapsed:
@@ -908,7 +938,7 @@ class BoardApp(App):
             lanes.append(Vertical(header, Horizontal(*row, classes="lane-row"), classes="lane"))
         if not lanes and self.last_ok:
             empty = ("No cards match the filters; Esc clears them." if self.board.lanes
-                     else f"No open wayfinder maps in {self.provider.repo}.")
+                     else f"No open wayfinder maps or specs in {self.provider.repo}.")
             lanes.append(Static(empty, id="empty"))
         container.mount_all(lanes)
         for column in COLUMN_ORDER:
@@ -940,8 +970,10 @@ class BoardApp(App):
         status = Text(self.sub_title, style="bold")
         if self.last_ok:
             status.append(" · ")
-            maps, tickets = len(self.board.lanes), self.board.ticket_count()
-            status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)} · {tickets} tickets")
+            maps = sum(lane.is_map for lane in self.board.lanes)
+            specs, tickets = len(self.board.lanes) - maps, self.board.ticket_count()
+            status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)}"
+                          + (f" · {specs} spec{'s' * (specs != 1)}" if specs else "") + f" · {tickets} tickets")
             if not self.pacer.limited:
                 status.append(f" · every {seconds_text(self.interval)}s")
             if self.cut_off:
@@ -1220,7 +1252,8 @@ class BoardApp(App):
         if section == ASSIGNEE:
             return [(value, value) for value in ASSIGNEES]
         if section == MAP:
-            return [(map_value(lane.map), f"{lane.map.ref} {lane.map.title}") for lane in self.board.lanes]
+            return [(map_value(lane.header), f"{lane.header.ref} {lane.header.title}") for lane in self.board.lanes
+                    if lane.is_map]
         known = self.known.get(section, set())
         if section == AUTHOR:
             return [(author, author) for author in sorted(known, key=str.lower)]

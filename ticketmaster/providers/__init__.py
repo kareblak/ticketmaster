@@ -7,12 +7,12 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from typing import Literal, Protocol
 
-from ..model import (WAYFINDER_TYPES, Ticket, lane_tickets, parent_ref, parent_refs, parse_blockers, part_of,
-                     wayfinder_kinds)
+from ..model import (WAYFINDER_TYPES, Ticket, has_spec_signature, has_ticket_signature, lane_tickets, parent_ref,
+                     parent_refs, parse_blockers, part_of, wayfinder_kinds)
 
 TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo", "linear": "Linear"}
 
@@ -103,7 +103,8 @@ LIMIT = 300
 @dataclass(frozen=True)
 class Query:
     """What a board shows: every open wayfinder map with its tickets, every closed map with an open spec, plus
-    `named_map` when that map is closed; at most `limit` open maps, and `limit` tickets per map."""
+    `named_map` when that map is closed, and every standalone spec with an open spec or ticket; at most `limit` open
+    maps, and `limit` tickets per map or spec."""
 
     named_map: int | None = None
     limit: int = LIMIT
@@ -171,8 +172,39 @@ def closed_map_refs(candidates: list[Ticket], shown: set[int], key: str | None =
     return sorted(refs - shown)
 
 
-# What a fetch cut off at the limit, as the board's status line names it: the open maps, or a map's tickets.
+# What a fetch cut off at the limit, as the board's status line names it: the open maps, the signature search's
+# hits, or a map's or spec's tickets.
 OPEN_MAPS = "open maps"
+SIGNATURE_HITS = "specs and tickets"
+
+# How long a closed spec or ticket stays a signature search hit.
+RECENTLY_CLOSED = timedelta(days=7)
+
+
+def is_signature_hit(ticket: Ticket, since: datetime) -> bool:
+    """A signature search hit the board keeps: the spec or ticket signature in its body (the search only narrows), no
+    `wayfinder:` label, and open or closed since `since`."""
+    recent = ticket.is_open or ticket.closed_at is not None and ticket.closed_at >= since
+    signed = has_spec_signature(ticket.body) or has_ticket_signature(ticket.body)
+    return recent and signed and not wayfinder_kinds(ticket.labels)
+
+
+def is_standalone_candidate(ticket: Ticket, maps: set[int]) -> bool:
+    """The spec signature, no `wayfinder:` label, and no `Part of` line naming one of `maps`."""
+    return (has_spec_signature(ticket.body) and not wayfinder_kinds(ticket.labels)
+            and part_of(ticket.body, ticket.team_key) not in maps)
+
+
+def is_spec_ticket(ticket: Ticket, spec: int | None) -> bool:
+    """The ticket signature, and not the spec one, with `spec` as its sub-issue parent, else its first `## Parent`
+    reference."""
+    return (spec is not None and ticket.spec_number == spec and has_ticket_signature(ticket.body)
+            and not has_spec_signature(ticket.body) and not wayfinder_kinds(ticket.labels))
+
+
+def in_spec_lane(tickets: list[Ticket], spec: Ticket) -> list[Ticket]:
+    """The standalone spec is each ticket's parent, and their lane's."""
+    return [replace(with_map(t, spec), lane_spec=spec.number) for t in tickets]
 
 
 def lane_cut(map_ticket: Ticket) -> str:

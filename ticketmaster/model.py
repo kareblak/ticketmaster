@@ -1,4 +1,5 @@
-"""Provider-neutral ticket model, and the swimlane board: one lane per wayfinder map, in four columns."""
+"""Provider-neutral ticket model, and the swimlane board: a lane per wayfinder map and per standalone spec, in four
+columns."""
 
 from __future__ import annotations
 
@@ -64,6 +65,9 @@ class Ticket:
     branch_name: str | None = None
     # A spec with an implementation ticket, open or closed, so it has been broken into tickets already.
     has_tickets: bool = False
+    # The standalone spec whose lane holds this ticket (its sub-issue parent, else its `## Parent` section), which
+    # the provider resolved; None for any other ticket.
+    lane_spec: int | None = None
 
     @property
     def team_key(self) -> str | None:
@@ -124,11 +128,21 @@ class Ticket:
 
     @property
     def spec_kind(self) -> str | None:
-        """`spec` for the spec a map led to (`Part of #<map>`), `impl` for one of its implementation tickets, else
-        None; either is untyped and has a map the provider resolved."""
-        if self.map_number is None or wayfinder_kinds(self.labels):
+        """`spec` for the spec a map led to (`Part of #<map>`) and for a standalone spec, `impl` for an implementation
+        ticket of either, else None. A map's are untyped and have a map the provider resolved; a standalone spec's
+        ticket carries the ticket signature and the spec the provider resolved as `lane_spec`."""
+        if wayfinder_kinds(self.labels):
             return None
-        return "spec" if part_of(self.body, self.team_key) == self.map_number else "impl"
+        if self.map_number is not None:
+            return "spec" if part_of(self.body, self.team_key) == self.map_number else "impl"
+        if self.is_standalone_spec:
+            return "spec"
+        return "impl" if self.lane_spec is not None and has_ticket_signature(self.body) else None
+
+    @property
+    def is_standalone_spec(self) -> bool:
+        """The spec signature, no map and no `wayfinder:` label; a body with both signatures is a spec."""
+        return self.map_number is None and not wayfinder_kinds(self.labels) and has_spec_signature(self.body)
 
     @property
     def spec_number(self) -> int | None:
@@ -155,6 +169,25 @@ class Ticket:
     @property
     def summary(self) -> str:
         return summarize(self.body)
+
+
+def _heading(title: str) -> re.Pattern[str]:
+    """A `##` heading, any case, alone on its line."""
+    words = r"[ \t]+".join(map(re.escape, title.split()))
+    return re.compile(rf"^##[ \t]*{words}[ \t]*$", re.MULTILINE | re.IGNORECASE)
+
+
+# The signatures: the heading pairs `/to-spec` and `/to-tickets` write, both of a pair required.
+SPEC_SIGNATURE = (_heading("Problem Statement"), _heading("Solution"))
+TICKET_SIGNATURE = (_heading("What to build"), _heading("Acceptance criteria"))
+
+
+def has_spec_signature(body: str) -> bool:
+    return all(heading.search(body or "") for heading in SPEC_SIGNATURE)
+
+
+def has_ticket_signature(body: str) -> bool:
+    return all(heading.search(body or "") for heading in TICKET_SIGNATURE)
 
 
 def wayfinder_kinds(labels: tuple[str, ...]) -> list[str]:
@@ -298,23 +331,42 @@ def classify(ticket: Ticket) -> Column:
     return Column.FRONTIER
 
 
+class LaneKind(Enum):
+    MAP = "map"
+    SPEC = "spec"
+
+
 @dataclass
 class Lane:
-    """A map and its decision tickets and implementation tickets by column; its specs are no cards but lines of the
-    map card, each with its tickets' progress. A closed map with no open spec or implementation ticket is collapsed
-    to its header. `progress` counts the decision tickets only."""
+    """A header issue and its tickets by column. A map lane holds the map's decision tickets and implementation
+    tickets; its specs are no cards but lines of the map card, each with its tickets' progress, and `progress` counts
+    the decision tickets only. A closed map with no open spec or implementation ticket is collapsed to its header. A
+    spec lane holds a standalone spec's tickets, and `progress` counts them."""
 
-    map: Ticket
+    header: Ticket
+    kind: LaneKind = LaneKind.MAP
     columns: dict[Column, list[Ticket]] = field(default_factory=lambda: {c: [] for c in COLUMN_ORDER})
-    progress: MapProgress = MapProgress(0, 0, 0)
+    progress: MapProgress | SpecProgress = MapProgress(0, 0, 0)
     out_of_scope: set[int] = field(default_factory=set)
     collapsed: bool = False
     specs: list[Ticket] = field(default_factory=list)
     spec_counts: dict[int, SpecProgress] = field(default_factory=dict)
 
+    @property
+    def is_map(self) -> bool:
+        return self.kind is LaneKind.MAP
+
     def tickets(self) -> list[Ticket]:
-        """The map's specs, then its cards column by column."""
-        return [*self.specs, *(ticket for tickets in self.columns.values() for ticket in tickets)]
+        """A map lane's specs, then the lane's cards column by column."""
+        return [*self.specs, *self.columns_tickets()]
+
+    def columns_tickets(self) -> list[Ticket]:
+        """The lane's cards, column by column."""
+        return [ticket for tickets in self.columns.values() for ticket in tickets]
+
+    def spec_cards(self) -> list[Ticket]:
+        """The specs the lane shows outside its columns: a map card's spec lines, or a spec lane's header."""
+        return self.specs if self.is_map else [self.header]
 
     @property
     def ticketless_spec(self) -> Ticket | None:
@@ -328,12 +380,12 @@ class Board:
     lanes: list[Lane] = field(default_factory=list)
 
     def ticket_count(self) -> int:
-        """The lanes' ticket cards, not counting the maps."""
+        """The lanes' ticket cards, not counting the headers."""
         return sum(len(lane.tickets()) for lane in self.lanes)
 
     def tickets(self) -> list[Ticket]:
-        """Every card: each lane's map, then its tickets."""
-        return [ticket for lane in self.lanes for ticket in (lane.map, *lane.tickets())]
+        """Every card: each lane's header, then its tickets."""
+        return [ticket for lane in self.lanes for ticket in (lane.header, *lane.tickets())]
 
 
 def is_live_map(map_ticket: Ticket, tickets: list[Ticket]) -> bool:
@@ -341,8 +393,15 @@ def is_live_map(map_ticket: Ticket, tickets: list[Ticket]) -> bool:
     return map_ticket.is_open or any(t.is_open and t.spec_kind and t.map_number == map_ticket.number for t in tickets)
 
 
+def standalone_tickets(spec: Ticket, tickets: list[Ticket]) -> list[Ticket]:
+    """The standalone spec's tickets, in spec order."""
+    return sorted((t for t in tickets if t.lane_spec == spec.number and t.spec_kind == "impl"),
+                  key=lambda t: (t.order, t.number))
+
+
 def build_board(tickets: list[Ticket], named_map: int | None = None) -> Board:
-    """A lane per live map, by number, plus the named map when it is closed; anything else is not shown."""
+    """A lane per live map, by number, plus the named map when it is closed; then a lane per standalone spec, by
+    number, while the spec or any of its tickets is open. Anything else is not shown."""
     live = {t.number for t in tickets if t.is_wayfinder_map and is_live_map(t, tickets)}
     maps = sorted((t for t in tickets if t.is_wayfinder_map and (t.number in live or t.number == named_map)),
                   key=lambda t: t.number)
@@ -359,17 +418,28 @@ def build_board(tickets: list[Ticket], named_map: int | None = None) -> Board:
                 if ticket.spec_kind != "spec":
                     lane.columns[classify(ticket)].append(ticket)
         board.lanes.append(lane)
+    for spec in sorted((t for t in tickets if t.is_standalone_spec), key=lambda t: t.number):
+        children = standalone_tickets(spec, tickets)
+        if not (spec.is_open or any(t.is_open for t in children)):
+            continue
+        lane = Lane(spec, LaneKind.SPEC, progress=spec_progress(spec, tickets))
+        for ticket in children:
+            lane.columns[classify(ticket)].append(ticket)
+        board.lanes.append(lane)
     return board
 
 
-_QUESTION = re.compile(r"^##\s*Question\s*$(?P<text>.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
+# The section a card's summary prefers: a wayfinder ticket's question, else what a `/to-tickets` ticket builds.
+_SUMMARY_SECTIONS = [re.compile(rf"^##\s*{title}\s*$(?P<text>.*?)(?=^##\s|\Z)", re.MULTILINE | re.DOTALL | re.IGNORECASE)
+                     for title in (r"Question", r"What\s+to\s+build")]
 
 
 def summarize(body: str, max_chars: int = 90) -> str:
-    """First meaningful prose of an issue body; prefers a wayfinder `## Question` section."""
+    """First meaningful prose of an issue body; prefers a wayfinder `## Question` section, then a `## What to build`
+    section."""
     if not body:
         return ""
-    match = _QUESTION.search(body)
+    match = next((m for pattern in _SUMMARY_SECTIONS if (m := pattern.search(body))), None)
     text = match.group("text") if match else body
     text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
     lines = []
