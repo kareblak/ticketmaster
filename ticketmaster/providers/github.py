@@ -17,9 +17,9 @@ from typing import NamedTuple
 
 from ..model import Ticket, has_spec_signature, has_ticket_signature, parse_time, part_of, wayfinder_kinds
 from . import (LIMIT, LOOSE_TICKETS, OPEN_MAPS, RECENTLY_CLOSED, SIGNATURE_HITS, IssueStates, NotFound, ProviderError,
-               Query, Quota, RateLimited, as_spec, blocker_ref, capped, closed_map_refs, in_spec_lane, is_signature_hit, is_spec,
+               Query, Quota, RateLimited, as_spec, blocker_ref, capped, closed_map_refs, is_signature_hit, is_spec,
                is_spec_ticket, is_standalone_candidate, lane_cut, names_parent, resolve_maps, run_cli, run_json,
-               tracker_error, under_spec, with_body_blockers, with_spec_tickets)
+               spec_lane, tracker_error, under_spec, with_body_blockers, with_spec_tickets)
 
 MAP_LABEL = "wayfinder:map"
 
@@ -209,11 +209,7 @@ class GitHubProvider:
             family += new_tickets(refs, taken | {spec.number} | {t.number for t in family}, self.repo)
         else:
             family, more = [t for t in named if t.number not in taken], False
-        family = in_spec_lane([t for t in family if is_spec_ticket(t, spec.number)], spec)
-        if more or len(family) > limit:
-            cut.append(lane_cut(spec))
-        family = [replace(t, order=index) for index, t in enumerate(family[:limit])]
-        return with_spec_tickets([spec, *family])
+        return spec_lane(spec, [t for t in family if is_spec_ticket(t, spec.number)], limit, cut, more)
 
     def map_order(self, number: int) -> list[int]:
         """The map's sub-issue numbers in the order set on GitHub; search results carry no such order."""
