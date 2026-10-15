@@ -263,8 +263,22 @@ def test_no_open_maps_or_specs_says_so():
         app = BoardApp(FakeProvider([Ticket(number=1, title="Plain", url="u1", is_open=True)]), Query(), interval=60)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
-            assert "No open wayfinder maps or specs in o/r." in str(app.query_one("#empty").render())
+            assert "No open wayfinder maps or specs in o/r." in str(app.query_one(".empty").render())
             assert not list(app.query(Card))
+
+    run(scenario())
+
+
+def test_an_empty_board_renders_twice_back_to_back():
+    async def scenario():
+        app = BoardApp(FakeProvider([Ticket(number=1, title="Plain", url="u1", is_open=True)]), Query(), interval=60)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            app._render_board()
+            app._render_board()
+            await pilot.pause()
+            assert "No open wayfinder maps or specs in o/r." in str(app.query_one(".empty").render())
+            assert len(app.query(".empty")) == 1
 
     run(scenario())
 
@@ -2141,7 +2155,23 @@ def test_a_filter_that_matches_nothing_says_so(tmp_path):
             await loaded(app, pilot)
             await pilot.press("slash", *"nothing here", "enter")
             await pilot.pause()
-            assert headers(app) == [] and "No cards match the filters" in str(app.query_one("#empty").render())
+            assert headers(app) == [] and "No cards match the filters" in str(app.query_one(".empty").render())
+
+    run(scenario())
+
+
+def test_a_board_with_every_card_filtered_away_renders_twice_back_to_back(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("slash", *"nothing here", "enter")
+            await pilot.pause()
+            app._render_board()
+            app._render_board()
+            await pilot.pause()
+            assert "No cards match the filters" in str(app.query_one(".empty").render())
+            assert len(app.query(".empty")) == 1
 
     run(scenario())
 
@@ -2276,7 +2306,7 @@ def test_a_key_matches_the_maps_tracker_key_never_its_number(tmp_path):
         async with app.run_test(size=(200, 50)) as pilot:
             await loaded(app, pilot)
             assert headers(app) == [] and "map: TM-20" in status_of(app)
-            assert "No cards match the filters" in str(app.query_one("#empty").render())
+            assert "No cards match the filters" in str(app.query_one(".empty").render())
 
     run(scenario())
 

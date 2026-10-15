@@ -797,7 +797,7 @@ class BoardApp(App):
     .map-card { border-left: wide $accent-darken-2; }
     .decided-card { max-height: 2; }
     .card:focus { background: $boost; border-left: wide $accent; }
-    #empty { padding: 1 2; color: $text-muted; }
+    .empty { padding: 1 2; color: $text-muted; }
     #filter { dock: bottom; display: none; }
     #filter.visible { display: block; }
     """
@@ -1067,7 +1067,7 @@ class BoardApp(App):
         if not lanes and self.last_ok:
             empty = ("No cards match the filters; Esc clears them." if self.board.lanes
                      else f"No open wayfinder maps or specs in {self.provider.repo}.")
-            lanes.append(Static(empty, id="empty"))
+            lanes.append(Static(empty, classes="empty"))  # no id: the previous one may still be attached
         container.mount_all(lanes)
         for column in COLUMN_ORDER:
             head = self.query_one(f"#head-{column.name}", Static)
