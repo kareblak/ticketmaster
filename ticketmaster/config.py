@@ -91,6 +91,11 @@ def parse_interval(text: str) -> float:
     return seconds
 
 
+def seconds_text(seconds: float) -> str:
+    """An interval as typed and shown, exactly: `10`, `0.5`, `1234567` (`:g` would round it)."""
+    return str(int(seconds)) if seconds.is_integer() else repr(seconds)
+
+
 def board_interval(flag: float | None, saved: dict, kind: str) -> float:
     """`--interval` for this run, else the repo's saved interval (`saved` is its `repos` entry in settings.json),
     else the provider's default. A saved value that is no positive number is ignored."""

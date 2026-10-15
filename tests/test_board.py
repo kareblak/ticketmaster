@@ -2012,6 +2012,39 @@ def test_an_interval_edited_under_the_flag_is_saved(tmp_path):
     assert json.loads(settings.read_text()) == {"repos": {"fake:o/r": {"interval": 12}}}
 
 
+def test_the_flags_interval_confirmed_in_the_menu_replaces_the_saved_one(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"repos": {"fake:o/r": {"interval": 30}}}))
+
+    async def scenario():
+        app = settings_app(settings, interval=10)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await enter_interval(pilot, app, "10")
+
+    run(scenario())
+    assert json.loads(settings.read_text()) == {"repos": {"fake:o/r": {"interval": 10}}}
+
+
+def test_an_interval_shows_exactly_and_survives_the_menu_unedited(tmp_path):
+    settings = tmp_path / "settings.json"
+
+    async def scenario():
+        app = settings_app(settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await enter_interval(pilot, app, "1234567")
+            assert "every 1234567s" in status_of(app)
+            await open_settings(pilot, app)
+            assert app.screen.query_one("#interval", Input).value == "1234567"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.interval == 1234567
+
+    run(scenario())
+    assert json.loads(settings.read_text()) == {"repos": {"fake:o/r": {"interval": 1234567}}}
+
+
 def test_a_failed_settings_save_warns_and_still_applies(tmp_path):
     (tmp_path / "blocker").write_text("")  # a file where the settings directory should be
 

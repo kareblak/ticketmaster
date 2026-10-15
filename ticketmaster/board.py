@@ -20,7 +20,7 @@ from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static
 
-from .config import board_interval, load_settings, parse_interval, save_settings
+from .config import board_interval, load_settings, parse_interval, save_settings, seconds_text
 from .herdr import HerdrError, Session
 from .model import COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, Ticket, build_board, frontier
 from .providers import ErrorNotice, Provider, ProviderError, Query, RateLimited, error_notice
@@ -208,7 +208,10 @@ class Pacer:
         self.interval = interval
         if not self.limited:
             self.next_tickets = self.last_tickets + interval
-        self.next_sessions = self.last_sessions + (max(LIMITED_SESSIONS_EVERY, interval) if self.limited else interval)
+        self.next_sessions = self.last_sessions + self._sessions_every()
+
+    def _sessions_every(self) -> float:
+        return max(LIMITED_SESSIONS_EVERY, self.interval) if self.limited else self.interval
 
     def due(self, now: float) -> tuple[bool, bool]:
         """(tickets, sessions) to fetch now; a ticket fetch refreshes sessions too."""
@@ -220,7 +223,7 @@ class Pacer:
         if tickets:
             self.last_tickets = now
             self.next_tickets = now + (LIMITED_TICKETS_EVERY if self.limited else self.interval)
-        self.next_sessions = now + (max(LIMITED_SESSIONS_EVERY, self.interval) if self.limited else self.interval)
+        self.next_sessions = now + self._sessions_every()
 
     def fetched(self, now: float, ok: bool, rate_limited: bool) -> None:
         if rate_limited:
@@ -902,7 +905,7 @@ class BoardApp(App):
             maps, tickets = len(self.board.lanes), self.board.ticket_count()
             status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)} · {tickets} tickets")
             if not self.pacer.limited:
-                status.append(f" · every {self.interval:g}s")
+                status.append(f" · every {seconds_text(self.interval)}s")
         if self.pacer.limited:
             slow = "rate-limited again · once a minute until restart" if self.pacer.stuck else "rate-limited"
             reason = f" · {self.notice.reason}" if self.notice else ""
@@ -1188,31 +1191,35 @@ class BoardApp(App):
         filters[self.repo_key] = {
             key: [int(v) if v.isdigit() else v for v in sorted(selection[section], key=lambda v: (len(v), v))]
             if section == MAP else sorted(selection[section]) for section, key in SAVED_KEYS.items()}
+        self._write_settings("filter")
+
+    def _write_settings(self, what: str) -> None:
+        """Writes settings.json; a failure is a warning naming `what` was not saved."""
         if self.settings_path:
             try:
                 save_settings(self.settings_path, self.settings)
             except OSError as exc:
-                self.notify(f"filter not saved: {exc}", severity="warning")
+                self.notify(f"{what} not saved: {exc}", severity="warning")
 
     def action_settings(self) -> None:
-        fields = [Setting("interval", "Refresh interval (seconds)", f"{self.interval:g}", parse_interval)]
+        fields = [Setting("interval", "Refresh interval (seconds)", seconds_text(self.interval), parse_interval)]
         self.push_screen(SettingsMenu(fields), self._apply_settings)
 
     def _apply_settings(self, values: dict | None) -> None:
-        """Applies the menu's values at once and saves the changed ones for this repo; Esc (None) changes nothing."""
-        if not values or values["interval"] == self.interval:
+        """Applies the menu's values at once and saves those that differ from the repo's saved ones, also a value
+        that `--interval` already set for this run; Esc (None) changes nothing."""
+        if values is None:
             return
-        self.interval = values["interval"]
-        self.pacer.set_interval(self.interval)
-        self._start_ticker()
-        self._render_status()
-        seconds = self.interval
-        self._repo_settings(create=True)["interval"] = int(seconds) if seconds.is_integer() else seconds
-        if self.settings_path:
-            try:
-                save_settings(self.settings_path, self.settings)
-            except OSError as exc:
-                self.notify(f"settings not saved: {exc}", severity="warning")
+        interval = values["interval"]
+        if interval != self.interval:
+            self.interval = interval
+            self.pacer.set_interval(interval)
+            self._start_ticker()
+            self._render_status()
+        saved = {"interval": int(interval) if interval.is_integer() else interval}
+        if any(self._repo_settings().get(key) != value for key, value in saved.items()):
+            self._repo_settings(create=True).update(saved)
+            self._write_settings("settings")
 
     def _repo_settings(self, create: bool = False) -> dict:
         """This repo's entry under `repos` in settings.json; `create` makes it, replacing one that is no dict."""
