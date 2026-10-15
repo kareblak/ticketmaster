@@ -4,7 +4,8 @@ A live, read-only swimlane board of [wayfinder](https://github.com/mattpocock/sk
 standalone specs for [herdr](https://herdr.dev), packaged as a Claude Code plugin. Run `/ticketmaster` in a
 Claude session inside herdr and the board opens in a pane beside it. Every open map is a lane, and its
 decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub and Linear, so is every standalone spec
-written by `/to-spec`, with its `/to-tickets` tickets. `s` starts `/wayfinder` for a ticket in its
+written by `/to-spec`, with its `/to-tickets` tickets, and on GitHub one Loose lane holds the `/to-tickets`
+tickets with no spec parent. `s` starts `/wayfinder` for a ticket in its
 own git worktree, opened as a herdr workspace with Claude running in it as a herdr agent, and each
 card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
 tracker or the repo, and never removes a worktree.
@@ -81,11 +82,11 @@ from unpushed commits, which a squash merge with its remote branch deleted leave
 and runs inside herdr.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
-its spec and the spec's implementation tickets, and on GitHub and Linear every standalone spec written by `/to-spec`
-as a lane of its own, with its `/to-tickets` tickets (see [Lanes and columns](#lanes-and-columns)).
-Other issues are not shown. `map` (`42`, `#42`, the issue's URL, or a tracker
+its spec and the spec's implementation tickets, and on GitHub and Linear every standalone spec written by
+`/to-spec` as a lane of its own, with its `/to-tickets` tickets, then on GitHub the Loose lane of `/to-tickets`
+tickets with no spec parent (see [Lanes and columns](#lanes-and-columns)). Other issues are not shown. `map` (`42`, `#42`, the issue's URL, or a tracker
 key like `TM-1` or a Linear issue URL) opens the full board with the [map filter](#filters) preset to
-that map, for this run only, which hides the spec lanes; `Esc` clears it and shows every lane. A key matches the map card
+that map, for this run only, which hides the spec lanes and the Loose lane; `Esc` clears it and shows every lane. A key matches the map card
 whose tracker key it is, never issue number 1; a key no map carries shows an empty board. A closed map
 whose spec is still open stays on the board in full. Any other closed map shows only when you name it by
 number or URL, or on Linear by its team's key, as its header card alone.
@@ -180,7 +181,7 @@ and the board narrows as you go. Every value comes from the tracker data on the 
 | Type      | `research`, `prototype`, `grilling`, `task`, `spec`, `impl` (those on the board) | its type is selected; `spec` keeps a lane whose map card carries a spec, and a spec lane |
 | HITL/AFK  | `HITL`, `AFK`                                             | its wayfinder mode is selected |
 | Assignee  | `me` (your tracker login), `unassigned`, `anyone` (the default); one at a time | it is assigned to you, or to nobody |
-| Map       | each map lane's map                                       | its lane's map is selected; spec lanes hide while a map is selected |
+| Map       | each map lane's map                                       | its lane's map is selected; spec lanes and the Loose lane hide while a map is selected |
 | Author    | each card's author                                        | one of them opened it        |
 
 Values in a section are alternatives; a card must pass every section with a selection, and the `/`
@@ -261,7 +262,7 @@ to_tickets_command = "/to-tickets"        # default /mattpocock-skills:to-ticket
 
 ## Lanes and columns
 
-Map lanes come first, then spec lanes, each ordered by issue number.
+Map lanes come first, then spec lanes, each ordered by issue number, then the Loose lane.
 
 Each open `wayfinder:map` is a map lane. Its header is the map card (`◆`, cyan): the map's
 title and its counts, **decided** (closed tickets, less those out of scope), **open** and
@@ -288,6 +289,15 @@ fill the same four columns, every closed one in Decided however old. The lane st
 of its tickets is open, so a closed spec with an open ticket keeps its lane; it leaves once all are
 closed. A ticket whose parent is a map spec stays in the map's lane.
 
+On GitHub, a **loose ticket** is an issue with the ticket signature whose parent is no spec: it has no
+sub-issue parent or `## Parent` reference, or the one it names is a plain issue, a wayfinder ticket or no
+issue at all. The loose tickets share one Loose lane, last on the board. It has no issue behind it: its
+header (`◇`, blue) reads `◇ Loose tickets  to-tickets output with no parent` and
+`N done · N open · N blocked` (done is closed, less canceled). It holds the open loose tickets and those
+closed in the last 7 days, in the same four columns, tagged `impl`, and is left out when there are none.
+`s` on a loose ticket starts `/implement`, as on a map spec's implementation ticket; on its header it starts
+nothing, and `o` opens nothing.
+
 | Column   | Rule                                                                                   |
 | -------- | -------------------------------------------------------------------------------------- |
 | Decided  | closed, of any age. A ticket closed as not planned (canceled), or linked from the map's `## Out of scope` section, is marked `out of scope` |
@@ -305,12 +315,13 @@ section when it has one, else the `## What to build` section), and then:
 - its type and who it needs: `HITL` (you at the keyboard) for `grilling` and `prototype`, `AFK` (the
   agent alone) for `research`, and for a `task` whichever of the words `HITL` / `AFK` its body names
   first (no badge when it names neither); `impl` for a spec's implementation ticket, a map spec's or a
-  standalone spec's
+  standalone spec's, and for a loose ticket
 - `PR open` on an open card when an open pull or merge request will close its issue
 - `out of scope`, in Decided
 - its open blockers (`⛔ #3 other/lib#12`, `⛔ TM-3` on Linear)
 - its assignees (`@kare`; Linear's display name, `@kaare.blakstad`)
-- its lane's title (`◆ Pick a stack` for a map, `▣ Board shows standalone work` for a spec)
+- its lane's title (`◆ Pick a stack` for a map, `▣ Board shows standalone work` for a spec,
+  `◇ Loose tickets` in the Loose lane)
 
 ## Providers
 

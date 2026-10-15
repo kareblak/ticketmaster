@@ -7,12 +7,12 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime
 from http import HTTPStatus
 from typing import Literal, Protocol
 
-from ..model import (WAYFINDER_TYPES, Ticket, has_spec_signature, has_ticket_signature, lane_tickets, parent_ref,
-                     parent_refs, parse_blockers, part_of, wayfinder_kinds)
+from ..model import (RECENTLY_CLOSED, WAYFINDER_TYPES, Ticket, has_spec_signature, has_ticket_signature, lane_tickets,
+                     parent_ref, parent_refs, parse_blockers, part_of, wayfinder_kinds)
 
 TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo", "linear": "Linear"}
 
@@ -173,12 +173,10 @@ def closed_map_refs(candidates: list[Ticket], shown: set[int], key: str | None =
 
 
 # What a fetch cut off at the limit, as the board's status line names it: the open maps, the signature search's
-# hits, or a map's or spec's tickets.
+# hits, a map's or spec's tickets, or the loose tickets.
 OPEN_MAPS = "open maps"
 SIGNATURE_HITS = "specs and tickets"
-
-# How long a closed spec or ticket stays a signature search hit.
-RECENTLY_CLOSED = timedelta(days=7)
+LOOSE_TICKETS = "loose tickets"
 
 
 def is_signature_hit(ticket: Ticket, since: datetime) -> bool:
