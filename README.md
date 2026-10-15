@@ -65,9 +65,9 @@ calling pane (the focused pane when `HERDR_PANE_ID` is stale or another session'
 only runs inside herdr (`HERDR_ENV=1`).
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
-its spec and the spec's implementation tickets (see [Lanes and columns](#lanes-and-columns)). Issues that are not wayfinder work are not shown. A
-closed map shows only when you name it: `map` (`42`, `#42` or an issue URL) adds that map, as its
-header card alone.
+its spec and the spec's implementation tickets (see [Lanes and columns](#lanes-and-columns)).
+Issues that are not wayfinder work are not shown. A closed map shows only when you name it: `map`
+(`42`, `#42` or an issue URL) adds that map, as its header card alone.
 
 The board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
 switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` sets the start).
@@ -178,7 +178,7 @@ section when it has one), and then:
 - its type and who it needs: `HITL` (you at the keyboard) for `grilling` and `prototype`, `AFK` (the
   agent alone) for `research`, and for a `task` whichever of the words `HITL` / `AFK` its body names
   first (no badge when it names neither); `spec` or `impl` for a spec and its implementation tickets
-- `PR open` when an open pull or merge request closes it
+- `PR open` on an open card when an open pull or merge request will close its issue
 - `out of scope`, in Decided
 - its open blockers (`⛔ #3 other/lib#12`)
 - its assignees (`@kare`)

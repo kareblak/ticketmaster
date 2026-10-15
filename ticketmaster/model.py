@@ -147,9 +147,8 @@ def map_tickets(map_ticket: Ticket, tickets: list[Ticket]) -> list[Ticket]:
 
 def lane_tickets(map_ticket: Ticket, tickets: list[Ticket]) -> list[Ticket]:
     """The map's decision tickets, its specs and their implementation tickets, in map order."""
-    children = [t for t in tickets if (t.parent_number == map_ticket.number and t.is_wayfinder_ticket)
-                or (t.spec_kind and t.map_number == map_ticket.number)]
-    return sorted(children, key=lambda t: (t.order, t.number))
+    follow_ups = [t for t in tickets if t.spec_kind and t.map_number == map_ticket.number]
+    return sorted(map_tickets(map_ticket, tickets) + follow_ups, key=lambda t: (t.order, t.number))
 
 
 def frontier(map_ticket: Ticket, tickets: list[Ticket], taken: set[int] = frozenset(),

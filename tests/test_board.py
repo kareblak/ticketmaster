@@ -1333,13 +1333,14 @@ def test_a_maps_spec_and_its_implementation_tickets_sit_in_its_lane_tagged_and_c
 def test_an_open_closing_pr_shows_as_a_badge_and_none_without_one():
     spec = spec_of(9, 50)
     tickets = [*TICKETS, spec, impl_of(spec, 51, has_open_change_request=True), impl_of(spec, 52),
-               on(9, 5, has_open_change_request=True)]
+               on(9, 5, has_open_change_request=True),
+               impl_of(spec, 53, has_open_change_request=True, is_open=False)]  # decided: no badge
 
     async def scenario():
         app = BoardApp(FakeProvider(tickets), Query(), interval=60)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
             assert "PR open" in chips_of(app, 51) and "PR open" in chips_of(app, 5)
-            assert not any("PR open" in card_text(app, n) for n in (1, 2, 50, 52, 9))
+            assert not any("PR open" in card_text(app, n) for n in (1, 2, 50, 52, 53, 9))
 
     run(scenario())

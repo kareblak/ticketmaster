@@ -74,7 +74,7 @@ def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), st
         chips.append(" ")
     elif ticket.spec_kind:
         chips.append(f"{ticket.spec_kind} ", style="bold")
-    if ticket.has_open_change_request:
+    if ticket.is_open and ticket.has_open_change_request:
         chips.append(" PR open ", style=PR_STYLE)
         chips.append(" ")
     if out_of_scope:
@@ -397,7 +397,7 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                 f"  (ticketmaster <map>), as its header card alone.{'  ← this board' if query.named_map else ''}\n"
                 "  A spec whose first line is `Part of #<map>` and its implementation tickets (sub-issues,\n"
                 "  or a `## Parent` section naming the spec) sit in the map's lane, tagged spec and impl.\n"
-                "  Other issues are not shown. PR open: an open pull request closes the card.\n")
+                "  Other issues are not shown. PR open: an open pull request will close the card's issue.\n")
 
     heading("Columns (the first rule that matches)")
     for column, rule in [

@@ -1,7 +1,6 @@
 import io
 import json
 import urllib.error
-from dataclasses import replace
 from datetime import datetime, timezone
 
 import pytest
@@ -670,7 +669,8 @@ def assert_lane_family(tickets, map_url):
     for n in (3, 4, 5):
         assert (by_number[n].map_number, by_number[n].map_url) == (1, map_url), n
     assert [by_number[n].spec_kind for n in (2, 3, 4, 5)] == [None, "spec", "impl", "impl"]
-    assert (by_number[4].blocked_by, by_number[5].blocked_by) == (("#2",), ("#4",))
+    # The body's blockers, after any native ones.
+    assert (by_number[4].blocked_by[-1:], by_number[5].blocked_by[-1:]) == (("#2",), ("#4",))
     assert lanes(tickets) == {1: {"BLOCKED": [4, 5], "FRONTIER": [2, 3]}}
 
 
@@ -753,8 +753,7 @@ def test_gitea_reads_each_maps_spec_and_its_implementation_tickets_with_no_sub_i
     by_number = {t.number: t for t in tickets}
     assert by_number[2].parent_number == 1 and by_number[2].is_wayfinder_ticket  # child → map by `Part of #1`
     assert by_number[5].blocked_by == ("#2", "#4")  # native first, then the body's
-    by_number[5] = replace(by_number[5], blocked_by=("#4",))
-    assert_lane_family(list(by_number.values()), "https://gt/o/r/issues/1")
+    assert_lane_family(tickets, "https://gt/o/r/issues/1")
 
 
 def test_trackers_without_sub_issues_search_for_specs_only_with_a_map_on_the_board(monkeypatch):
