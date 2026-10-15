@@ -677,13 +677,20 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
         ("wayfinder ticket", "a wayfinder:research/prototype/grilling/task ticket (or wayfinder::…);\n"
                              + " " * 22 + "its map is the native parent, else `Part of #<map>` on the body's\n"
                              + " " * 22 + "first line"),
-        ("impl ticket", "implement_command (default /mattpocock-skills:implement) with the\n"
+        ("standalone spec", "s on a spec lane's header card (▣), while the spec has no tickets\n"
+                            + " " * 22 + "(neither open nor closed), starts to_tickets_command with the spec's URL,\n"
+                            + " " * 22 + "focused, in the spec's own worktree. Once it has tickets, s\n"
+                            + " " * 22 + "refuses it: s starts /implement on its tickets, one by one"),
+        ("impl ticket", "an impl card, in a map lane or a spec lane: implement_command\n"
+                        + " " * 22 + "(default /mattpocock-skills:implement) with the\n"
                         + " " * 22 + "ticket's URL, unfocused (AFK). On Linear the branch is the issue's\n"
                         + " " * 22 + "gitBranchName. Not with an open PR that closes it. The session owns\n"
                         + " " * 22 + "review, push and PR; the board starts nothing else"),
         ("refused", "a closed, blocked or someone else's ticket or ticketless spec, and\n"
-                    + " " * 22 + "one with a live session (press Enter instead); a spec closed\n"
-                    + " " * 22 + "without tickets is passed over"),
+                    + " " * 22 + "one with a live session (press Enter instead); a map's spec closed\n"
+                    + " " * 22 + "without tickets is passed over. Any other issue is not board\n"
+                    + " " * 22 + "work: the board starts work on wayfinder maps, standalone specs\n"
+                    + " " * 22 + "and loose tickets. The board never removes a spec's worktree"),
     ]:
         row(kind, 18, prompt)
     text.append("  A wayfinder ticket's card says who it needs: HITL (you at the keyboard) for grilling and\n"
@@ -1227,8 +1234,8 @@ class BoardApp(App):
         if isinstance(plan, str):
             would = f"s refuses: {plan}"
         elif plan.ticket.spec_kind == "spec":
-            prompt = self.describe_start(plan.ticket).partition("\n")[0]
-            would = f"s starts {prompt or '/to-tickets'} on its spec {plan.ticket.ref}"
+            prompt = self.describe_start(plan.ticket).partition("\n")[0] or "/to-tickets"
+            would = f"s starts {prompt}" + ("" if plan.ticket is ticket else f" on its spec {plan.ticket.ref}")
         elif plan.ticket is not ticket:
             would = f"s starts {plan.ticket.ref} {plan.ticket.title}, next on the map"
         elif ticket.is_wayfinder_map:
@@ -1240,8 +1247,9 @@ class BoardApp(App):
         self.notify(f"{ticket.ref} has no session here; {would}", severity="warning")
 
     def action_start(self) -> None:
-        """s: start /to-tickets on a map card's ticketless spec, /wayfinder on the card's ticket (/implement on an
-        impl card), or on a map's first frontier ticket, else on the map itself; or say why it refuses."""
+        """s: start /to-tickets on a map card's ticketless spec or a ticketless standalone spec card, /wayfinder on
+        the card's ticket (/implement on an impl card), or on a map's first frontier ticket, else on the map itself;
+        or say why it refuses."""
         card = self._card()
         if card is None:
             return
