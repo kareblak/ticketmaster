@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -140,6 +141,53 @@ def test_an_agent_titled_with_a_lane_ticket_outside_its_worktree_is_kept():
     assert entry.ticket == RESEARCH
     assert (entry.removable, entry.reason) == (False, "open ticket, agent outside a ticket worktree")
     assert (entry.workspaces, entry.agents) == (("w1",), ("idle",))
+
+
+def test_a_claude_worktree_with_a_descriptive_suffix_is_its_tickets():
+    suffixed = wt(f"{CLAUDE_HOME}/issue-42-carrier-api", "worktree-issue-42-carrier-api")
+    spy = FakeHerdr({("worktree", "list"): {"worktrees": [*WORKTREES["worktrees"], suffixed]},
+                     ("agent", "list"): {"agents": []}})
+    entry = by_place(leftovers(spy))[suffixed["path"]]
+    assert (entry.ticket, entry.removable, entry.reason) == (RESEARCH, False, "open ticket")
+
+
+def test_every_agent_in_a_listed_worktree_is_listed_with_it_whatever_its_title():
+    """A worktree found by the tracker's branch alone, with an agent whose title names no ticket."""
+    linear = on_map(43, kind="task", is_open=False, key="TM-43", branch_name="me/tm-43-pick-a-carrier")
+    checkout = wt("/code/elsewhere", "me/tm-43-pick-a-carrier")
+    spy = FakeHerdr({
+        ("worktree", "list"): {"worktrees": [*WORKTREES["worktrees"], checkout]},
+        ("agent", "list"): {"agents": [{"pane_id": "w7:p1", "workspace_id": "w7", "agent_status": "idle",
+                                        "foreground_cwd": "/code/elsewhere", "terminal_title": "Pick a carrier"}]},
+    })
+    entry = by_place(leftovers(spy, [*TICKETS, linear]))["/code/elsewhere"]
+    assert (entry.ticket, entry.workspaces, entry.agents) == (linear, ("w7",), ("idle",))
+
+
+def test_a_ticket_branch_checked_out_in_the_main_checkout_is_not_left_over():
+    main_on_50 = {"worktrees": [{**WORKTREES["worktrees"][0], "branch": "issue-50"}, *WORKTREES["worktrees"][1:]]}
+    spy = FakeHerdr({("worktree", "list"): main_on_50, ("agent", "list"): AGENTS})
+    assert "branch issue-50" not in by_place(leftovers(spy))
+
+
+def test_an_open_pr_keeps_the_worktree_beside_a_merged_one():
+    both = [t if t.number != 51 else issue(51, body="## Parent\n#50", parent_number=50, map_number=40,
+                                           has_merged_change_request=True, has_open_change_request=True)
+            for t in TICKETS]
+    entry = by_place(leftovers(tickets=both))[f"{HERDR_HOME}/issue-51"]
+    assert (entry.removable, entry.reason) == (False, "unmerged PR")
+
+
+def git(*args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def test_has_uncommitted_reads_git_status_and_says_none_when_git_cannot(tmp_path):
+    git("init", "-q", cwd=tmp_path)
+    assert cleanup.has_uncommitted(str(tmp_path)) is False
+    (tmp_path / "new.txt").write_text("x")
+    assert cleanup.has_uncommitted(str(tmp_path)) is True
+    assert cleanup.has_uncommitted(str(tmp_path / "gone")) is None
 
 
 def test_the_dry_run_only_lists():

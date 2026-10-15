@@ -10,13 +10,14 @@ squash merge whose remote branch was deleted leaves every local commit unpushed.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 from . import herdr
-from .herdr import Herdr, ticket_number
+from .herdr import Herdr, checkout_of, title_number
 from .model import Ticket, lane_tickets
 from .providers import Provider, Query
 from .start import branch_name, worktree_name
@@ -44,9 +45,10 @@ class Leftover:
 
 
 def has_uncommitted(path: str) -> bool | None:
+    """`git status`, without refreshing the worktree's index, so looking writes nothing."""
     try:
-        result = subprocess.run(["git", "-C", path, "status", "--porcelain"], capture_output=True, text=True,
-                                timeout=30)
+        result = subprocess.run(["git", "--no-optional-locks", "-C", path, "status", "--porcelain"],
+                                capture_output=True, text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     return bool(result.stdout.strip()) if result.returncode == 0 else None
@@ -55,8 +57,10 @@ def has_uncommitted(path: str) -> bool | None:
 def verdict(ticket: Ticket, dirty: bool | None, outside: bool = False) -> tuple[bool, str]:
     """Removable, and why; or kept, with every reason."""
     kept = []
-    if ticket.is_open and not ticket.has_merged_change_request:
-        kept.append("unmerged PR" if ticket.has_open_change_request else "open ticket")
+    if ticket.is_open and ticket.has_open_change_request:
+        kept.append("unmerged PR")  # even beside a merged one: the ticket's work is not all in
+    elif ticket.is_open and not ticket.has_merged_change_request:
+        kept.append("open ticket")
     if dirty is None:
         kept.append("git status unreadable")
     elif dirty:
@@ -79,33 +83,51 @@ def ticket_branches(ticket: Ticket) -> set[str]:
     return {branch_name(ticket), worktree_name(ticket), f"worktree-{worktree_name(ticket)}"}
 
 
+# A worktree or branch named after its ticket, with any suffix: `issue-12`, `worktree-issue-12-fix-login`, `tm-12-2`.
+TICKET_PREFIX = re.compile(r"^(?:worktree-)?(?:issue|tm)-(?P<number>\d+)(?:-|$)", re.IGNORECASE)
+
+
+def worktree_ticket(wt: dict, family: dict[int, Ticket], by_branch: dict[str, Ticket]) -> Ticket | None:
+    """The family ticket a linked worktree is named after, by its directory or branch, or whose branch it is on."""
+    for name in (Path(wt["path"]).name, wt.get("branch") or ""):
+        if (match := TICKET_PREFIX.match(name)) and (ticket := family.get(int(match["number"]))):
+            return ticket
+    return by_branch.get(wt.get("branch") or "")
+
+
 def leftovers(cwd: Path, map_ticket: Ticket, tickets: list[Ticket], bench: Herdr,
               uncommitted: Uncommitted | None = None) -> list[Leftover]:
-    """The map's and its lane tickets' worktrees in herdr's order, then their branches without a worktree, then
-    agents titled with one of them that run outside those worktrees. Only lists: herdr is asked, never told."""
+    """The map's and its lane tickets' worktrees in herdr's order with every agent running in them, then their
+    branches checked out nowhere, then agents titled with one of them that run outside those worktrees. Only
+    lists: herdr is asked, never told."""
     uncommitted = uncommitted or has_uncommitted
     family = {t.number: t for t in (map_ticket, *lane_tickets(map_ticket, tickets))}
     by_branch = {name: t for t in family.values() for name in ticket_branches(t)}
-    sessions = bench.sessions(cwd)
-    linked = bench.worktrees(cwd)
+    checkouts = bench.call("worktree", "list", "--cwd", str(cwd)).get("worktrees", [])
+    agents = bench.call("agent", "list").get("agents", [])
+    running: dict[str, list[dict]] = {}  # agents by the checkout they run in
+    for agent in agents:
+        if (checkout := checkout_of(agent, checkouts)) is not None:
+            running.setdefault(checkout["path"], []).append(agent)
     found: list[Leftover] = []
-    for wt in linked:
-        ticket = family.get(ticket_number(wt)) or by_branch.get(wt.get("branch") or "")
+    for wt in checkouts:
+        ticket = worktree_ticket(wt, family, by_branch) if wt.get("is_linked_worktree") else None
         if ticket is None:
             continue
-        here = [s for s in sessions.get(ticket.number, []) if s.path == wt["path"]]
+        here = running.get(wt["path"], [])
         found.append(leftover(ticket, wt["path"], wt.get("branch"),
-                              [wt.get("open_workspace_id"), *(s.workspace for s in here)],
-                              tuple(s.status for s in here if s.status is not None), uncommitted(wt["path"])))
-    checked_out = {wt.get("branch") for wt in linked}
+                              [wt.get("open_workspace_id"), *(a.get("workspace_id") for a in here)],
+                              tuple(a.get("agent_status") or "unknown" for a in here), uncommitted(wt["path"])))
+    checked_out = {wt.get("branch") for wt in checkouts}
     for branch in herdr.local_branches(cwd):
         if branch in by_branch and branch not in checked_out:
             found.append(leftover(by_branch[branch], None, branch, [], (), False))
     listed = {entry.path for entry in found}
-    for number, ticket in family.items():
-        for s in sessions.get(number, []):
-            if s.status is not None and s.path not in listed:
-                found.append(leftover(ticket, s.path, s.branch, [s.workspace], (s.status,), False, outside=True))
+    for path, here in running.items():
+        for agent in here:
+            if path not in listed and (ticket := family.get(title_number(agent))) is not None:
+                found.append(leftover(ticket, path, None, [agent.get("workspace_id")],
+                                      (agent.get("agent_status") or "unknown",), False, outside=True))
     return found
 
 
