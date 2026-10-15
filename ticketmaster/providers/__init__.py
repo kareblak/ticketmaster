@@ -7,7 +7,7 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 from typing import Literal, Protocol
 
@@ -205,6 +205,70 @@ def is_spec_ticket(ticket: Ticket, spec: int | None) -> bool:
 def in_spec_lane(tickets: list[Ticket], spec: Ticket) -> list[Ticket]:
     """The standalone spec is each ticket's parent, and their lane's."""
     return [replace(with_map(t, spec), lane_spec=spec.number) for t in tickets]
+
+
+# A signature search for one signature: the open issues it finds when `closed_since` is None, else those closed since
+# then; at most `LIMIT + 1`, so the one past the limit tells that the tracker had more.
+SignatureSearch = Callable[[str, datetime | None], list[Ticket]]
+
+
+def signature_hits(search: SignatureSearch, signatures: tuple[str, ...], cut: list[str]) -> list[Ticket]:
+    """For trackers that search one signature at a time: the open and recently closed hits the board keeps, each once,
+    at most `LIMIT`; with more, the signature hits go on `cut`."""
+    since = datetime.now(timezone.utc) - RECENTLY_CLOSED
+    found = [search(words, closed_since) for words in signatures for closed_since in (None, since)]
+    kept = list({t.number: t for t in sum(found, []) if is_signature_hit(t, since)}.values())
+    if any(len(hits) > LIMIT for hits in found) and len(kept) <= LIMIT:
+        cut.append(SIGNATURE_HITS)
+    return capped(kept, LIMIT, SIGNATURE_HITS, cut)
+
+
+def standalone_specs(hits: list[Ticket], board: list[Ticket], lookup: IssueLookup, not_specs: set[int]) -> list[Ticket]:
+    """For trackers without sub-issues: the standalone spec candidates not on the board, among the hits and the
+    specs an open ticket hit names that are no hit (closed before the window), which `lookup` reads. A looked-up
+    issue that is no standalone spec goes on `not_specs` and is not looked up again."""
+    maps = {t.number for t in board if t.is_wayfinder_map}
+    on_board = {t.number for t in board}
+    named = {t.spec_number for t in hits if t.is_open and is_spec_ticket(t, t.spec_number)}
+    looked_up = []
+    for number in sorted(named - on_board - not_specs - {t.number for t in hits}):
+        spec = lookup(number)
+        if spec is None or not spec.is_standalone_spec:
+            not_specs.add(number)
+        else:
+            looked_up.append(spec)
+    return [t for t in hits + looked_up if t.number not in on_board and is_standalone_candidate(t, maps)]
+
+
+def spec_lanes(specs: list[Ticket], candidates: list[Ticket], taken: set[int], limit: int,
+               cut: list[str]) -> list[Ticket]:
+    """For trackers without sub-issues: each standalone spec not `taken`, then the candidates whose `## Parent`
+    section names it, by number; their order is that position. The first `limit` of them; a spec with more goes on
+    `cut`."""
+    lanes: list[Ticket] = []
+    taken = set(taken)
+    for spec in specs:
+        if spec.number in taken:
+            continue
+        family = {t.number: t for t in candidates if t.number not in taken | {spec.number}
+                  and is_spec_ticket(t, spec.number)}
+        tickets = in_spec_lane(capped(sorted(family.values(), key=lambda t: t.number), limit, lane_cut(spec), cut), spec)
+        lane = with_spec_tickets([spec, *(replace(t, order=index) for index, t in enumerate(tickets))])
+        taken |= {t.number for t in lane}
+        lanes += lane
+    return lanes
+
+
+def standalone_lanes(board: list[Ticket], search: SignatureSearch, signatures: tuple[str, ...],
+                     children: Callable[[int], list[Ticket]], lookup: IssueLookup, not_specs: set[int], limit: int,
+                     cut: list[str]) -> list[Ticket]:
+    """For trackers without sub-issues: each standalone spec that is open or that an open ticket names, with its
+    tickets. `search` runs two searches per signature, open and recently closed, then `children` one per open spec,
+    which also finds its tickets closed before the window; each hit's body decides."""
+    hits = signature_hits(search, signatures, cut)
+    specs = standalone_specs(hits, board, lookup, not_specs)
+    candidates = hits + [t for spec in specs if spec.is_open for t in children(spec.number)]
+    return spec_lanes(specs, candidates, {t.number for t in board}, limit, cut)
 
 
 def lane_cut(map_ticket: Ticket) -> str:

@@ -3,9 +3,9 @@
 A live, read-only swimlane board of [wayfinder](https://github.com/mattpocock/skills) maps and
 standalone specs for [herdr](https://herdr.dev), packaged as a Claude Code plugin. Run `/ticketmaster` in a
 Claude session inside herdr and the board opens in a pane beside it. Every open map is a lane, and its
-decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub, so is every standalone spec
-written by `/to-spec`, with its `/to-tickets` tickets. `s` starts `/wayfinder` for a ticket in its
-own git worktree, opened as a herdr workspace with Claude running in it as a herdr agent, and each
+decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub, GitLab and Gitea/Forgejo, so is
+every standalone spec written by `/to-spec`, with its `/to-tickets` tickets. `s` starts `/wayfinder` for a
+ticket in its own git worktree, opened as a herdr workspace with Claude running in it as a herdr agent, and each
 card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
 tracker or the repo, and never removes a worktree.
 
@@ -81,8 +81,8 @@ from unpushed commits, which a squash merge with its remote branch deleted leave
 and runs inside herdr.
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
-its spec and the spec's implementation tickets, and on GitHub every standalone spec written by `/to-spec`
-as a lane of its own, with its `/to-tickets` tickets (see [Lanes and columns](#lanes-and-columns)).
+its spec and the spec's implementation tickets, and on GitHub, GitLab and Gitea/Forgejo every standalone
+spec written by `/to-spec` as a lane of its own, with its `/to-tickets` tickets (see [Lanes and columns](#lanes-and-columns)).
 Other issues are not shown. `map` (`42`, `#42`, the issue's URL, or a tracker
 key like `TM-1` or a Linear issue URL) opens the full board with the [map filter](#filters) preset to
 that map, for this run only, which hides the spec lanes; `Esc` clears it and shows every lane. A key matches the map card
@@ -274,8 +274,8 @@ is no card: the map card shows it on a line of its own, `▣ #<spec> open` (or `
 tickets' counts, `N done · N open · N blocked` (done is closed, less canceled), or `no tickets yet`,
 and the badges of the spec's sessions. The map card's own counts are of its decision tickets only.
 
-On GitHub, each standalone spec is a spec lane. A standalone spec carries the spec **signature**, the
-headings `/to-spec` writes, `## Problem Statement` and `## Solution`, has no `Part of #<map>` line naming a
+On GitHub, GitLab and Gitea/Forgejo, each standalone spec is a spec lane. A standalone spec carries the
+spec **signature**, the headings `/to-spec` writes, `## Problem Statement` and `## Solution`, has no `Part of #<map>` line naming a
 map and no `wayfinder:` label. Both headings must be there, at `##` level, in any case; an issue that
 only mentions them in prose does not count, and one that also carries the ticket signature is a spec.
 Its header is the spec card (`▣`, magenta): `▣ #<n> <title>`, `spec closed` once it is closed, its
@@ -355,8 +355,8 @@ refuses and names both options. The key goes bare in `Authorization`, the token 
 | Provider        | Access                                   | Blocking                  | Maps and their tickets              |
 | --------------- | ---------------------------------------- | ------------------------- | ----------------------------------- |
 | GitHub          | `gh api graphql` (your `gh` login)       | native `blockedBy`        | a search for open `wayfinder:map` issues, then per map its sub-issues in order and the typed tickets and spec whose `Part of #<map>` line names it, then the spec's sub-issues and the issues whose `## Parent` names it |
-| GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | the project's `wayfinder:` labels (`wayfinder:map` or `wayfinder::map`, and the four types), one query per label; a typed ticket joins the map its `Part of #<map>` line names; a description search for `Part of` and `Parent` finds the specs and their implementation tickets |
-| Gitea / Forgejo | REST through `tea api`, with the `tea` login (token or OAuth) whose URL matches the repo host | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names; an issue search (`q`) for `Part of` and `Parent` finds the specs and their implementation tickets |
+| GitLab          | `glab api graphql` (your `glab` login)   | `blocks` links            | the project's `wayfinder:` labels (`wayfinder:map` or `wayfinder::map`, and the four types), one query per label; a typed ticket joins the map its `Part of #<map>` line names; a description search for `Part of` and `Parent` finds the specs and their implementation tickets; two description searches per signature find the standalone specs and tickets, the open ones and those closed within 7 days, and one `Parent <spec>` search per open standalone spec its older tickets |
+| Gitea / Forgejo | REST through `tea api`, with the `tea` login (token or OAuth) whose URL matches the repo host | `/dependencies` API | the repo's and its org's `wayfinder:` labels, one list per label; a typed ticket joins the map its `Part of #<map>` line names; an issue search (`q`) for `Part of` and `Parent` finds the specs and their implementation tickets; two issue searches per signature find the standalone specs and tickets, the open ones and those closed within 7 days (a hit by a comment alone is dropped), and one `Parent #<spec>` search per open standalone spec its older tickets |
 | Linear          | GraphQL with the API key (`Authorization: <key>`) or the `login` token (`Bearer`) | `blocks` relations (`inverseRelations`) | the team's open `wayfinder:map` issues, then per map its sub-issues in sub-issue order; one description search for `Part of` and `Parent` finds the typed tickets and spec linked by `Part of`, and the spec's sub-issues and `## Parent` tickets |
 
 On Linear only the workflow state's type counts, never its team-renamable name: `completed` is
