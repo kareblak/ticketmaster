@@ -697,7 +697,7 @@ class BoardApp(App):
         status = Text(self.sub_title, style="bold")
         if self.last_ok:
             status.append(" · ")
-            maps, tickets = len(self.board.lanes), self.board.total() - len(self.board.lanes)
+            maps, tickets = len(self.board.lanes), self.board.ticket_count()
             status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)} · {tickets} tickets")
             if not self.pacer.limited:
                 status.append(f" · every {self.interval:g}s")

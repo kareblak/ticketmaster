@@ -142,12 +142,6 @@ def test_a_task_is_hitl_or_afk_by_the_first_of_those_words_in_its_body():
     assert ticket(labels=task, body="the HITLER and AFKs").mode is None
 
 
-def test_wayfinder_tickets_are_decisions():
-    for labels in (("wayfinder:grilling",), ("wayfinder::task",)):
-        assert ticket(labels=labels).is_decision
-    assert not ticket(labels=("wayfinder:epic",)).is_decision and not ticket(labels=MAP).is_decision
-
-
 def test_start_refusal_names_a_ticket_that_is_not_wayfinder_work_last():
     assert ticket().start_refusal("me") == "#1 is not wayfinder work: the board only starts /wayfinder"
     assert ticket(open_blockers=1).start_refusal("me") == "#1 is blocked by 1 open issue"
@@ -241,7 +235,7 @@ def test_each_open_map_is_a_lane_of_its_decision_tickets_in_the_four_columns():
         1: {Column.BLOCKED: [3], Column.FRONTIER: [2], Column.CLAIMED: [4], Column.DECIDED: [5]},
         20: {Column.FRONTIER: [21]},
     }
-    assert board.total() == 7
+    assert board.ticket_count() == 5
 
 
 def test_lane_columns_sort_by_sub_issue_order_then_number_and_decided_keeps_all():
@@ -262,7 +256,7 @@ def test_a_closed_map_shows_only_when_named_and_then_as_its_header_alone():
     assert lane.map is closed_map and lane.collapsed
     assert all(not cards for cards in lane.columns.values())
     assert lane.progress == (1, 1, 0)
-    assert build_board(tickets, named_map=1).total() == 1
+    assert build_board(tickets, named_map=1).ticket_count() == 0
 
 
 def test_lanes_mark_out_of_scope_tickets():
@@ -277,7 +271,6 @@ def test_frontier_follows_the_trackers_map_order_when_given():
     assert [t.number for t in frontier(MAP_TICKET, tickets, order=[7, 5])] == [7, 5, 6]
 
 
-def test_a_ticket_with_a_map_is_no_decision():
-    t = Ticket(number=4, title="Slice", url="u", is_open=True, has_open_change_request=True,
-               parent_number=3, map_number=1, map_url="https://gh/1")
-    assert not t.is_decision and not t.map_missing
+def test_a_ticket_with_a_map_has_no_map_missing():
+    t = Ticket(number=4, title="Slice", url="u", is_open=True, parent_number=3, map_number=1, map_url="https://gh/1")
+    assert not t.map_missing

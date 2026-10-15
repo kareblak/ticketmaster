@@ -10,8 +10,9 @@ from __future__ import annotations
 import functools
 import json
 
-from ..model import WAYFINDER_TYPES, Ticket, parse_time, part_of, wayfinder_kinds
-from . import LIMIT, IssueStates, ProviderError, Query, blocker_ref, resolve_maps, run_json, tracker_error, with_body_blockers
+from ..model import Ticket, parse_time
+from . import (LABEL_LIMIT, LIMIT, IssueStates, ProviderError, Query, blocker_ref, map_board, resolve_maps, run_json,
+               tracker_error, wayfinder_labels, with_body_blockers)
 
 ISSUE_FIELDS = """
   iid title webUrl description state closedAt
@@ -89,27 +90,13 @@ class GitLabProvider:
 
     def fetch(self, query: Query) -> list[Ticket]:
         """The open maps, the named map, and every typed ticket, open or closed, whose `Part of #<map>` names one."""
-        labels = self._wayfinder_labels()
+        labels = wayfinder_labels([node["title"] for node in self._pages(LABELS, {}, ["project", "labels"])])
         maps = {t.number: t for label in labels["map"] for t in self._issues({"state": "opened", "labels": [label]})
                 if t.is_wayfinder_map}
-        if query.named_map is not None and query.named_map not in maps:
-            named = self._named(query.named_map)
-            maps |= {named.number: named} if named is not None and named.is_wayfinder_map else {}
-        children = {t.number: t for label in labels["ticket"] for t in self._issues({"labels": [label]})
-                    if t.wayfinder_type is not None and part_of(t.body) in maps}
-        tickets = list(maps.values()) + [t for n, t in children.items() if n not in maps]
+        named = self._named(query.named_map) if query.named_map is not None and query.named_map not in maps else None
+        children = [t for label in labels["ticket"] for t in self._issues({"labels": [label]}, LABEL_LIMIT)]
+        tickets = map_board(maps, named, children)
         return with_body_blockers(resolve_maps(tickets, functools.cache(self._issue)), self.states)
-
-    def _wayfinder_labels(self) -> dict[str, list[str]]:
-        """The project's (and its groups') label titles for maps and for the four ticket types."""
-        found: dict[str, list[str]] = {"map": [], "ticket": []}
-        for title in [node["title"] for node in self._pages(LABELS, {}, ["project", "labels"])]:
-            kinds = wayfinder_kinds((title,))
-            if "map" in kinds:
-                found["map"].append(title)
-            elif any(kind in WAYFINDER_TYPES for kind in kinds):
-                found["ticket"].append(title)
-        return found
 
     def _named(self, iid: int) -> Ticket | None:
         issue = (self._graphql(NAMED, {"path": self.repo, "named": str(iid)}).get("project") or {}).get("issue")
@@ -122,13 +109,13 @@ class GitLabProvider:
         return Ticket(number=iid, title="", url=issue["webUrl"], is_open=True, body=issue.get("description") or "",
                       labels=tuple(label["title"] for label in issue["labels"]["nodes"]))
 
-    def _issues(self, variables: dict) -> list[Ticket]:
-        return [to_ticket(node, self.repo) for node in self._pages(ISSUES, variables, ["project", "issues"])]
+    def _issues(self, variables: dict, limit: int = LIMIT) -> list[Ticket]:
+        return [to_ticket(node, self.repo) for node in self._pages(ISSUES, variables, ["project", "issues"], limit)]
 
-    def _pages(self, gql: str, variables: dict, path: list[str]) -> list[dict]:
+    def _pages(self, gql: str, variables: dict, path: list[str], limit: int = LIMIT) -> list[dict]:
         nodes: list[dict] = []
         after = None
-        while len(nodes) < LIMIT:
+        while len(nodes) < limit:
             page = self._graphql(gql, {"path": self.repo, "after": after, **variables})
             for key in path:
                 page = (page or {}).get(key)
@@ -138,7 +125,7 @@ class GitLabProvider:
             if not page["pageInfo"]["hasNextPage"]:
                 break
             after = page["pageInfo"]["endCursor"]
-        return nodes[:LIMIT]
+        return nodes[:limit]
 
     def _graphql(self, gql: str, variables: dict) -> dict:
         body = {"query": gql, "variables": {k: v for k, v in variables.items() if v is not None}}

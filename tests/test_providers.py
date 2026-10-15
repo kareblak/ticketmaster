@@ -180,6 +180,22 @@ def test_gitlab_fetches_every_open_map_with_its_children_by_their_part_of_line(m
     assert lanes(tickets) == {1: {"FRONTIER": [5], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
 
 
+def test_gitlab_keeps_an_open_maps_tickets_behind_many_of_another_maps(monkeypatch):
+    # One type label lists the whole project's tickets, newest first: other maps' closed ones must not crowd out
+    # an open map's.
+    crowd = [gl_issue(1000 + n, ["wayfinder::task"], "Part of #30", "closed") for n in range(350)]
+    gitlab_board(monkeypatch, GITLAB_LABELS, [gl_issue(1, ["wayfinder::map"]), *crowd,
+                                              gl_issue(5, ["wayfinder::task"], "Part of #1")])
+    assert [t.number for t in gitlab.GitLabProvider("g/p").fetch(Query())] == [1, 5]
+
+
+def test_gitea_keeps_an_open_maps_tickets_behind_many_of_another_maps(monkeypatch):
+    crowd = [gt_issue(1000 + n, ["wayfinder:task"], "Part of #30", "closed") for n in range(350)]
+    gitea_board(monkeypatch, ["wayfinder:map", "wayfinder:task"], None,
+                [gt_issue(1, ["wayfinder:map"]), *crowd, gt_issue(5, ["wayfinder:task"], "Part of #1")])
+    assert [t.number for t in gitea.GiteaProvider("o/r", "codeberg.org", token="x").fetch(Query())] == [1, 5]
+
+
 def test_gitlab_adds_a_named_closed_map_with_its_children(monkeypatch):
     asked = gitlab_board(monkeypatch, GITLAB_LABELS, GITLAB_ISSUES, named=GITLAB_ISSUES[2])
     tickets = gitlab.GitLabProvider("g/p").fetch(Query(named_map=30))

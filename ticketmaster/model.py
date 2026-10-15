@@ -108,11 +108,6 @@ class Ticket:
         return f"wayfinder:{self.wayfinder_type}, map not found"
 
     @property
-    def is_decision(self) -> bool:
-        """A wayfinder ticket: it resolves with a comment and closes, never through a PR. The map is not one."""
-        return self.wayfinder_type is not None
-
-    @property
     def mode(self) -> str | None:
         """`HITL` or `AFK` for a wayfinder ticket; a task by the first of those words in its body, else None."""
         if self.wayfinder_type == "task":
@@ -223,8 +218,9 @@ class Lane:
 class Board:
     lanes: list[Lane] = field(default_factory=list)
 
-    def total(self) -> int:
-        return sum(1 + len(lane.tickets()) for lane in self.lanes)
+    def ticket_count(self) -> int:
+        """The lanes' ticket cards, not counting the maps."""
+        return sum(len(lane.tickets()) for lane in self.lanes)
 
     def tickets(self) -> list[Ticket]:
         """Every card: each lane's map, then its tickets."""

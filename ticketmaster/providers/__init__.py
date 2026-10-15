@@ -11,7 +11,7 @@ from datetime import datetime
 from http import HTTPStatus
 from typing import Literal, Protocol
 
-from ..model import Ticket, parse_blockers, part_of, wayfinder_kinds
+from ..model import WAYFINDER_TYPES, Ticket, parse_blockers, part_of, wayfinder_kinds
 
 TRACKER_NAMES = {"github": "GitHub", "gitlab": "GitLab", "gitea": "Gitea/Forgejo"}
 
@@ -104,6 +104,30 @@ class Query:
 
 # Children read per map, and maps per board; a tracker page beyond these is not asked for.
 LIMIT = 300
+# Issues read per `wayfinder:` label on trackers without sub-issues: the whole repo's, open and closed, before
+# `Part of #<map>` picks a shown map's, so a map's tickets are not cut off by other maps' closed ones.
+LABEL_LIMIT = 5000
+
+
+def wayfinder_labels(names: list[str]) -> dict[str, list[str]]:
+    """Label names for maps (`map`) and for the four ticket types (`ticket`), in the order given."""
+    found: dict[str, list[str]] = {"map": [], "ticket": []}
+    for name in dict.fromkeys(names):
+        kinds = wayfinder_kinds((name,))
+        if "map" in kinds:
+            found["map"].append(name)
+        elif any(kind in WAYFINDER_TYPES for kind in kinds):
+            found["ticket"].append(name)
+    return found
+
+
+def map_board(maps: dict[int, Ticket], named: Ticket | None, children: list[Ticket]) -> list[Ticket]:
+    """For trackers without sub-issues: the maps, the named map when it is one, then each typed ticket whose
+    `Part of #<map>` line names one of them."""
+    if named is not None and named.is_wayfinder_map:
+        maps = {**maps, named.number: named}
+    linked = {t.number: t for t in children if t.wayfinder_type is not None and part_of(t.body) in maps}
+    return list(maps.values()) + [t for n, t in linked.items() if n not in maps]
 
 
 class Provider(Protocol):

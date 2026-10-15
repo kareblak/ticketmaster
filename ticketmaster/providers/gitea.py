@@ -22,9 +22,9 @@ from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-from ..model import WAYFINDER_TYPES, Ticket, parse_time, part_of, wayfinder_kinds
-from . import (LIMIT, IssueStates, NotFound, ProviderError, Query, RateLimited, blocker_ref, resolve_maps,
-               tracker_error, with_body_blockers)
+from ..model import Ticket, parse_time
+from . import (LABEL_LIMIT, LIMIT, IssueStates, NotFound, ProviderError, Query, RateLimited, blocker_ref, map_board,
+               resolve_maps, tracker_error, wayfinder_labels, with_body_blockers)
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -76,18 +76,17 @@ class GiteaProvider:
         pulls = self._list(f"/repos/{self.repo}/pulls", {"state": "open"}, 200)
         pr_bodies = [f"{p.get('title', '')}\n{p.get('body') or ''}" for p in pulls]
 
-        def issues(label: str, state: str) -> list[Ticket]:
+        def issues(label: str, state: str, limit: int = LIMIT) -> list[Ticket]:
             params = {"type": "issues", "state": state, "labels": label}
-            return [to_ticket(i, None, pr_bodies) for i in self._list(f"/repos/{self.repo}/issues", params, LIMIT)]
+            return [to_ticket(i, None, pr_bodies) for i in self._list(f"/repos/{self.repo}/issues", params, limit)]
 
         maps = {t.number: t for label in labels["map"] for t in issues(label, "open") if t.is_wayfinder_map}
+        named = None
         if query.named_map is not None and query.named_map not in maps:
             found = self._issue_or_none(query.named_map)
             named = to_ticket(found, None, pr_bodies) if found else None
-            maps |= {named.number: named} if named is not None and named.is_wayfinder_map else {}
-        children = {t.number: t for label in labels["ticket"] for t in issues(label, "all")
-                    if t.wayfinder_type is not None and part_of(t.body) in maps}
-        tickets = list(maps.values()) + [t for n, t in children.items() if n not in maps]
+        children = [t for label in labels["ticket"] for t in issues(label, "all", LABEL_LIMIT)]
+        tickets = map_board(maps, named, children)
         open_numbers = [t.number for t in tickets if t.is_open]
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
@@ -102,14 +101,7 @@ class GiteaProvider:
             names += [label["name"] for label in self._list(f"/orgs/{self.repo.split('/')[0]}/labels", {}, LIMIT)]
         except NotFound:
             pass  # a user's repo has no org labels
-        found: dict[str, list[str]] = {"map": [], "ticket": []}
-        for name in dict.fromkeys(names):
-            kinds = wayfinder_kinds((name,))
-            if "map" in kinds:
-                found["map"].append(name)
-            elif any(kind in WAYFINDER_TYPES for kind in kinds):
-                found["ticket"].append(name)
-        return found
+        return wayfinder_labels(names)
 
     def _issue(self, number: int) -> Ticket | None:
         found = self._issue_or_none(number)
