@@ -29,8 +29,8 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from ..model import Ticket, parse_time, part_of, wayfinder_kinds
-from . import (IssueStates, ProviderError, Query, RateLimited, as_spec, closed_map_refs, is_spec, parent_ref,
-               under_spec, with_body_blockers, with_map)
+from . import (OPEN_MAPS, IssueStates, ProviderError, Query, RateLimited, as_spec, cap_families, capped,
+               closed_map_refs, is_spec, parent_ref, under_spec, with_body_blockers, with_map)
 
 if TYPE_CHECKING:
     from .linear_oauth import OAuthSession
@@ -242,6 +242,7 @@ class LinearProvider:
         var = check_key_env(key_env)
         self.transport = transport or linear_http(var, oauth_client_id)
         self.states = IssueStates(self._issue_states)
+        self.cut_off: list[str] = []
 
     def viewer(self) -> str | None:
         return (self._query("TicketmasterViewer", {}).get("viewer") or {}).get("displayName")
@@ -249,8 +250,11 @@ class LinearProvider:
     def fetch(self, query: Query) -> list[Ticket]:
         """Every open map, every closed map an open spec's `Part of` names, and the named one when it is a closed map;
         per map its sub-issues in sub-issue order,
-        then the team's tickets linked to it by `Part of` and the spec's implementation tickets."""
-        found = {int(node["number"]): node for node in self._issues("TicketmasterMaps", {"label": MAP_LABEL})}
+        then the team's tickets linked to it by `Part of` and the spec's implementation tickets. At most the query's
+        limit of open maps, and of tickets per map; paging stops one past it."""
+        limit, cut = query.limit, []
+        open_maps = self._issues("TicketmasterMaps", {"label": MAP_LABEL}, limit + 1)
+        found = {int(node["number"]): node for node in capped(open_maps, limit, OPEN_MAPS, cut)}
         candidates = sorted((to_ticket(node) for node in self._issues("TicketmasterLinked", {})),
                             key=lambda t: t.number)  # Linear lists newest first
         wanted = closed_map_refs(candidates, set(found), self.team)
@@ -262,13 +266,16 @@ class LinearProvider:
         maps = {number: to_ticket(node) for number, node in found.items()}
         tickets = list(maps.values())
         for number, map_ticket in maps.items():
-            tickets += [with_map(child, map_ticket) for child in self._children(found[number]["id"])]
+            tickets += [with_map(child, map_ticket) for child in self._children(found[number]["id"], limit + 1)]
         if maps:
             tickets += self._linked(maps, candidates, {t.number for t in tickets}, len(tickets))
-        return with_body_blockers(tickets, self.states, key=self.team)
+        tickets = with_body_blockers(cap_families(tickets, limit, cut), self.states, key=self.team)
+        self.cut_off = cut
+        return tickets
 
-    def _children(self, issue_id: str) -> list[Ticket]:
-        """The issue's sub-issues in sub-issue order, then by number; `order` is that position."""
+    def _children(self, issue_id: str, limit: int) -> list[Ticket]:
+        """The issue's first `limit` sub-issues as Linear pages them, in sub-issue order, then by number; `order` is
+        that position."""
 
         def page(after: str | None) -> dict:
             issue = self._query("TicketmasterChildren", {"id": issue_id, "after": after}).get("issue")
@@ -276,7 +283,7 @@ class LinearProvider:
                 raise ProviderError(f"linear: issue {issue_id} not found")
             return issue["children"]
 
-        nodes = sorted((self._complete(node) for node in self._pages(page, "a map's sub-issues")),
+        nodes = sorted((self._complete(node) for node in self._pages(page, "a map's sub-issues", limit=limit)),
                        key=lambda node: (node.get("subIssueSortOrder") is None, node.get("subIssueSortOrder") or 0,
                                          node["number"]))
         return [to_ticket(node, order) for order, node in enumerate(nodes)]
@@ -316,13 +323,14 @@ class LinearProvider:
         nodes = self._pages(page, "the blockers' states")
         return {int(node["number"]): node["state"]["type"] not in CLOSED for node in nodes}
 
-    def _issues(self, op: str, variables: dict) -> list[dict]:
-        """Every issue of the team a query's filter matches, each with all its labels and relations."""
+    def _issues(self, op: str, variables: dict, limit: int | None = None) -> list[dict]:
+        """Every issue of the team a query's filter matches, or its first `limit`, each with all its labels and
+        relations."""
 
         def page(after: str | None) -> dict:
             return self._query(op, {"team": self.team, **variables, "after": after})["issues"]
 
-        return [self._complete(node) for node in self._pages(page, op)]
+        return [self._complete(node) for node in self._pages(page, op, limit=limit)]
 
     def _complete(self, node: dict) -> dict:
         """The issue with all its labels and relations, not just their first pages."""
@@ -337,13 +345,14 @@ class LinearProvider:
         return node
 
     @staticmethod
-    def _pages(fetch: Callable[[str | None], dict], what: str, connection: dict | None = None) -> list[dict]:
-        """Every node of a connection: its first page (fetched when not given), then fetch(endCursor) until
-        hasNextPage is false. Stops with an error on a repeated cursor or past MAX_PAGES, so a misbehaving server
-        can't loop it forever."""
+    def _pages(fetch: Callable[[str | None], dict], what: str, connection: dict | None = None,
+               limit: int | None = None) -> list[dict]:
+        """Every node of a connection, or its first `limit`: its first page (fetched when not given), then
+        fetch(endCursor) until hasNextPage is false or `limit` nodes are in. Stops with an error on a repeated cursor
+        or past MAX_PAGES, so a misbehaving server can't loop it forever."""
         connection = fetch(None) if connection is None else connection
         nodes, seen = list(connection["nodes"]), set()
-        while connection["pageInfo"]["hasNextPage"]:
+        while connection["pageInfo"]["hasNextPage"] and (limit is None or len(nodes) < limit):
             cursor = connection["pageInfo"].get("endCursor")
             if not cursor or cursor in seen:
                 raise ProviderError(f"linear: paging {what} repeated a cursor; stopped")
@@ -352,7 +361,7 @@ class LinearProvider:
             seen.add(cursor)
             connection = fetch(cursor)
             nodes += connection["nodes"]
-        return nodes
+        return nodes if limit is None else nodes[:limit]
 
     def _query(self, op: str, variables: dict) -> dict:
         return self.transport(GQL[op], variables)

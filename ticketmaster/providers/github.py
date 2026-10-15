@@ -13,10 +13,12 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from ..model import Ticket, parse_time, part_of
-from . import (LIMIT, IssueStates, NotFound, ProviderError, Query, RateLimited, as_spec, blocker_ref,
-               closed_map_refs, is_spec, names_parent, resolve_maps, run_cli, run_json, tracker_error, under_spec, with_body_blockers)
+from . import (OPEN_MAPS, IssueStates, NotFound, ProviderError, Query, RateLimited, as_spec, blocker_ref, capped,
+               closed_map_refs, family_cut, is_spec, names_parent, resolve_maps, run_cli, run_json, tracker_error,
+               under_spec, with_body_blockers)
 
 MAP_LABEL = "wayfinder:map"
+OPEN_SPECS = "open specs"  # the `Part of` search that finds closed maps with an open spec
 
 ISSUE_FIELDS = """
   number title url body state stateReason closedAt
@@ -86,14 +88,20 @@ class GitHubProvider:
         self.repo = repo
         self.host = host
         self.states = IssueStates(self._issue_states)
+        self.cut_off: list[str] = []
 
     def fetch(self, query: Query) -> list[Ticket]:
         """Every open map, every closed map an open spec's `Part of #<map>` names, and their children; the
-        sub-issue parent is the native child→map link, `Part of #<map>` the fallback."""
-        q = f'repo:{self.repo} is:issue is:open label:"{MAP_LABEL}"'
-        maps = [to_ticket(node, order=0, repo=self.repo) for node in self._paginate(SEARCH, {"q": q}, ["search"], LIMIT)]
-        q = f'repo:{self.repo} is:issue is:open in:body "Part of"'
-        specs = [to_ticket(node, order=0, repo=self.repo) for node in self._paginate(SEARCH, {"q": q}, ["search"], LIMIT)]
+        sub-issue parent is the native child→map link, `Part of #<map>` the fallback. Each search and each map's
+        tickets stop at the query's limit."""
+        limit, cut = query.limit, []
+
+        def search(q: str, what: str) -> list[Ticket]:
+            nodes = capped(self._paginate(SEARCH, {"q": q}, ["search"], limit + 1), limit, what, cut)
+            return [to_ticket(node, order=0, repo=self.repo) for node in nodes]
+
+        maps = search(f'repo:{self.repo} is:issue is:open label:"{MAP_LABEL}"', OPEN_MAPS)
+        specs = search(f'repo:{self.repo} is:issue is:open in:body "Part of"', OPEN_SPECS)
         wanted = closed_map_refs(specs, {m.number for m in maps})
         if query.named_map is not None and query.named_map not in {m.number for m in maps} | set(wanted):
             wanted.append(query.named_map)
@@ -102,8 +110,10 @@ class GitHubProvider:
             maps += [found] if found is not None and found.is_wayfinder_map else []
         tickets = list(maps)
         for map_ticket in maps:
-            tickets += self._map_family(map_ticket, {t.number for t in tickets})
-        return with_body_blockers(resolve_maps(tickets, self._issue), self.states)
+            tickets += self._map_family(map_ticket, {t.number for t in tickets}, limit, cut)
+        tickets = with_body_blockers(resolve_maps(tickets, self._issue), self.states)
+        self.cut_off = cut
+        return tickets
 
     def map_order(self, number: int) -> list[int]:
         """The map's sub-issue numbers in the order set on GitHub; search results carry no such order."""
@@ -150,9 +160,10 @@ class GitHubProvider:
     def _args(self) -> list[str]:
         return ["gh", "api", "graphql", "--hostname", self.host, "-H", "Content-Type: application/json", "--input", "-"]
 
-    def _map_family(self, map_ticket: Ticket, taken: set[int]) -> list[Ticket]:
+    def _map_family(self, map_ticket: Ticket, taken: set[int], limit: int, cut: list[str]) -> list[Ticket]:
         """The map's sub-issues in order, then the typed tickets and the spec linked by `Part of #<map>`, then the
-        spec's implementation tickets; `order` is that position."""
+        spec's implementation tickets; `order` is that position. The first `limit` of them; a map with more, or
+        whose sub-issues or references go past `limit`, goes on `cut`."""
         tickets: list[Ticket] = []
         number = map_ticket.number
 
@@ -160,22 +171,27 @@ class GitHubProvider:
             seen = taken | {t.number for t in tickets}
             return [to_ticket(node, order=0, repo=self.repo) for node in nodes if node["number"] not in seen and links(node)]
 
-        _, subs, refs = self._children(number, LIMIT)
+        _, subs, refs, more = self._children(number, limit)
         tickets += new(subs)
         tickets += new(refs, lambda node: part_of(node.get("body") or "") == number)
         tickets = [as_spec(t, map_ticket) if is_spec(t, number) else t for t in tickets]
         for spec in [t for t in tickets if is_spec(t, number)]:
-            _, subs, refs = self._children(spec.number, LIMIT)
+            _, subs, refs, spec_more = self._children(spec.number, limit)
+            more = more or spec_more
             tickets += under_spec(new(subs), spec)
             tickets += under_spec(new(refs, lambda node: names_parent(node.get("body"), spec.number)), spec)
-        return [replace(t, order=index) for index, t in enumerate(tickets[:LIMIT])]
+        if more or len(tickets) > limit:
+            cut.append(family_cut(map_ticket))
+        return [replace(t, order=index) for index, t in enumerate(tickets[:limit])]
 
-    def _children(self, number: int, limit: int) -> tuple[Ticket, list[dict], list[dict]]:
-        """The issue (its URL and labels), its sub-issues, and the issues of this repo referring to it."""
+    def _children(self, number: int, limit: int) -> tuple[Ticket, list[dict], list[dict], bool]:
+        """The issue (its URL and labels), its first `limit` sub-issues, the issues of this repo among its first
+        `limit` references, and whether either list went past `limit`."""
         owner, name = self.repo.split("/", 1)
         found: dict[str, list[dict]] = {"subIssues": [], "timelineItems": []}
         after: dict[str, str | None] = {"subIssues": None, "timelineItems": None}
         todo = set(found)
+        more = False
         while todo:
             variables = {"owner": owner, "name": name, "number": number,
                          "subs": after["subIssues"], "refs": after["timelineItems"],
@@ -187,14 +203,16 @@ class GitHubProvider:
                 page = issue[connection]
                 found[connection] += [n for n in page["nodes"] if n]
                 after[connection] = page["pageInfo"].get("endCursor")
-                if not page["pageInfo"]["hasNextPage"] or len(found[connection]) >= limit:
+                has_next, count = page["pageInfo"]["hasNextPage"], len(found[connection])
+                more = more or count > limit or (has_next and count >= limit)
+                if not has_next or count >= limit:
                     todo.discard(connection)
         sources = [event.get("source") or {} for event in found["timelineItems"]]
         refs = {s["number"]: s for s in sources if s.get("number")
                 and (s.get("repository") or {}).get("nameWithOwner", "").lower() == self.repo.lower()}
         labels = tuple(label["name"] for label in issue.get("labels", {}).get("nodes", []))
         parent = Ticket(number=number, title="", url=issue.get("url", ""), is_open=True, labels=labels)
-        return parent, found["subIssues"][:limit], list(refs.values())[:limit]
+        return parent, found["subIssues"][:limit], list(refs.values())[:limit], more
 
     def _named(self, number: int) -> Ticket | None:
         """The issue the board was named with, or None when there is no such issue."""

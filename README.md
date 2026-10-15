@@ -101,7 +101,7 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | free-text filter, clear every filter, refresh now, quit             |
 | `f`            | any               | filter picker: type, HITL/AFK, assignee, map, author ([Filters](#filters); saved per repo) |
-| `c`            | any               | settings menu: refresh interval ([Settings](#settings); saved per repo) |
+| `c`            | any               | settings menu: refresh interval, fetch limit ([Settings](#settings); saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
 
 Arrows or `hjkl` move between cards: up and down walk each lane's map card and then its cards in the
@@ -189,7 +189,7 @@ that is no longer on the board is ignored until it comes back. There are no labe
 per user and repo, under `repos` in the same `settings.json`:
 
 ```json
-{"repos": {"github:owner/name": {"interval": 10}}}
+{"repos": {"github:owner/name": {"interval": 10, "fetch_limit": 100}}}
 ```
 
 `Esc` closes the menu without changing anything. A field that is not valid stays open with a message
@@ -198,11 +198,22 @@ saying why, and a failed save shows a warning while the new value still applies 
 | Setting          | Values                       | Effect                                                    |
 | ---------------- | ---------------------------- | --------------------------------------------------------- |
 | Refresh interval | any positive number of seconds, no floor | ticket and session fetches reschedule at once; the status line's `every Ns` shows it |
+| Fetch limit      | a whole number, 1 or more; default 300 | the open maps the board reads, and the tickets it reads per map, from the next ticket fetch |
 
 The refresh interval is `--interval` for this run, then the repo's saved interval, then the
 default: 5 s, 30 s on Linear. `--interval` never overwrites the saved value; an interval changed in
 the menu is saved, also under `--interval`. A [rate limit](#providers) still slows the board on top
 of it.
+
+The fetch limit caps what the board reads from the tracker: at most that many open maps, and that
+many tickets per map, on every provider. A lower limit means fewer tracker requests on a large repo,
+so the board stays further from rate limits. The default fetch limit is not saved until it is
+changed. A fetch that reaches the limit does not hide tickets silently: the status line says what it
+cut off, e.g. `cut off at 300: open maps, #12's tickets`, until a fetch no longer reaches it. A
+closed map that an open spec names, or that the board was started on, comes on top of the open maps.
+On GitLab and Gitea/Forgejo, which have no sub-issues, a map's tickets are still found among every
+issue with a `wayfinder:` type label, so there the per-map limit trims the board, not the requests. A Linear
+map keeps its first sub-issues as Linear pages them.
 
 ## Wayfinding links
 

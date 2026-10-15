@@ -22,9 +22,9 @@ from email.parser import HeaderParser
 from email.utils import parsedate_to_datetime
 
 from ..model import Ticket, parse_time
-from . import (LABEL_LIMIT, LIMIT, SPEC_SEARCHES, IssueStates, NotFound, ProviderError, Query, RateLimited,
-               blocker_ref, closed_map_refs, map_board, resolve_maps, run_json, tracker_error, wayfinder_labels,
-               with_body_blockers, with_specs)
+from . import (LABEL_LIMIT, LIMIT, OPEN_MAPS, SPEC_SEARCHES, IssueStates, NotFound, ProviderError, Query,
+               RateLimited, blocker_ref, cap_families, capped, closed_map_refs, map_board, resolve_maps, run_json,
+               tracker_error, wayfinder_labels, with_body_blockers, with_specs)
 
 PAGE = 50
 CLOSING = r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#{n}\b"
@@ -67,6 +67,7 @@ class GiteaProvider:
         if login:
             self.login = login
         self.states = IssueStates(self._issue_states)
+        self.cut_off: list[str] = []
 
     @functools.cached_property
     def login(self) -> str:
@@ -81,16 +82,19 @@ class GiteaProvider:
 
     def fetch(self, query: Query) -> list[Ticket]:
         """The open maps, the closed maps an open spec names, the named map, and every typed ticket, open or closed,
-        whose `Part of #<map>` names one."""
+        whose `Part of #<map>` names one; at most the query's limit of open maps, and of tickets per map."""
+        limit, cut = query.limit, []
         labels = self._wayfinder_labels()
         pulls = self._list(f"/repos/{self.repo}/pulls", {"state": "open"}, 200)
         pr_bodies = [f"{p.get('title', '')}\n{p.get('body') or ''}" for p in pulls]
 
-        def issues(state: str, limit: int = LIMIT, **filters: str) -> list[Ticket]:
+        def issues(state: str, most: int, **filters: str) -> list[Ticket]:
             params = {"type": "issues", "state": state, **filters}
-            return [to_ticket(i, None, pr_bodies) for i in self._list(f"/repos/{self.repo}/issues", params, limit)]
+            return [to_ticket(i, None, pr_bodies) for i in self._list(f"/repos/{self.repo}/issues", params, most)]
 
-        maps = {t.number: t for label in labels["map"] for t in issues("open", labels=label) if t.is_wayfinder_map}
+        open_maps = {t.number: t for label in labels["map"] for t in issues("open", limit + 1, labels=label)
+                     if t.is_wayfinder_map}
+        maps = {t.number: t for t in capped(list(open_maps.values()), limit, OPEN_MAPS, cut)}
         named = None
         if query.named_map is not None and query.named_map not in maps:
             found = self._issue_or_none(query.named_map)
@@ -108,7 +112,10 @@ class GiteaProvider:
         with ThreadPoolExecutor(max_workers=8) as pool:
             blockers = dict(zip(open_numbers, pool.map(self._open_blockers, open_numbers)))
         tickets = [with_native_blockers(t, blockers.get(t.number)) for t in tickets]
-        return with_body_blockers(resolve_maps(tickets, functools.cache(self._issue)), self.states)
+        tickets = cap_families(resolve_maps(tickets, functools.cache(self._issue)), limit, cut)
+        tickets = with_body_blockers(tickets, self.states)
+        self.cut_off = cut
+        return tickets
 
     def _wayfinder_labels(self) -> dict[str, list[str]]:
         """The repo's and its org's label names for maps and for the four ticket types. Gitea drops a label filter

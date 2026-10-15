@@ -181,3 +181,20 @@ def test_any_positive_interval_is_accepted():
     from ticketmaster.config import parse_interval
 
     assert (parse_interval("0.25"), parse_interval(" 10 "), parse_interval("120")) == (0.25, 10, 120)
+
+
+@pytest.mark.parametrize("text", ["abc", "", "2.5", "1e3", "0", "-1"])
+def test_a_fetch_limit_must_be_a_positive_whole_number(text):
+    from ticketmaster.config import parse_fetch_limit
+
+    with pytest.raises(ValueError):
+        parse_fetch_limit(text)
+
+
+def test_the_fetch_limit_is_the_repos_saved_one_else_the_default():
+    from ticketmaster.config import board_fetch_limit, parse_fetch_limit
+
+    assert (parse_fetch_limit(" 50 "), parse_fetch_limit("1"), parse_fetch_limit("5000")) == (50, 1, 5000)
+    assert board_fetch_limit({"fetch_limit": 50}) == 50 and board_fetch_limit({}) == 300
+    for unusable in (0, -3, 2.5, "50", True, None):  # a hand-edited settings.json
+        assert board_fetch_limit({"fetch_limit": unusable}) == 300

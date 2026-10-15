@@ -2069,5 +2069,99 @@ def test_help_describes_the_settings_menu_and_the_interval_precedence():
             text = " ".join(app.screen.text.plain.split())
             assert "Settings" in text and "saved per repo" in text
             assert "--interval for this run, then the repo's saved interval, then the default" in text
+            assert "Fetch limit" in text and "cut off at" in text
+
+    run(scenario())
+
+
+async def enter_fetch_limit(pilot, app, text):
+    """Opens the settings menu, replaces the fetch limit with `text` and presses Enter."""
+    await open_settings(pilot, app)
+    app.screen.query_one("#fetch_limit", Input).value = text
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+def test_a_new_fetch_limit_applies_from_the_next_fetch_and_is_saved_for_the_repo(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"repos": {"fake:o/r": {"interval": 5}}}))
+
+    async def scenario():
+        app = settings_app(settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert app.provider.queries[-1].limit == 300
+            await open_settings(pilot, app)
+            assert app.screen.query_one("#fetch_limit", Input).value == "300"
+            await pilot.press("escape")
+            await enter_fetch_limit(pilot, app, " 50 ")
+            assert not isinstance(app.screen, SettingsMenu) and app.provider.calls == 1  # no fetch of its own
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert app.provider.queries[-1].limit == 50
+
+    run(scenario())
+    assert json.loads(settings.read_text()) == {"repos": {"fake:o/r": {"interval": 5, "fetch_limit": 50}}}
+
+
+def test_the_saved_fetch_limit_is_used_and_an_unchanged_default_is_not_saved(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"repos": {"fake:o/r": {"fetch_limit": 40}}}))
+
+    async def restored():
+        app = settings_app(settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert app.provider.queries[-1].limit == 40
+
+    run(restored())
+    fresh = tmp_path / "fresh.json"
+
+    async def interval_only():
+        app = settings_app(fresh)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await enter_interval(pilot, app, "9")
+
+    run(interval_only())
+    assert json.loads(fresh.read_text()) == {"repos": {"fake:o/r": {"interval": 9}}}
+
+
+def test_the_settings_menu_rejects_a_fetch_limit_that_is_no_positive_whole_number(tmp_path):
+    settings = tmp_path / "settings.json"
+
+    async def scenario():
+        app = settings_app(settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await open_settings(pilot, app)
+            field = app.screen.query_one("#fetch_limit", Input)
+            for text in ("abc", "2.5", "0", "-1"):
+                field.value = text
+                await pilot.press("enter")
+                await pilot.pause()
+                assert isinstance(app.screen, SettingsMenu)
+                assert "Fetch limit" in str(app.screen.query_one("#settings-error").render())
+            await pilot.press("escape")
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert app.provider.queries[-1].limit == 300
+
+    run(scenario())
+    assert not settings.exists()
+
+
+def test_the_status_line_says_when_a_fetch_was_cut_off_at_the_limit():
+    async def scenario():
+        provider = FakeProvider(TICKETS)
+        provider.cut_off = ["open maps", "#9's tickets"]
+        app = BoardApp(provider, Query(), interval=60)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "cut off at 300: open maps, #9's tickets" in status_of(app)
+            provider.cut_off = []
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert "cut off" not in status_of(app)
 
     run(scenario())
