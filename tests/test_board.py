@@ -2633,6 +2633,110 @@ def test_the_map_named_on_the_command_line_hides_the_spec_lanes(tmp_path):
     run(scenario())
 
 
+AGED = [
+    MAP,
+    on(9, 1, "Ready one", "task"),
+    on(9, 4, "Just inside", is_open=False, closed_at=NOW - timedelta(days=7)),
+    on(9, 5, "Just outside", is_open=False, closed_at=NOW - timedelta(days=7, seconds=1)),
+    on(9, 6, "Long ago", is_open=False, closed_at=NOW - timedelta(days=400)),
+    on(9, 7, "No date", is_open=False),
+    on(9, 8, "Open, however old"),
+]
+
+
+def aged_app(settings):
+    return BoardApp(FakeProvider(AGED), Query(), settings_path=settings, clock=Clock(), wall=lambda: NOW)
+
+
+async def enter_decided_age(pilot, app, text):
+    """Opens the settings menu, replaces the Decided age with `text` and presses Enter."""
+    await open_settings(pilot, app)
+    app.screen.query_one("#decided_age", Input).value = text
+    await pilot.press("enter")
+    await pilot.pause()
+
+
+def decided_head(app):
+    return str(app.query_one("#head-DECIDED").render())
+
+
+def test_decided_age_hides_tickets_closed_longer_ago_at_once_and_is_saved_for_the_repo(tmp_path):
+    settings = tmp_path / "settings.json"
+
+    async def scenario():
+        app = aged_app(settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert shown_lanes(app)[9]["DECIDED"] == [4, 5, 6, 7]  # off by default
+            await open_settings(pilot, app)
+            assert app.screen.query_one("#decided_age", Input).value == ""
+            await pilot.press("escape")
+            await enter_decided_age(pilot, app, " 7 ")
+            assert app.provider.calls == 1  # applied without a refetch
+            lanes = shown_lanes(app)
+            assert lanes[9]["DECIDED"] == [4, 7] and lanes[9]["FRONTIER"] == [1, 8]
+            assert decided_head(app) == "Decided (2)" and "4 Decided 2" in str(app.query_one("#tabs").render())
+            header = str(app.query(".lane").first().query(Card).first().render())
+            assert "4 decided" in header  # the map's progress still counts every decided ticket
+
+    run(scenario())
+    assert json.loads(settings.read_text()) == {"repos": {"fake:o/r": {"interval": 5, "decided_age": 7}}}
+
+
+def test_the_saved_decided_age_is_used_and_clearing_it_shows_every_decided_ticket_again(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"repos": {"fake:o/r": {"interval": 5, "decided_age": 0}}}))
+
+    async def scenario():
+        app = aged_app(settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            assert shown_lanes(app)[9]["DECIDED"] == [7]  # 0 days: only the ticket without a close date
+            await open_settings(pilot, app)
+            assert app.screen.query_one("#decided_age", Input).value == "0"
+            await pilot.press("escape")
+            await enter_decided_age(pilot, app, "")
+            assert shown_lanes(app)[9]["DECIDED"] == [4, 5, 6, 7]
+
+    run(scenario())
+    assert json.loads(settings.read_text()) == {"repos": {"fake:o/r": {"interval": 5}}}
+
+
+def test_the_settings_menu_rejects_a_decided_age_that_is_no_whole_number_of_days(tmp_path):
+    settings = tmp_path / "settings.json"
+
+    async def scenario():
+        app = aged_app(settings)
+        async with app.run_test(size=(200, 40)) as pilot:
+            await loaded(app, pilot)
+            await open_settings(pilot, app)
+            field = app.screen.query_one("#decided_age", Input)
+            for text in ("abc", "2.5", "-1"):
+                field.value = text
+                await pilot.press("enter")
+                await pilot.pause()
+                assert isinstance(app.screen, SettingsMenu)
+                assert "Decided age" in str(app.screen.query_one("#settings-error").render())
+            await pilot.press("escape")
+            assert shown_lanes(app)[9]["DECIDED"] == [4, 5, 6, 7]
+
+    run(scenario())
+    assert not settings.exists()
+
+
+def test_help_describes_the_decided_age():
+    async def scenario():
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60)
+        async with app.run_test(size=(160, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("question_mark")
+            await pilot.pause()
+            text = " ".join(app.screen.text.plain.split())
+            assert "Decided age" in text and "closed more than N days ago" in text
+
+    run(scenario())
+
+
 # --- the Loose lane ----------------------------------------------------------------------------------
 
 

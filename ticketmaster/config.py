@@ -152,6 +152,26 @@ def board_fetch_limit(saved: dict) -> int:
     return LIMIT
 
 
+def parse_decided_age(text: str) -> int | None:
+    """The Decided age typed in the settings menu: a whole number of days, 0 or more, or empty for off (None);
+    ValueError says what is wrong."""
+    text = text.strip()
+    if not text:
+        return None
+    if not (text.isascii() and text.isdigit()):
+        raise ValueError(f"not a whole number of days, 0 or more: {text!r}")
+    return int(text)
+
+
+def board_decided_age(saved: dict) -> int | None:
+    """The repo's saved Decided age in days (`saved` is its `repos` entry in settings.json), else None: every
+    Decided ticket shown. A saved value that is no whole number, 0 or more, is ignored."""
+    value = saved.get("decided_age")
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
 def git_remote(cwd: Path, name: str) -> str:
     result = subprocess.run(["git", "remote", "get-url", name], cwd=cwd, capture_output=True, text=True)
     if result.returncode != 0:
