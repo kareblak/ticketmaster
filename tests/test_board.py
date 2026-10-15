@@ -252,6 +252,7 @@ def test_an_empty_board_renders_twice_back_to_back():
             app._render_board()
             await pilot.pause()
             assert "No open wayfinder maps or specs in o/r." in str(app.query_one(".empty").render())
+            assert len(app.query(".empty")) == 1
 
     run(scenario())
 
@@ -2108,6 +2109,22 @@ def test_a_filter_that_matches_nothing_says_so(tmp_path):
             await pilot.press("slash", *"nothing here", "enter")
             await pilot.pause()
             assert headers(app) == [] and "No cards match the filters" in str(app.query_one(".empty").render())
+
+    run(scenario())
+
+
+def test_a_board_with_every_card_filtered_away_renders_twice_back_to_back(tmp_path):
+    async def scenario():
+        app = filters_app(tmp_path)
+        async with app.run_test(size=(200, 50)) as pilot:
+            await loaded(app, pilot)
+            await pilot.press("slash", *"nothing here", "enter")
+            await pilot.pause()
+            app._render_board()
+            app._render_board()
+            await pilot.pause()
+            assert "No cards match the filters" in str(app.query_one(".empty").render())
+            assert len(app.query(".empty")) == 1
 
     run(scenario())
 
