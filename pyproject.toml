@@ -8,7 +8,7 @@ dynamic = ["version"]
 description = "Live swimlane board of wayfinder maps on GitHub, GitLab, Gitea/Forgejo and Linear in herdr, starting each ticket in its own worktree workspace with Claude Code"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["textual>=0.80,<9", "pyyaml>=6"]
+dependencies = ["textual>=0.80,<9"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
