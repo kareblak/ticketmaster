@@ -250,17 +250,14 @@ def classify(ticket: Ticket) -> Column:
 
 @dataclass
 class Lane:
-    """A map and its decision tickets, specs and implementation tickets by column; a closed map is collapsed to its
-    header. `progress` counts the decision tickets only."""
+    """A map and its decision tickets, specs and implementation tickets by column; a closed map with no open spec or
+    implementation ticket is collapsed to its header. `progress` counts the decision tickets only."""
 
     map: Ticket
     columns: dict[Column, list[Ticket]] = field(default_factory=lambda: {c: [] for c in COLUMN_ORDER})
     progress: MapProgress = MapProgress(0, 0, 0)
     out_of_scope: set[int] = field(default_factory=set)
-
-    @property
-    def collapsed(self) -> bool:
-        return not self.map.is_open
+    collapsed: bool = False
 
     def tickets(self) -> list[Ticket]:
         return [ticket for tickets in self.columns.values() for ticket in tickets]
@@ -279,15 +276,22 @@ class Board:
         return [ticket for lane in self.lanes for ticket in (lane.map, *lane.tickets())]
 
 
+def is_live_map(map_ticket: Ticket, tickets: list[Ticket]) -> bool:
+    """An open map, or a closed one whose spec or implementation tickets are still being worked."""
+    return map_ticket.is_open or any(t.is_open and t.spec_kind and t.map_number == map_ticket.number for t in tickets)
+
+
 def build_board(tickets: list[Ticket], named_map: int | None = None) -> Board:
-    """A lane per open map, by number, plus the named map when it is closed; anything else is not shown."""
-    maps = sorted((t for t in tickets if t.is_wayfinder_map and (t.is_open or t.number == named_map)),
+    """A lane per live map, by number, plus the named map when it is closed; anything else is not shown."""
+    live = {t.number for t in tickets if t.is_wayfinder_map and is_live_map(t, tickets)}
+    maps = sorted((t for t in tickets if t.is_wayfinder_map and (t.number in live or t.number == named_map)),
                   key=lambda t: t.number)
     board = Board()
     for map_ticket in maps:
         children = lane_tickets(map_ticket, tickets)
         lane = Lane(map_ticket, progress=map_progress(map_ticket, tickets),
-                    out_of_scope={t.number for t in children if is_out_of_scope(t, map_ticket)})
+                    out_of_scope={t.number for t in children if is_out_of_scope(t, map_ticket)},
+                    collapsed=map_ticket.number not in live)
         if not lane.collapsed:
             for ticket in children:
                 lane.columns[classify(ticket)].append(ticket)

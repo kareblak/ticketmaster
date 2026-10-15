@@ -13,8 +13,8 @@ import functools
 import json
 
 from ..model import Ticket, parse_time
-from . import (LABEL_LIMIT, LIMIT, SPEC_SEARCHES, IssueStates, ProviderError, Query, blocker_ref, map_board,
-               resolve_maps, run_json, tracker_error, wayfinder_labels, with_body_blockers, with_specs)
+from . import (LABEL_LIMIT, LIMIT, SPEC_SEARCHES, IssueStates, ProviderError, Query, blocker_ref, closed_map_refs,
+               map_board, resolve_maps, run_json, tracker_error, wayfinder_labels, with_body_blockers, with_specs)
 
 ISSUE_FIELDS = """
   iid title webUrl description state closedAt
@@ -91,15 +91,20 @@ class GitLabProvider:
         return states
 
     def fetch(self, query: Query) -> list[Ticket]:
-        """The open maps, the named map, and every typed ticket, open or closed, whose `Part of #<map>` names one."""
+        """The open maps, the closed maps an open spec names, the named map, and every typed ticket, open or closed,
+        whose `Part of #<map>` names one."""
         labels = wayfinder_labels([node["title"] for node in self._pages(LABELS, {}, ["project", "labels"])])
         maps = {t.number: t for label in labels["map"] for t in self._issues({"state": "opened", "labels": [label]})
                 if t.is_wayfinder_map}
         named = self._named(query.named_map) if query.named_map is not None and query.named_map not in maps else None
         children = [t for label in labels["ticket"] for t in self._issues({"labels": [label]}, LABEL_LIMIT)]
+        found = [t for words in SPEC_SEARCHES for t in self._issues({"search": words}, LABEL_LIMIT)] if labels["map"] else []
+        shown = maps.keys() | ({named.number} if named else set())
+        for number in closed_map_refs(found, shown):
+            if (closed := self._named(number)) is not None and closed.is_wayfinder_map:
+                maps[number] = closed
         tickets = map_board(maps, named, children)
         if any(t.is_wayfinder_map for t in tickets):
-            found = [t for words in SPEC_SEARCHES for t in self._issues({"search": words}, LABEL_LIMIT)]
             tickets = with_specs(tickets, found)
         return with_body_blockers(resolve_maps(tickets, functools.cache(self._issue)), self.states)
 

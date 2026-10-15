@@ -71,7 +71,8 @@ Issues that are not wayfinder work are not shown. `map` (`42`, `#42`, the issue'
 key like `TM-1` or a Linear issue URL) opens the full board with the [map filter](#filters) preset to
 that map, for this run only; `Esc` clears it and shows every open map. A key matches the map card
 whose tracker key it is, never issue number 1; a key no map carries shows an empty board. A closed map
-shows only when you name it by number or URL, or on Linear by its team's key, as its header card alone.
+whose spec is still open stays on the board in full. Any other closed map shows only when you name it by
+number or URL, or on Linear by its team's key, as its header card alone.
 
 The board refreshes every 5 s, every 30 s on Linear; `--interval` sets another.
 
@@ -203,7 +204,9 @@ implement_command = "/implement"          # default /mattpocock-skills:implement
 
 Each open `wayfinder:map` is a lane, ordered by issue number. Its header is the map card: the map's
 title and its counts, **decided** (closed tickets, less those out of scope), **open** and
-**blocked**. A closed map shows only when named (`ticketmaster <map>`), shrunk to its header card.
+**blocked**. A closed map keeps its full lane while any of its spec or implementation tickets is
+open, since the decisions are made but the work goes on. Otherwise it shows only when named
+(`ticketmaster <map>`), shrunk to its header card.
 The lane holds the map's decision tickets (`wayfinder:research`, `prototype`, `grilling` or `task`),
 then its spec and the spec's implementation tickets, each in the first column whose rule matches.
 The map card's counts are of its decision tickets only.

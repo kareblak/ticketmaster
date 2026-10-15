@@ -1,7 +1,7 @@
 """Linear via its GraphQL API, with a personal API key; a key with only the Read permission is enough.
 
-The board is every open `wayfinder:map` issue of the configured team and, per map, its sub-issues in sub-issue
-order, plus the team's issues whose first line is `Part of <map>`: a typed ticket linked only that way, or the map's
+The board is every open `wayfinder:map` issue of the configured team, and every closed one an open spec still names,
+and, per map, its sub-issues in sub-issue order, plus the team's issues whose first line is `Part of <map>`: a typed ticket linked only that way, or the map's
 spec. Linear stores a typed `Part of TM-1` as a mention, `[TM-1](<issue URL>)`, so the line may hold the key, the
 mention or the URL. A spec's implementation tickets are its sub-issues and the issues whose `## Parent` section
 names it. Blockers are the `blocks` relations pointing at an issue, then the `TM-<n>` its `Blocked by:` line or
@@ -27,8 +27,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from ..model import Ticket, parse_time, part_of, wayfinder_kinds
-from . import (IssueStates, ProviderError, Query, RateLimited, as_spec, is_spec, parent_ref, under_spec,
-               with_body_blockers, with_map)
+from . import (IssueStates, ProviderError, Query, RateLimited, as_spec, closed_map_refs, is_spec, parent_ref,
+               under_spec, with_body_blockers, with_map)
 
 LINEAR_URL = "https://api.linear.app/graphql"
 LINEAR_HOST = "api.linear.app"
@@ -211,19 +211,24 @@ class LinearProvider:
         return (self._query("TicketmasterViewer", {}).get("viewer") or {}).get("displayName")
 
     def fetch(self, query: Query) -> list[Ticket]:
-        """Every open map, and the named one when it is a closed map; per map its sub-issues in sub-issue order,
+        """Every open map, every closed map an open spec's `Part of` names, and the named one when it is a closed map;
+        per map its sub-issues in sub-issue order,
         then the team's tickets linked to it by `Part of` and the spec's implementation tickets."""
         found = {int(node["number"]): node for node in self._issues("TicketmasterMaps", {"label": MAP_LABEL})}
-        if query.named_map is not None and query.named_map not in found:
-            named = self._issues("TicketmasterIssue", {"number": query.named_map})
-            found |= {int(node["number"]): node for node in named
+        candidates = sorted((to_ticket(node) for node in self._issues("TicketmasterLinked", {})),
+                            key=lambda t: t.number)  # Linear lists newest first
+        wanted = closed_map_refs(candidates, set(found), self.team)
+        if query.named_map is not None and query.named_map not in found.keys() | set(wanted):
+            wanted.append(query.named_map)
+        for number in wanted:
+            found |= {int(node["number"]): node for node in self._issues("TicketmasterIssue", {"number": number})
                       if to_ticket(node).is_wayfinder_map}
         maps = {number: to_ticket(node) for number, node in found.items()}
         tickets = list(maps.values())
         for number, map_ticket in maps.items():
             tickets += [with_map(child, map_ticket) for child in self._children(found[number]["id"])]
         if maps:
-            tickets += self._linked(maps, {t.number for t in tickets}, len(tickets))
+            tickets += self._linked(maps, candidates, {t.number for t in tickets}, len(tickets))
         return with_body_blockers(tickets, self.states, key=self.team)
 
     def _children(self, issue_id: str) -> list[Ticket]:
@@ -240,12 +245,10 @@ class LinearProvider:
                                          node["number"]))
         return [to_ticket(node, order) for order, node in enumerate(nodes)]
 
-    def _linked(self, maps: dict[int, Ticket], seen: set[int], order: int) -> list[Ticket]:
+    def _linked(self, maps: dict[int, Ticket], candidates: list[Ticket], seen: set[int], order: int) -> list[Ticket]:
         """The tickets whose `Part of` line names a map: a typed ticket goes on it, an untyped one is its spec; then
         each spec's implementation tickets, its sub-issues and those whose `## Parent` section names it. Their
         `order` follows the maps' sub-issues."""
-        candidates = sorted((to_ticket(node) for node in self._issues("TicketmasterLinked", {})),
-                            key=lambda t: t.number)  # Linear lists newest first
         candidates = [t for t in candidates if t.number not in seen]
         linked, specs = [], {}
         for ticket in candidates:
