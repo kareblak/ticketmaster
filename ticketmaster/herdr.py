@@ -30,7 +30,8 @@ BOARD_RATIO = 0.7  # share the caller keeps; leaves the board ~1/3, i.e. single-
 WORKTREE_NAME = re.compile(r"^(?:worktree-)?(?:issue|tm)-(?P<number>\d+)(?:-\d+)?$", re.IGNORECASE)
 # A terminal title starting with the key, `TM-12 …` or `#12 …`, after any spinner glyph Claude puts first.
 TITLE_KEY = re.compile(r"^[^\w#]*(?:#|tm-)(?P<number>\d+)(?!\w)", re.IGNORECASE)
-URGENCY = {"blocked": 0, "working": 1, "done": 2, "idle": 3, "unknown": 4}  # needs you > working > idle
+# Which session Enter goes to first: needs you > working > idle, any agent before a worktree without one (None).
+URGENCY = {"blocked": 0, "working": 1, "idle": 2, "done": 3, "unknown": 4, None: 9}
 
 
 class HerdrError(RuntimeError):
@@ -73,7 +74,7 @@ class Session:
     @property
     def urgency(self) -> tuple[int, bool]:
         """Sorts the one to go to first: needs you, working, idle, then a worktree without an agent."""
-        return (9 if self.status is None else URGENCY.get(self.status, 5)), self.workspace is None
+        return URGENCY.get(self.status, URGENCY["unknown"]), self.workspace is None
 
 
 @dataclass(frozen=True)
@@ -105,12 +106,13 @@ def ticket_number(worktree: dict) -> int | None:
 
 
 def title_number(agent: dict) -> int | None:
+    """The ticket an agent's terminal title starts with (`TM-5 …`, `#5 …`), as `claude -n` sets it."""
     title = agent.get("terminal_title_stripped") or agent.get("terminal_title") or ""
     match = TITLE_KEY.match(title)
     return int(match["number"]) if match else None
 
 
-def containing(worktrees: list[dict], agent: dict) -> dict | None:
+def checkout_of(agent: dict, worktrees: list[dict]) -> dict | None:
     """The repo checkout the agent runs in, by its foreground cwd (else its pane's cwd); the deepest wins, since
     `claude -w` worktrees lie inside the main checkout. None: the agent is not in this repo."""
     where = agent.get("foreground_cwd") or agent.get("cwd")
@@ -201,7 +203,7 @@ class Herdr:
         found: dict[int, list[Session]] = {}
         busy: set[str] = set()  # worktrees with an agent in them
         for agent in self.call("agent", "list").get("agents", []):
-            if (checkout := containing(checkouts, agent)) is None:
+            if (checkout := checkout_of(agent, checkouts)) is None:
                 continue
             busy.add(checkout["path"])
             by_name = ticket_number(checkout) if checkout.get("is_linked_worktree") else None
