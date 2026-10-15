@@ -144,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ticketmaster: `{args.command}` runs inside herdr; start herdr and run it from a herdr pane", file=sys.stderr)
         return 2
     cwd = Path.cwd()
-    from .config import default_interval, resolve_provider
+    from .config import resolve_provider
 
     try:
         provider = resolve_provider(cwd, args.provider, args.repo, args.host)
@@ -181,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     BoardApp(
         provider,
         Query(named_map=named_number(args.map, provider)),
-        interval=args.interval if args.interval is not None else default_interval(provider.name),
+        interval=args.interval,
         workbench=workbench,
         describe_start=lambda ticket: workbench.prompt(ticket)
         + f"\nworktree: {worktree_name(ticket)}, in its own herdr workspace",
