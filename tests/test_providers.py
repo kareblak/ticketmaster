@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -68,31 +69,70 @@ def page(nodes):
     return {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}
 
 
-def github_board(monkeypatch, maps, subs=None, refs=None, named=None, specs=()):
-    """Fakes `gh api graphql`: the map search, the open `Part of` search (`specs`), each issue's sub-issues and
-    cross-references, a named issue (one issue, or a dict of them by number)."""
-    asked = []
+def gh_answers(monkeypatch, answer):
+    """Fakes `gh api graphql`: `answer(args, stdin)` is the JSON answer, as a dict."""
+    monkeypatch.setattr(github, "run_cli", lambda args, stdin=None, check=True: json.dumps(answer(args, stdin)))
 
-    def fake_run_json(args, stdin=None):
-        variables = json.loads(stdin)["variables"]
+
+RESET = "2026-10-15T13:00:00Z"
+
+
+class FakeGitHub:
+    """Fakes `gh api graphql` for a repo of `issues` (full nodes by number): the map search answers `maps` and the
+    `Part of` search `specs`, lean; `subs` and `refs` are each issue's sub-issues and cross-references. `asked` is
+    what was asked, and every answer costs `cost` points and leaves `remaining`, one fewer each call."""
+
+    def __init__(self, monkeypatch, issues=(), maps=(), specs=(), subs=None, refs=None, cost=1, remaining=4000):
+        self.issues = {n["number"]: n for n in [*maps, *issues]}
+        self.maps, self.specs, self.subs, self.refs = list(maps), list(specs), subs or {}, refs or {}
+        self.cost, self.remaining = cost, remaining
+        self.asked = []
+        gh_answers(monkeypatch, self.answer)
+
+    def answer(self, args, stdin):
+        gql, variables = json.loads(stdin)["query"], json.loads(stdin)["variables"]
+        aliases = [int(n) for n in re.findall(r"\w+: (?:issue|issueOrPullRequest)\(number: (\d+)\)", gql)]
+        errors = []
         if "q" in variables:
-            asked.append(("search", variables["q"]))
-            return {"data": {"search": page(list(specs) if '"Part of"' in variables["q"] else maps)}}
-        if "withSubs" in variables:
-            number = variables["number"]
-            asked.append(("children", number))
-            issue = {"url": f"https://gh/o/r/issues/{number}", "labels": {"nodes": []},
-                     "subIssues": page((subs or {}).get(number, [])),
-                     "timelineItems": page([{"source": s} for s in (refs or {}).get(number, [])])}
-            return {"data": {"repository": {"issue": issue}}}
-        asked.append(("issue", variables["number"]))
-        found = named.get(variables["number"]) if named and "number" not in named else named
-        if found is None:
-            return {"errors": [{"type": "NOT_FOUND", "message": "Could not resolve"}]}
-        return {"data": {"repository": {"issue": found}}}
+            self.asked.append(("search", variables["q"]))
+            hits = self.specs if '"Part of"' in variables["q"] else self.maps
+            data = {"search": page([{k: n[k] for k in ("number", "body", "labels")} for n in hits])}
+        elif "issueOrPullRequest" in gql:
+            self.asked.append(("states", aliases))
+            data = {"repository": {f"i{n}": {"state": self.issues[n]["state"]} if n in self.issues else None
+                                   for n in aliases}}
+        elif aliases and "subIssues" in gql:
+            self.asked.append(("children", aliases))
+            data = {"repository": {f"c{n}": self.children(n) for n in aliases}}
+        elif aliases:
+            self.asked.append(("issues", aliases))
+            data = {"repository": {f"i{n}": self.issues.get(n) for n in aliases}}
+            errors = [{"type": "NOT_FOUND", "message": f"Could not resolve #{n}"} for n in aliases if n not in self.issues]
+        elif "viewer" in gql:
+            self.asked.append(("viewer",))
+            data = {"viewer": {"login": "me"}}
+        elif "withSubs" in variables:
+            self.asked.append(("more children", variables["number"]))
+            data = {"repository": {"issue": self.children(variables["number"])}}
+        else:
+            self.asked.append(("issue", variables["number"]))
+            found = self.issues.get(variables["number"])
+            data = {"repository": {"issue": found}}
+            errors = [] if found else [{"type": "NOT_FOUND", "message": "Could not resolve"}]
+        data["rateLimit"] = {"cost": self.cost, "remaining": self.remaining, "resetAt": RESET}
+        self.remaining -= self.cost
+        return {"data": data, **({"errors": errors} if errors else {})}
 
-    monkeypatch.setattr(github, "run_json", fake_run_json)
-    return asked
+    def children(self, number):
+        return {"subIssues": page(self.subs.get(number, [])),
+                "timelineItems": page([{"source": s} for s in self.refs.get(number, [])])}
+
+
+def github_board(monkeypatch, maps, subs=None, refs=None, named=None, specs=()):
+    """The map search answers `maps` and the open `Part of` search `specs`; `named` is one more issue, or a dict of
+    them by number."""
+    named = {} if named is None else named if "number" not in named else {named["number"]: named}
+    return FakeGitHub(monkeypatch, named.values(), maps, specs, subs, refs).asked
 
 
 def lanes(tickets, named_map=None):
@@ -113,7 +153,7 @@ def test_github_fetches_every_open_map_with_its_children_in_map_order(monkeypatc
     asked = github_board(monkeypatch, maps, subs, refs)
     tickets = github.GitHubProvider("o/r").fetch(Query())
     assert asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
-                     ("search", 'repo:o/r is:issue is:open in:body "Part of"'), ("children", 1), ("children", 20)]
+                     ("search", 'repo:o/r is:issue is:open in:body "Part of"'), ("issues", [1, 20]), ("children", [1, 20])]
     assert [(t.number, t.order) for t in tickets] == [(1, 0), (20, 0), (5, 0), (3, 1), (4, 2), (21, 0)]
     assert lanes(tickets) == {1: {"FRONTIER": [5, 4], "DECIDED": [3]}, 20: {"FRONTIER": [21]}}
 
@@ -123,13 +163,13 @@ def test_github_adds_a_named_closed_map_with_its_children(monkeypatch):
     asked = github_board(monkeypatch, [], {7: [gh_issue(8, ["wayfinder:task"], parent=7)]}, named=closed_map)
     tickets = github.GitHubProvider("o/r").fetch(Query(named_map=7))
     assert [(t.number, t.is_open) for t in tickets] == [(7, False), (8, True)]
-    assert ("issue", 7) in asked
+    assert ("issues", [7]) in asked
 
 
 def test_github_asks_for_a_named_map_only_when_it_is_not_open_and_drops_one_that_is_no_map(monkeypatch):
     asked = github_board(monkeypatch, [gh_issue(1, MAP_LABELS)])
     assert [t.number for t in github.GitHubProvider("o/r").fetch(Query(named_map=1))] == [1]
-    assert ("issue", 1) not in asked
+    assert [a for a in asked if a[0] == "issues"] == [("issues", [1])]
     github_board(monkeypatch, [], named=gh_issue(7, ["bug"], state="CLOSED"))
     assert github.GitHubProvider("o/r").fetch(Query(named_map=7)) == []
     github_board(monkeypatch, [])
@@ -292,7 +332,7 @@ def test_github_shows_a_closed_map_whose_spec_is_still_open(monkeypatch):
     asked = github_board(monkeypatch, [], subs, {1: [spec]}, named={1: closed_map, 9: gh_issue(9, ["bug"])},
                          specs=[spec, gh_issue(7, [], "Part of #9")])
     tickets = github.GitHubProvider("o/r").fetch(Query())
-    assert ("issue", 1) in asked and ("issue", 9) in asked
+    assert ("issues", [1, 9]) in asked
     assert lanes(tickets) == {1: {"FRONTIER": [14, 15], "DECIDED": [2]}}
 
 
@@ -390,7 +430,10 @@ def test_other_cli_errors_are_not_rate_limited(monkeypatch):
 @pytest.mark.parametrize("module, path", [(github, ["search"]), (gitlab, ["project"])])
 def test_graphql_rate_limit_errors_are_rate_limited(monkeypatch, module, path):
     errors = [{"type": "RATE_LIMITED", "message": "API rate limit exceeded for user ID 1."}]
-    monkeypatch.setattr(module, "run_json", lambda args, stdin=None: {"errors": errors})
+    if module is github:
+        gh_answers(monkeypatch, lambda args, stdin=None: {"errors": errors})
+    else:
+        monkeypatch.setattr(module, "run_json", lambda args, stdin=None: {"errors": errors})
     provider = github.GitHubProvider("o/r") if module is github else gitlab.GitLabProvider("g/p")
     with pytest.raises(RateLimited):
         provider.fetch(Query())
@@ -472,20 +515,20 @@ def test_github_native_blockers_are_named_and_body_blockers_looked_up(monkeypatc
 
     calls = []
 
-    def fake_run_cli(args, stdin=None, check=True):
+    def answer(args, stdin):
         body = json.loads(stdin)
         calls.append(body)
         if "q" in body["variables"]:
-            nodes = [node(7, "Blocked by: #8, #50, #51", [(8, "OPEN", "o/r"), (3, "OPEN", "x/y"), (9, "CLOSED", "o/r")])]
-            return json.dumps({"data": {"search": page(nodes)}})
-        if "withSubs" in body["variables"]:
-            issue = {"url": "u", "labels": {"nodes": []}, "subIssues": page([]), "timelineItems": page([])}
-            return json.dumps({"data": {"repository": {"issue": issue}}})
+            return {"data": {"search": page([{"number": 7, "body": "", "labels": {"nodes": [{"name": "wayfinder:map"}]}}])}}
+        if "subIssues" in body["query"]:
+            return {"data": {"repository": {"c7": {"subIssues": page([]), "timelineItems": page([])}}}}
+        if "i7: issue(" in body["query"]:
+            nodes = node(7, "Blocked by: #8, #50, #51", [(8, "OPEN", "o/r"), (3, "OPEN", "x/y"), (9, "CLOSED", "o/r")])
+            return {"data": {"repository": {"i7": nodes}}}
         errors = [{"type": "NOT_FOUND", "message": "Could not resolve"}]
-        return json.dumps({"data": {"repository": {"i50": {"state": "OPEN"}, "i51": None}}, "errors": errors})
+        return {"data": {"repository": {"i50": {"state": "OPEN"}, "i51": None}}, "errors": errors}
 
-    monkeypatch.setattr(github, "run_cli", fake_run_cli)
-    monkeypatch.setattr(providers, "run_cli", fake_run_cli)
+    gh_answers(monkeypatch, answer)
     [t] = github.GitHubProvider("o/r").fetch(Query())
     assert (t.blocked_by, t.open_blockers) == (("#8", "x/y#3", "#50"), 3)
     assert "i50: issueOrPullRequest(number: 50)" in calls[-1]["query"]
@@ -499,7 +542,7 @@ def test_github_lookup_raises_on_errors_other_than_not_found(monkeypatch):
 
 
 def test_github_viewer(monkeypatch):
-    monkeypatch.setattr(github, "run_json", lambda args, stdin=None: {"data": {"viewer": {"login": "kareblak"}}})
+    gh_answers(monkeypatch, lambda args, stdin=None: {"data": {"viewer": {"login": "kareblak"}}})
     assert github.GitHubProvider("o/r").viewer() == "kareblak"
 
 
@@ -616,7 +659,7 @@ def test_resolve_maps_lets_tracker_errors_surface_instead_of_calling_the_map_mis
 
 def test_github_missing_map_issue_is_no_map_but_other_errors_surface(monkeypatch):
     answer = {}
-    monkeypatch.setattr(github, "run_json", lambda args, stdin=None: answer)
+    gh_answers(monkeypatch, lambda args, stdin=None: answer)
     answer.update(errors=[{"type": "NOT_FOUND", "message": "Could not resolve to an Issue with the number of 9."}])
     assert github.GitHubProvider("o/r")._issue(9) is None
     answer.update(errors=[{"type": "FORBIDDEN", "message": "Resource not accessible"}])
@@ -759,22 +802,10 @@ def family_node(n, parent=None, repo="o/r"):
     return node
 
 
-def github_children(monkeypatch, sub_issues, references, labels_of=lambda n: FAMILY[n][2]):
-    asked = []
-
-    def fake_run_json(args, stdin=None):
-        if "q" in json.loads(stdin)["variables"]:
-            return {"data": {"search": page([family_node(1)])}}
-        number = json.loads(stdin)["variables"]["number"]
-        asked.append(number)
-        issue = {"url": f"https://gh/{number}", "labels": {"nodes": [{"name": label} for label in labels_of(number)]},
-                 "subIssues": {"pageInfo": {"hasNextPage": False}, "nodes": sub_issues.get(number, [])},
-                 "timelineItems": {"pageInfo": {"hasNextPage": False},
-                                   "nodes": [{"source": s} for s in references.get(number, [])] + [{"source": {}}]}}
-        return {"data": {"repository": {"issue": issue}}}
-
-    monkeypatch.setattr(github, "run_json", fake_run_json)
-    return asked
+def github_children(monkeypatch, sub_issues, references):
+    """The map #1 alone is open; the children of the map and its spec come from `sub_issues` and `references`."""
+    fake = FakeGitHub(monkeypatch, maps=[family_node(1)], subs=sub_issues, refs=references)
+    return fake.asked
 
 
 def test_github_reads_each_maps_spec_and_its_implementation_tickets(monkeypatch):
@@ -782,12 +813,14 @@ def test_github_reads_each_maps_spec_and_its_implementation_tickets(monkeypatch)
     # so GitHub reports them as cross-references; #6 and #8 (another repo) mention without linking.
     sub_issues = {1: [family_node(2, parent=1)], 3: [family_node(4, parent=3)]}
     references = {1: [family_node(3), family_node(6), family_node(2, parent=1)],
-                  3: [family_node(5), family_node(4, parent=3), {**family_node(5, repo="x/y"), "number": 8}]}
+                  3: [family_node(5), family_node(4, parent=3), {**family_node(5, repo="x/y"), "number": 8}, {}]}
     asked = github_children(monkeypatch, sub_issues, references)
     tickets = github.GitHubProvider("o/r").fetch(Query())
     assert_map_family(tickets, "https://gh/1", "https://gh/3")
     assert [t.number for t in tickets] == [1, 2, 3, 4, 5]  # the map, its order, then the spec, then its tickets
-    assert sorted(asked) == [1, 3]  # the decision ticket is not a spec, so its children are not asked for
+    # The open `Part of` search missed the spec, so its children come in a batch of their own; the decision ticket
+    # is not a spec, so its children are not asked for.
+    assert [a for a in asked if a[0] == "children"] == [("children", [1]), ("children", [3])]
 
 
 def family_labels(n, scoped=False):
@@ -834,7 +867,7 @@ def test_gitlab_shows_a_closed_map_whose_spec_is_still_open(monkeypatch):
 def test_github_map_order_is_the_maps_sub_issue_order(monkeypatch):
     calls = []
 
-    def fake_run_json(args, stdin=None):
+    def answer(args, stdin=None):
         body = json.loads(stdin)
         calls.append(body["variables"])
         after = body["variables"]["after"]
@@ -842,7 +875,7 @@ def test_github_map_order_is_the_maps_sub_issue_order(monkeypatch):
         page = {"pageInfo": {"hasNextPage": more, "endCursor": "c1"}, "nodes": nodes}
         return {"data": {"repository": {"issue": {"subIssues": page}}}}
 
-    monkeypatch.setattr(github, "run_json", fake_run_json)
+    gh_answers(monkeypatch, answer)
     assert github.GitHubProvider("o/r").map_order(1) == [9, 4, 6]
     assert [c["number"] for c in calls] == [1, 1] and calls[1]["after"] == "c1"
 
@@ -1040,3 +1073,89 @@ def test_a_cut_map_lane_keeps_its_first_tickets_in_map_order():
     cut: list[str] = []
     assert [t.number for t in providers.cap_lanes([the_map, *kids], 2, cut)] == [1, 8, 9]
     assert cut == ["#1's tickets"]
+
+
+def lean_board(monkeypatch, cost=1):
+    """Three open maps (#1, #10, #20), each with a decision ticket and a spec that names it by `Part of`; each spec has
+    an implementation ticket as a sub-issue and one by its `## Parent` section. #30 is no map's spec."""
+    maps, subs, refs, specs = [], {}, {}, []
+    for m in (1, 10, 20):
+        spec = gh_issue(m + 2, ["ready-for-agent"], f"Part of #{m}\n\n## Problem Statement")
+        maps.append(gh_issue(m, MAP_LABELS))
+        subs[m] = [gh_issue(m + 1, ["wayfinder:grilling"], parent=m)]
+        refs[m] = [spec]
+        subs[m + 2] = [gh_issue(m + 3, [], parent=m + 2)]
+        refs[m + 2] = [gh_issue(m + 4, [], f"## Parent\n\n#{m + 2}")]
+        specs.append(spec)
+    specs.append(gh_issue(30, [], "Part of #404"))
+    return FakeGitHub(monkeypatch, [gh_issue(404, ["bug"])], maps, specs, subs, refs, cost=cost)
+
+
+def test_github_searches_lean_then_fetches_the_hits_and_every_maps_and_specs_children_once(monkeypatch):
+    fake = lean_board(monkeypatch)
+    queries = []
+    answer = fake.answer
+    gh_answers(monkeypatch, lambda args, stdin: queries.append(json.loads(stdin)["query"]) or answer(args, stdin))
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    # #30's `Part of #404` names a closed issue that is no map, so it is fetched with the maps and dropped.
+    assert fake.asked == [("search", 'repo:o/r is:issue is:open label:"wayfinder:map"'),
+                          ("search", 'repo:o/r is:issue is:open in:body "Part of"'),
+                          ("issues", [1, 10, 20, 404]),
+                          ("children", [1, 10, 20, 3, 12, 22])]
+    for search in queries[:2]:
+        assert "title" not in search and "assignees" not in search and "blockedBy" not in search
+    assert lanes(tickets) == {m: {"FRONTIER": [m + 1, m + 2, m + 3, m + 4]} for m in (1, 10, 20)}
+
+
+def test_github_reports_what_its_last_fetch_cost_and_the_points_left(monkeypatch):
+    lean_board(monkeypatch, cost=3)
+    provider = github.GitHubProvider("o/r")
+    assert provider.quota is None
+    provider.fetch(Query())
+    reset = datetime(2026, 10, 15, 13, tzinfo=timezone.utc)
+    # Four calls at 3 points each: the remaining count the last call saw.
+    assert provider.quota == providers.Quota(cost=12, remaining=4000 - 9, resets_at=reset)
+    provider.viewer()  # outside a fetch: no fetch's cost
+    provider.fetch(Query())
+    assert provider.quota == providers.Quota(cost=12, remaining=4000 - 24, resets_at=reset)
+
+
+def test_trackers_other_than_github_report_no_quota(monkeypatch):
+    gitlab_board(monkeypatch, GITLAB_LABELS, GITLAB_ISSUES)
+    provider = gitlab.GitLabProvider("g/p")
+    provider.fetch(Query())
+    assert getattr(provider, "quota", None) is None
+    gitea_board(monkeypatch, ["wayfinder:map"], None, GITEA_ISSUES)
+    provider = gitea.GiteaProvider("o/r", "codeberg.org", login="x")
+    provider.fetch(Query())
+    assert getattr(provider, "quota", None) is None
+
+
+def test_github_reads_a_maps_further_sub_issue_pages_after_the_batch(monkeypatch):
+    fake = FakeGitHub(monkeypatch, maps=[gh_issue(1, MAP_LABELS)])
+    first = {"pageInfo": {"hasNextPage": True, "endCursor": "s1"},
+             "nodes": [gh_issue(2, ["wayfinder:task"], parent=1)]}
+    more = page([gh_issue(3, ["wayfinder:task"], parent=1)])
+    fake.children = lambda number: {"subIssues": more if fake.asked[-1][0] == "more children" else first,
+                                    "timelineItems": page([])}
+    tickets = github.GitHubProvider("o/r").fetch(Query())
+    assert fake.asked[-2:] == [("children", [1]), ("more children", 1)]
+    assert [t.number for t in tickets] == [1, 2, 3]
+
+
+def test_github_rate_limit_refusal_without_graphql_errors_is_rate_limited(monkeypatch):
+    # GitHub's secondary limit answers a REST body; for an aliased query gh's failing exit is read past.
+    gh_answers(monkeypatch, lambda args, stdin: {"message": "You have exceeded a secondary rate limit."})
+    with pytest.raises(RateLimited):
+        github.GitHubProvider("o/r")._issue_states([5])
+
+
+def test_github_failed_fetch_still_reports_the_points_it_saw(monkeypatch):
+    fake = lean_board(monkeypatch, cost=2)
+    answer = fake.answer
+    gh_answers(monkeypatch, lambda args, stdin: answer(args, stdin) if len(fake.asked) < 2 else
+               {"errors": [{"type": "FORBIDDEN", "message": "Resource not accessible"}]})
+    provider = github.GitHubProvider("o/r")
+    with pytest.raises(ProviderError):
+        provider.fetch(Query())
+    assert (provider.quota.cost, provider.quota.remaining) == (4, 3998)

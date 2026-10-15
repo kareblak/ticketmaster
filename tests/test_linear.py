@@ -281,3 +281,11 @@ def test_the_fetch_limit_caps_a_maps_tickets_and_reads_no_page_past_it():
     assert provider.cut_off == ["TM-1's tickets"]
     assert fake.ops().count("TicketmasterChildren") == 2  # three of the eight sub-issues tell it was cut
     assert len(provider.fetch(Query(limit=8))) == 9 and provider.cut_off == []
+
+
+def test_linear_reports_no_quota():
+    fake = FakeLinear()
+    fake.add_issue("Pick a stack", "Notes", labels=["wayfinder:map"])
+    provider = LinearProvider("TM", transport=fake)
+    provider.fetch(Query())
+    assert getattr(provider, "quota", None) is None
