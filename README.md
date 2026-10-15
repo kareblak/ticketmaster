@@ -66,8 +66,11 @@ only runs inside herdr (`HERDR_ENV=1`).
 
 The board shows every open `wayfinder:map` in the repo as a lane, with the map's decision tickets,
 its spec and the spec's implementation tickets (see [Lanes and columns](#lanes-and-columns)).
-Issues that are not wayfinder work are not shown. A closed map shows only when you name it: `map`
-(`42`, `#42` or an issue URL) adds that map, as its header card alone.
+Issues that are not wayfinder work are not shown. `map` (`42`, `#42`, the issue's URL, or a tracker
+key like `TM-1` or a Linear issue URL) opens the full board with the [map filter](#filters) preset to
+that map, for this run only; `Esc` clears it and shows every open map. A key matches the map card
+whose tracker key it is, never issue number 1; a key no map carries shows an empty board. A closed map
+shows only when you name it by number or URL, as its header card alone.
 
 The board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
 switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` sets the start).
@@ -79,8 +82,8 @@ switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` s
 | `Enter` / double-click | any       | go to the card's most urgent session, else its worktree with a shell; with neither, the status line says what `s` would do there or why it refuses. It never starts or resumes Claude |
 | `s`            | all but Decided   | start `/wayfinder` for the ticket, or `/implement` on an `impl` card, in its own `issue-<n>` worktree, or continue Claude in it when it has no agent (asks first); refused when closed, blocked, assigned to someone else or live (press `Enter`), and on a spec |
 | `o`            | any               | open the issue in the browser                                       |
-| `/` `Esc` `r` `q` |                | filter, clear both filters, refresh now, quit                       |
-| `f`            | any               | filter picker: labels cycle include → exclude → off, authors on/off (see below; saved per repo) |
+| `/` `Esc` `r` `q` |                | free-text filter, clear every filter, refresh now, quit             |
+| `f`            | any               | filter picker: type, HITL/AFK, assignee, map, author ([Filters](#filters); saved per repo) |
 | `?`            | any               | help: keys, columns, scope and how sessions start                   |
 
 Arrows or `hjkl` move between cards: up and down walk each lane's map card and then its cards in the
@@ -134,18 +137,33 @@ included, focuses its most urgent session (needs you, then working, then idle). 
 no Claude running it focuses, or opens, that worktree's workspace with a shell; Claude is not
 resumed. A map card goes only to the map's own session or worktree, never to one of its tickets'.
 
-`f` opens a picker listing every label and every author on the board's tickets; `Enter` (or space,
-or a click) cycles a label through include, exclude and off, and selects or deselects an author. The
-board narrows as you go. With any label included, a ticket shows only if it has at least one of
-them; a ticket with any excluded label is hidden. With any author selected, a ticket shows only if
-one of them opened it. A ticket must pass the labels, the authors and the `/` text filter. The
-status line shows the selection (`labels: +bug -wontfix · authors: alice, bob`); `c` in the picker
-or `Esc` on the board clears it. The selection is saved per user and repo in
-`$XDG_CONFIG_HOME/ticketmaster/settings.json` (`~/.config/…`) and restored when the board reopens;
-a saved label or author that is no longer on the board is ignored until it comes back.
-
 The board only reads. Wayfinder claims its tickets by assigning them, so the card moves to Claimed
 on the next refresh.
+
+## Filters
+
+`/` filters by free text: every word must appear in a card's number, title, body, author, labels or
+assignees. `f` opens the filter picker; `Enter` (or space, or a click) selects or deselects a value,
+and the board narrows as you go. Every value comes from the tracker data on the board:
+
+| Section   | Values                                                    | A card shows when            |
+| --------- | --------------------------------------------------------- | ---------------------------- |
+| Type      | `research`, `prototype`, `grilling`, `task`, `spec`, `impl` (those on the board) | its type is selected |
+| HITL/AFK  | `HITL`, `AFK`                                             | its wayfinder mode is selected |
+| Assignee  | `me` (your tracker login), `unassigned`, `anyone` (the default); one at a time | it is assigned to you, or to nobody |
+| Map       | each lane's map                                           | its lane's map is selected   |
+| Author    | each card's author                                        | one of them opened it        |
+
+Values in a section are alternatives; a card must pass every section with a selection, and the `/`
+filter. The map filter keeps or hides whole lanes; while cards are filtered, a lane with no matching
+card is hidden. A lane's map card keeps the map's own counts. The status line shows the selection
+(`type: grilling, task · assignee: me · map: #9`); `c` in the picker clears its selection, and `Esc`
+on the board clears every filter, the text and the map preset included.
+
+The selection is saved per user and repo in `$XDG_CONFIG_HOME/ticketmaster/settings.json`
+(`~/.config/…`) with every change and restored when the board reopens. A map named on the command
+line is never saved: while it stands, the map section keeps the selection saved before. A saved value
+that is no longer on the board is ignored until it comes back. There are no label or state filters.
 
 ## Wayfinding links
 
