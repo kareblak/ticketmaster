@@ -223,11 +223,12 @@ class Herdr:
         return {number: sorted(sessions, key=lambda s: s.urgency) for number, sessions in found.items()}
 
     def start_in_worktree(self, cwd: Path, name: str, branch: str, label: str, claude_args: list[str],
-                          continue_args: list[str], claude: str = "claude", focus: bool = False) -> str:
+                          continue_args: list[str], claude: str = "claude") -> str:
         """Claude in the ticket's own worktree, never a `-2` copy: an existing one (by its name or branch) is
         reopened with `continue_args`, else one is created on `branch` and gets `claude_args`. A worktree whose
         branch is not its name gets the name as its directory, so it is still found. A leftover `branch` without
-        a worktree is not taken over. Returns where it went, for the status line."""
+        a worktree is not taken over. Never focuses: the developer stays on the board and goes over with Enter.
+        Returns where it went, for the status line."""
         existing = next((w for w in self.worktrees(cwd)
                          if Path(w["path"]).name in (name, f"worktree-{name}") or w.get("branch") == branch), None)
         if existing is not None:
@@ -235,16 +236,14 @@ class Herdr:
             pane = self.idle_pane(workspace, existing["path"])
             if pane is None:
                 pane = self.call("worktree", "open", "--cwd", str(cwd), "--path", existing["path"], "--label", label,
-                                 focus_flag(focus))["root_pane"]["pane_id"]
-            elif focus:
-                self.call("workspace", "focus", workspace)
+                                 "--no-focus")["root_pane"]["pane_id"]
             note = self.start_claude(pane, name, claude, continue_args)
             return f"worktree {Path(existing['path']).name} with claude --continue{note}"
         if branch in local_branches(cwd):
             raise HerdrError(f"branch {branch} exists without a worktree; check it out in one or delete it, then s again")
         place = [] if branch == name else ["--path", str(worktree_home(cwd) / name)]
         result = self.call("worktree", "create", "--cwd", str(cwd), "--branch", branch, *place, "--label", label,
-                           focus_flag(focus))
+                           "--no-focus")
         note = self.start_claude(result["root_pane"]["pane_id"], name, claude, claude_args)
         return f"new worktree {name}{note}"
 
@@ -308,10 +307,6 @@ def worktree_home(cwd: Path) -> Path:
 def local_branches(cwd: Path) -> list[str]:
     result = subprocess.run(["git", "branch", "--format=%(refname:short)"], cwd=cwd, capture_output=True, text=True)
     return result.stdout.split() if result.returncode == 0 else []
-
-
-def focus_flag(focus: bool) -> str:
-    return "--focus" if focus else "--no-focus"
 
 
 def error_code(stderr: str) -> str | None:

@@ -249,11 +249,11 @@ def test_start_creates_a_worktree_workspace_named_by_the_issue_key_with_a_named_
     fake = starting()
     message = bench(fake).start(ticket())
     assert fake.first("worktree", "create") == ["worktree", "create", "--cwd", "/code/shiplog", "--branch", "issue-686",
-                                                "--label", "#686 Attach a deviation reason", "--focus"]
+                                                "--label", "#686 Attach a deviation reason", "--no-focus"]
     start = fake.first("agent", "start")
     assert start[2:7] == ["issue-686", "--kind", "claude", "--pane", "w9:p1"]
     assert claude_argv(fake) == ["-n", "#686 Attach a deviation reason", "/mattpocock-skills:wayfinder https://gh/686"]
-    assert message == "Started #686 in new worktree issue-686 as agent issue-686"
+    assert message == "Started #686 in new worktree issue-686 as agent issue-686, unfocused: Enter goes to it"
 
 
 def test_a_linear_issue_is_keyed_tm_n_and_labelled_with_its_key():
@@ -275,18 +275,13 @@ def test_the_prompt_is_exactly_the_command_the_map_url_and_the_ticket_url():
     assert claude_argv(fake)[-1] == "/wayfinder https://gh/686"
 
 
-@pytest.mark.parametrize("kind", ["grilling", "prototype", "task"])
-def test_hitl_tickets_take_focus(kind):
+@pytest.mark.parametrize("kind", ["grilling", "prototype", "task", "research"])
+def test_every_wayfinder_ticket_starts_unfocused_and_the_message_says_enter_goes_to_it(kind):
     fake = starting()
     message = bench(fake).start(decision(kind))
-    assert fake.first("worktree", "create")[-1] == "--focus" and "unfocused" not in message
-
-
-def test_research_starts_unfocused_and_the_message_names_it():
-    fake = starting()
-    message = bench(fake).start(decision("research"))
     assert fake.first("worktree", "create")[-1] == "--no-focus"
-    assert message == "Started #686 in new worktree issue-686 as agent issue-686, unfocused: research runs AFK"
+    assert not any(verb == "focus" for _, verb in fake.verbs())
+    assert message == "Started #686 in new worktree issue-686 as agent issue-686, unfocused: Enter goes to it"
 
 
 def test_start_never_creates_a_suffixed_worktree_or_branch():
@@ -301,10 +296,10 @@ def test_an_agentless_worktree_is_reopened_and_claude_continues_there():
     message = bench(fake).start(decision())
     assert ("worktree", "create") not in fake.verbs()
     assert fake.first("worktree", "open") == ["worktree", "open", "--cwd", "/code/shiplog", "--path", "/w/issue-686",
-                                              "--label", "#686 Attach a deviation reason", "--focus"]
+                                              "--label", "#686 Attach a deviation reason", "--no-focus"]
     assert fake.first("agent", "start")[2:7] == ["issue-686", "--kind", "claude", "--pane", "wD:p1"]
     assert claude_argv(fake) == ["-n", "#686 Attach a deviation reason", "--continue"]
-    assert message == "Started #686 in worktree issue-686 with claude --continue as agent issue-686"
+    assert message == "Started #686 in worktree issue-686 with claude --continue as agent issue-686, unfocused: Enter goes to it"
 
 
 def test_a_leftover_branch_without_a_worktree_is_not_taken_over(monkeypatch):
@@ -331,7 +326,7 @@ def test_an_agentless_worktree_open_in_a_workspace_continues_in_its_pane_at_a_sh
     assert ("worktree", "open") not in fake.verbs() and ("workspace", "focus") not in fake.verbs()
     assert fake.first("agent", "start")[6] == "wA:p3"
     assert claude_argv(fake)[-1] == "--continue"
-    assert message.endswith(", unfocused: research runs AFK")
+    assert message.endswith(", unfocused: Enter goes to it")
 
 
 def test_a_busy_workspace_gets_a_new_pane_for_claude():
@@ -351,26 +346,27 @@ def test_a_stale_workspace_reopens_the_worktree():
     assert fake.first("agent", "start")[6] == "wD:p1" and ("workspace", "focus") not in fake.verbs()
 
 
-def test_continuing_a_hitl_ticket_in_an_open_workspace_focuses_it():
+def test_continuing_a_hitl_ticket_in_an_open_workspace_leaves_focus_alone():
     fake = starting(trees=[tree("/w/issue-686", workspace="wA")],
                     **{"pane list": {"panes": [pane("wA:p2")]}, "pane process-info": at_shell("wA:p2")})
     bench(fake).start(decision())
-    assert ["workspace", "focus", "wA"] in fake.calls
+    assert fake.first("agent", "start")[6] == "wA:p2"
+    assert not any(verb == "focus" for _, verb in fake.verbs())
 
 
 def test_a_taken_agent_name_gets_a_suffix():
     fake = starting(agents=[{"name": "issue-686"}])
-    assert bench(fake).start(ticket()) == "Started #686 in new worktree issue-686 as agent issue-686-2"
+    assert bench(fake).start(ticket()) == "Started #686 in new worktree issue-686 as agent issue-686-2, unfocused: Enter goes to it"
 
 
 def test_startup_prompt_is_reported_not_failed():
     fake = starting(**{"agent start": HerdrError("agent_not_ready")})
-    assert bench(fake).start(ticket()).endswith("(waiting at a startup prompt)")
+    assert bench(fake).start(ticket()).endswith("(waiting at a startup prompt), unfocused: Enter goes to it")
 
 
 def test_readiness_timeout_is_reported_not_failed():
     fake = starting(**{"agent start": HerdrError("timeout")})
-    assert bench(fake).start(ticket()).endswith("(still starting)")
+    assert bench(fake).start(ticket()).endswith("(still starting), unfocused: Enter goes to it")
 
 
 def test_custom_claude_binary_runs_as_a_plain_command():
@@ -404,8 +400,8 @@ def test_implement_starts_unfocused_in_a_new_key_named_worktree_with_the_exact_p
     assert start[start.index("--", 7) + 1:] == ["-n", "#686 Attach a deviation reason",
                                                "/mattpocock-skills:implement https://gh/686"]
     assert not any(verb == "focus" for _, verb in fake.verbs())
-    assert message == ("Started /mattpocock-skills:implement on #686 in new worktree issue-686 as agent issue-686, "
-                       "unfocused")
+    assert message == ("Started /mattpocock-skills:implement on #686 in new worktree issue-686 as agent issue-686"
+                       ", unfocused: Enter goes to it")
 
 
 def test_implement_on_linear_uses_the_key_and_branches_on_gitbranchname(monkeypatch):
@@ -575,16 +571,16 @@ def test_herdr_cannot_remove_or_adopt_worktrees():
     assert not hasattr(herdr, "unsaved_work")
 
 
-def test_to_tickets_starts_focused_in_the_specs_own_worktree_with_the_exact_prompt():
+def test_to_tickets_starts_unfocused_in_the_specs_own_worktree_with_the_exact_prompt():
     spec = Ticket(number=686, title="Attach a  deviation reason", url="https://gh/686", is_open=True,
                   body="Part of #679", map_number=679, map_url="https://gh/679")
     fake = implement_fake()
     message = bench(fake, to_tickets_command="/to-tickets").start(spec)
     assert fake.first("worktree", "create") == ["worktree", "create", "--cwd", "/code/shiplog", "--branch", "issue-686",
-                                                "--label", "#686 Attach a deviation reason", "--focus"]
+                                                "--label", "#686 Attach a deviation reason", "--no-focus"]
     start = fake.first("agent", "start")
     assert start[-3:] == ["-n", "#686 Attach a deviation reason", "/to-tickets https://gh/686"]
-    assert message == "Started /to-tickets on #686 in new worktree issue-686 as agent issue-686"
+    assert message == "Started /to-tickets on #686 in new worktree issue-686 as agent issue-686, unfocused: Enter goes to it"
 
 
 def test_to_tickets_on_a_linear_spec_uses_the_key_and_branches_on_gitbranchname(monkeypatch):
@@ -595,6 +591,6 @@ def test_to_tickets_on_a_linear_spec_uses_the_key_and_branches_on_gitbranchname(
     bench(fake).start(spec)
     assert fake.first("worktree", "create") == [
         "worktree", "create", "--cwd", "/code/shiplog", "--branch", "kb/tm-26-start-implement",
-        "--path", "/home/me/.herdr/worktrees/shiplog/tm-26", "--label", "TM-26 Attach a deviation reason", "--focus"]
+        "--path", "/home/me/.herdr/worktrees/shiplog/tm-26", "--label", "TM-26 Attach a deviation reason", "--no-focus"]
     start = fake.first("agent", "start")
     assert start[2] == "tm-26" and start[-1] == "/mattpocock-skills:to-tickets https://linear/TM-26"

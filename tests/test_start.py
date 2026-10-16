@@ -36,10 +36,9 @@ SPEC = ticket(parent_number=680, parent_url="https://gh/680", parent_labels=MAP,
 SLICE = ticket(parent_number=690, parent_url="https://gh/690", map_number=680, map_url="https://gh/680")
 
 
-def test_a_spec_runs_to_tickets_on_the_spec_focused():
+def test_a_spec_runs_to_tickets_on_the_spec():
     assert build_prompt(SPEC) == "/mattpocock-skills:to-tickets https://gh/686"
     assert build_prompt(SPEC, "/wayfinder", "/implement", "/to-tickets") == "/to-tickets https://gh/686"
-    assert start.takes_focus(SPEC)
 
 
 def test_an_implementation_ticket_runs_implement_on_the_ticket_alone():
@@ -52,11 +51,9 @@ STANDALONE_TICKET = ticket(body="## Parent\n\n#680\n\n## What to build\n\nx\n\n#
                            parent_number=680, lane_spec=680)
 
 
-def test_a_standalone_spec_runs_to_tickets_focused_and_its_ticket_implement_unfocused():
+def test_a_standalone_spec_runs_to_tickets_and_its_ticket_implement():
     assert build_prompt(STANDALONE) == "/mattpocock-skills:to-tickets https://gh/686"
-    assert start.takes_focus(STANDALONE)
     assert build_prompt(STANDALONE_TICKET) == "/mattpocock-skills:implement https://gh/686"
-    assert not start.takes_focus(STANDALONE_TICKET)
 
 
 def test_linear_tickets_are_named_by_their_key_and_branch_on_gitbranchname():

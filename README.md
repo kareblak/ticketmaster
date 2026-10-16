@@ -155,8 +155,8 @@ claude -n "#<n> <title>" "<prompt>"
 
 The skills are `wayfinder_command`, `implement_command` and `to_tickets_command` in `.ticketmaster.toml`. Each ticket gets
 one worktree, never a `-2` copy: when it exists without an agent, `s` opens it and runs
-`claude -n "#<n> <title>" --continue` there. Maps and HITL tickets (grilling, prototype, task) take
-focus; research and `impl` cards start unfocused, and the status line says so.
+`claude -n "#<n> <title>" --continue` there. Every session `s` starts is unfocused, whatever the card:
+the board stays where it is, and `Enter` goes to the session.
 
 `s` on an `impl` card starts `/implement` AFK. On Linear its branch is the issue's branch name (`branchName`),
 in a `tm-<n>` worktree. `s` also refuses an `impl` card with an open PR that closes it. A card you
@@ -164,7 +164,7 @@ claimed starts, even while its spec is open. The session owns review, push and P
 nothing else.
 
 `s` on a lane's map card whose open spec has no implementation ticket yet, open or closed, breaks the
-spec into tickets: it starts `/mattpocock-skills:to-tickets <spec-url>`, focused, in the spec's own
+spec into tickets: it starts `/mattpocock-skills:to-tickets <spec-url>` in the spec's own
 `issue-<spec>` worktree (`tm-<spec>` on Linear, on the issue's branch name), also when the map is
 closed. It refuses a blocked spec, one assigned to someone else, and one with a live session (`Enter`
 on the map card goes to the map's session, else the spec's); a spec closed without tickets is passed
@@ -177,10 +177,10 @@ next frontier ticket. With an empty frontier it starts `/mattpocock-skills:wayfi
 the map's own worktree, so wayfinder can graduate fog or finish the map.
 
 `s` on a spec lane's header card, a standalone spec with no implementation ticket yet (neither open nor
-closed), starts `/mattpocock-skills:to-tickets <spec-url>`, focused, in the spec's own `issue-<spec>` worktree.
+closed), starts `/mattpocock-skills:to-tickets <spec-url>` in the spec's own `issue-<spec>` worktree.
 It refuses a closed spec, a blocked one, one assigned to someone else, then one that has tickets (`s
 starts /implement on its tickets`), in that order. `s` on a ticket in a spec lane starts
-`/mattpocock-skills:implement <ticket-url>` unfocused in its `issue-<n>` worktree, as on a map spec's
+`/mattpocock-skills:implement <ticket-url>` in its `issue-<n>` worktree, as on a map spec's
 tickets. The board never removes a spec's worktree.
 
 The board finds the sessions working a ticket, including ones it did not start. A herdr agent works
