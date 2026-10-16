@@ -56,14 +56,12 @@ def branch_name(ticket: Ticket) -> str:
     return ticket.branch_name or worktree_name(ticket)
 
 
+UNFOCUSED = ", unfocused: Enter goes to it"  # the board never pulls the developer over to a session it starts
+
+
 def session_label(ticket: Ticket) -> str:
     title = re.sub(r"\s+", " ", ticket.title)[:60]
     return f"{ticket.ref} {title}"
-
-
-def takes_focus(ticket: Ticket) -> bool:
-    """HITL tickets and maps pull the developer over; research and implementation run AFK and start unfocused."""
-    return ticket.spec_kind != "impl" and ticket.wayfinder_type != "research"
 
 
 def claude_args(ticket: Ticket, prompt: str) -> list[str]:
@@ -100,16 +98,15 @@ class Workbench:
     def start(self, ticket: Ticket) -> str:
         """In the ticket's own worktree, named by its key: created with the prompt, or reopened with
         `claude --continue` when it exists without an agent; never a `-2` copy."""
-        focus = takes_focus(ticket)
         where = self.herdr.start_in_worktree(
             self.cwd, worktree_name(ticket), branch_name(ticket), session_label(ticket),
-            claude_args(ticket, self.prompt(ticket)), continue_args(ticket), self.claude, focus,
+            claude_args(ticket, self.prompt(ticket)), continue_args(ticket), self.claude,
         )
         if ticket.spec_kind == "impl":
-            return f"Started {self.implement_command} on {ticket.ref} in {where}, unfocused"
+            return f"Started {self.implement_command} on {ticket.ref} in {where}{UNFOCUSED}"
         if ticket.spec_kind == "spec":
-            return f"Started {self.to_tickets_command} on {ticket.ref} in {where}"
-        return f"Started {ticket.ref} in {where}" + ("" if focus else ", unfocused: research runs AFK")
+            return f"Started {self.to_tickets_command} on {ticket.ref} in {where}{UNFOCUSED}"
+        return f"Started {ticket.ref} in {where}{UNFOCUSED}"
 
     def go_to(self, ticket: Ticket, session: Session) -> str:
         return f"{ticket.ref}: " + self.herdr.go_to(self.cwd, session, session_label(ticket))

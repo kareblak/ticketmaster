@@ -1733,7 +1733,7 @@ def implement_app(bench):
                     describe_start=build_prompt)
 
 
-def test_s_on_an_open_unblocked_unclaimed_impl_card_starts_implement_unfocused():
+def test_s_on_an_open_unblocked_unclaimed_impl_card_starts_implement():
     async def scenario():
         bench = FakeBench()
         app = implement_app(bench)
@@ -1744,7 +1744,7 @@ def test_s_on_an_open_unblocked_unclaimed_impl_card_starts_implement_unfocused()
             await pilot.pause()
             assert is_confirm(app)
             assert app.screen.question == "Start /implement on #51 Slice 51 in a new worktree?"
-            assert app.screen.detail == "/mattpocock-skills:implement u51\nunfocused (AFK)"
+            assert app.screen.detail == "/mattpocock-skills:implement u51"
             await pilot.press("y")
             await loaded(app, pilot)
             assert bench.calls == [("start", 51)]
@@ -1822,7 +1822,7 @@ def test_s_on_the_map_card_of_a_ticketless_spec_starts_to_tickets_on_the_spec():
             await pilot.press("s")
             await pilot.pause()
             assert app.screen.question == "Start /to-tickets on #80 Spec 80 in a new worktree?"
-            assert app.screen.detail == "/mattpocock-skills:to-tickets u80"  # focused: no AFK note
+            assert app.screen.detail == "/mattpocock-skills:to-tickets u80"
             await pilot.press("y")
             await loaded(app, pilot)
             assert bench.calls == [("start", 80)]  # the spec, not the map's frontier ticket #1
@@ -2897,7 +2897,7 @@ def test_s_on_a_loose_ticket_starts_implement_and_the_loose_header_starts_nothin
             await pilot.press("s")
             await pilot.pause()
             assert is_confirm(app)
-            assert app.screen.detail == "/mattpocock-skills:implement u90\nunfocused (AFK)"
+            assert app.screen.detail == "/mattpocock-skills:implement u90"
             await pilot.press("y")
             await loaded(app, pilot)
             assert bench.calls == [("start", 90)]
@@ -2920,7 +2920,7 @@ def test_help_describes_the_loose_lane():
     run(scenario())
 
 
-def test_s_on_a_ticketless_standalone_spec_starts_to_tickets_focused():
+def test_s_on_a_ticketless_standalone_spec_starts_to_tickets():
     async def scenario():
         bench = FakeBench()
         app = BoardApp(FakeProvider(SPEC_LANES), Query(), interval=60, workbench=bench, describe_start=build_prompt)
@@ -2933,7 +2933,7 @@ def test_s_on_a_ticketless_standalone_spec_starts_to_tickets_focused():
             await pilot.press("s")
             await pilot.pause()
             assert app.screen.question == "Start /to-tickets on #85 Fresh spec in a new worktree?"
-            assert app.screen.detail == "/mattpocock-skills:to-tickets u85"  # focused: no AFK note
+            assert app.screen.detail == "/mattpocock-skills:to-tickets u85"
             await pilot.press("y")
             await loaded(app, pilot)
             assert bench.calls == [("start", 85)]
@@ -2962,7 +2962,7 @@ def test_s_on_a_standalone_spec_with_tickets_is_refused_after_closed_blocked_and
     run(scenario(replace(spec, **CLOSED_NOW), [ticket_of(spec, 61)], "#60 is closed"))
 
 
-def test_s_on_a_spec_lane_ticket_starts_implement_unfocused():
+def test_s_on_a_spec_lane_ticket_starts_implement():
     async def scenario():
         bench = FakeBench()
         app = BoardApp(FakeProvider(SPEC_LANES), Query(), interval=60, workbench=bench, describe_start=build_prompt)
@@ -2972,7 +2972,7 @@ def test_s_on_a_spec_lane_ticket_starts_implement_unfocused():
             await pilot.press("s")
             await pilot.pause()
             assert app.screen.question == "Start /implement on #71 Ticket 71 in a new worktree?"
-            assert app.screen.detail == "/mattpocock-skills:implement u71\nunfocused (AFK)"
+            assert app.screen.detail == "/mattpocock-skills:implement u71"
             await pilot.press("y")
             await loaded(app, pilot)
             assert bench.calls == [("start", 71)]
