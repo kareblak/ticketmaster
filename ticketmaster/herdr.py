@@ -154,16 +154,22 @@ class Herdr:
             raise HerdrError(f"pane {env_pane or '(unset)'} is not this session's and no pane is focused")
         return focused, False
 
-    def board_pane(self, panes: list[dict], caller: str) -> str | None:
-        """The board in the caller's workspace, which may be the caller itself. One board per workspace:
-        a board in another workspace belongs to other work, even when it shows this repo."""
+    def board_pane(self, panes: list[dict], caller: str, own: bool) -> str | None:
+        """The board in the caller's workspace, which may be the caller unless it is this process's own pane.
+        One board per workspace: a board in another workspace belongs to other work, even when it shows this
+        repo. A pane counts by its label only while it runs the board or the shell one left, never an agent:
+        a Claude pane may carry the label too, and restarting there would send q to Claude."""
         workspace = next(pane_workspace(p) for p in panes if p["pane_id"] == caller)
-        return next((p["pane_id"] for p in panes if p.get("label") == BOARD_LABEL and pane_workspace(p) == workspace), None)
+        return next((
+            p["pane_id"] for p in panes
+            if p.get("label") == BOARD_LABEL and pane_workspace(p) == workspace and not p.get("agent")
+            and not (own and p["pane_id"] == caller)
+        ), None)
 
     def open_board(self, cwd: Path, command: str, caller: str | None = None, session: str | None = None) -> BoardOpened | None:
         """Restarts the board in the caller's workspace, or splits one off the caller. Returns where it
-        went, or None when this process runs in the board pane itself, or was typed at a shell rather than run
-        by Claude, which then runs the board in place."""
+        went, or None when this process was launched by a board pane, or typed at a shell rather than run by
+        Claude, which then runs the board in place. Run by Claude, it never returns None: its pane runs Claude."""
         if os.environ.get(BOARD_ENV):
             return None  # launched by a board pane; it may not be in `pane list` yet, so don't look it up
         if not os.environ.get(CLAUDE_ENV):
@@ -171,9 +177,7 @@ class Herdr:
         command = f"{BOARD_ENV}=1 {command}"
         panes = self.call("pane", "list").get("panes", [])
         caller, own = self.caller_pane(panes, cwd, caller, session)
-        existing = self.board_pane(panes, caller)
-        if existing and existing == caller and own:
-            return None  # restarting would send q to, and close, the caller's own pane
+        existing = self.board_pane(panes, caller, own)
         if existing:
             if not self.at_prompt(existing):  # a q typed at the shell would prefix the command below
                 self.call("pane", "send-keys", existing, "q")  # Textual quits on q and drops to the shell
