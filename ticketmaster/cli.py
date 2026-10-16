@@ -180,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         how = f"restarted in {board.beside}'s workspace" if board.restarted else f"split off {board.beside}"
         print(f"Board opened in herdr pane {board.pane} ({herdr.BOARD_LABEL}), {how}, for {provider.name}:{provider.repo}.")
         return 0
-    # None: this is the board pane (a fresh one, or the user's), so the board runs here
+    # None: a board pane launched this, or it was typed at a shell, so the board runs here
 
     from .board import BoardApp
     from .config import load_config, settings_path
