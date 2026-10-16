@@ -1,0 +1,504 @@
+<!doctype html>
+<!--
+  PROTOTYPE, throwaway. Wayfinder ticket "Web board layout and interactions" (#152), map "Ticketmaster web board view" (#149).
+  Three structurally different web board layouts over fake data, switchable via ?variant=A|B|C and the bottom bar (← → keys).
+    A  Swimlanes: the TUI's grid (lanes × 4 columns), detail in a right-hand drawer, Start confirm as a modal.
+    B  Columns first: 4 full-height columns, lanes as a left sidebar that scopes them, detail as a centred dialog, confirm inside it.
+    C  Lane list: one collapsible list per lane, a row per card with its column as a pill, detail expands inline, Start confirms in the row.
+  "Live" updates are faked: every 6 s a session status changes, as an SSE push would do it.
+  Run: open this file in a browser, or `python3 -m http.server -d ticketmaster/web` and visit /PROTOTYPE-board.html
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ticketmaster board</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2128; --dim: #6b7280; --line: #e3e6eb;
+  --blocked: #c0392b; --frontier: #1e8e4e; --claimed: #b7791f; --decided: #2563eb;
+  --map: #0e8fa3; --spec: #a3239f; --loose: #3b5bdb;
+  --hitl: #f5c518; --afk: #22b8cf; --pr: #c026d3;
+  --working: #b7791f; --needs: #c0392b; --idle: #0e8fa3; --done: #1e8e4e; --unknown: #8b919a;
+  --shadow: 0 1px 2px rgb(0 0 0 / .06), 0 4px 14px rgb(0 0 0 / .06);
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12151a; --panel: #1b1f26; --ink: #e6e8eb; --dim: #9aa1ab; --line: #2b313a;
+  --blocked: #ef6b5b; --frontier: #4cc38a; --claimed: #e3b341; --decided: #6ea8fe;
+  --map: #3cc6d8; --spec: #e070dc; --loose: #7d95ff;
+  --working: #e3b341; --needs: #ef6b5b; --idle: #3cc6d8; --done: #4cc38a;
+  --shadow: 0 1px 2px rgb(0 0 0 / .4), 0 4px 14px rgb(0 0 0 / .35);
+}}
+:root[data-theme="dark"] {
+  --bg: #12151a; --panel: #1b1f26; --ink: #e6e8eb; --dim: #9aa1ab; --line: #2b313a;
+  --blocked: #ef6b5b; --frontier: #4cc38a; --claimed: #e3b341; --decided: #6ea8fe;
+  --map: #3cc6d8; --spec: #e070dc; --loose: #7d95ff;
+  --working: #e3b341; --needs: #ef6b5b; --idle: #3cc6d8; --done: #4cc38a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+a { color: inherit; }
+button { font: inherit; cursor: pointer; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 5px 10px; }
+button.primary { background: var(--frontier); border-color: var(--frontier); color: #fff; font-weight: 600; }
+button.ghost { background: transparent; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+
+/* shared top bar */
+header.top { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+header.top h1 { font-size: 15px; margin: 0; }
+header.top .repo { color: var(--dim); }
+.live { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); font-size: 12px; margin-left: auto; }
+.live i { width: 8px; height: 8px; border-radius: 50%; background: var(--frontier); animation: pulse 2s infinite; }
+@keyframes pulse { 50% { opacity: .3; } }
+.filterbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; width: 100%; }
+.filterbar input { flex: 1 1 220px; min-width: 0; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font: inherit; }
+.chip { border-radius: 999px; padding: 3px 10px; font-size: 12px; border: 1px solid var(--line); background: var(--bg); }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--panel); border-color: var(--ink); }
+.chipgroup { display: inline-flex; gap: 4px; align-items: center; }
+.chipgroup > span { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; margin-right: 2px; }
+
+/* shared card bits */
+.ref { font-weight: 700; font-variant-numeric: tabular-nums; }
+.col-Blocked { --c: var(--blocked); } .col-Frontier { --c: var(--frontier); } .col-Claimed { --c: var(--claimed); } .col-Decided { --c: var(--decided); }
+.tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; font-size: 11px; }
+.tag { padding: 1px 6px; border-radius: 4px; background: var(--bg); border: 1px solid var(--line); }
+.tag.HITL { background: var(--hitl); color: #000; border-color: transparent; font-weight: 700; }
+.tag.AFK { background: var(--afk); color: #000; border-color: transparent; font-weight: 700; }
+.tag.pr { background: var(--pr); color: #fff; border-color: transparent; }
+.tag.blk { color: var(--blocked); border-color: var(--blocked); }
+.tag.who { color: var(--map); font-style: italic; border: 0; background: none; padding: 0; }
+.badge { display: inline-flex; gap: 4px; align-items: center; font-size: 11px; font-weight: 600; }
+.badge small { font-weight: 400; color: var(--dim); }
+.s-working { color: var(--working); } .s-needs { color: var(--needs); } .s-idle { color: var(--idle); } .s-done { color: var(--done); } .s-unknown { color: var(--unknown); } .s-none { color: var(--unknown); font-weight: 400; } .s-starting { color: var(--frontier); }
+/* needs you: a solid red bar with a play button that goes straight to the session, and a red card */
+.badge.needsbar { display: flex; justify-content: space-between; align-items: center; gap: 6px; color: var(--needs); background: color-mix(in srgb, var(--needs) 12%, transparent); border-radius: 6px; padding: 2px 2px 2px 7px; margin: 2px 0; }
+.badge.needsbar .play { background: transparent; color: var(--needs); border: 1px solid color-mix(in srgb, var(--needs) 60%, transparent); border-radius: 50%; width: 20px; height: 20px; padding: 0; font-size: 9px; line-height: 18px; flex: none; }
+.badge.needsbar .play:hover { background: var(--needs); color: #fff; }
+.card:has(.needsbar), .row:has(.needsbar) { box-shadow: 0 0 0 1px color-mix(in srgb, var(--needs) 55%, transparent), var(--shadow); }
+.needsall { color: var(--needs); border-color: color-mix(in srgb, var(--needs) 60%, transparent); background: color-mix(in srgb, var(--needs) 10%, var(--panel)); font-weight: 600; border-radius: 999px; padding: 3px 10px; font-size: 12px; }
+.flash { animation: flash 1.2s; }
+@keyframes flash { from { background: color-mix(in srgb, var(--claimed) 30%, transparent); } }
+.lanehead .glyph-map { color: var(--map); } .lanehead .glyph-spec { color: var(--spec); } .lanehead .glyph-loose { color: var(--loose); }
+.progress { display: flex; height: 5px; border-radius: 3px; overflow: hidden; background: var(--line); }
+.progress b { display: block; }
+.muted { color: var(--dim); }
+.ext::after { content: " ↗"; font-size: .85em; }
+
+/* ================= Variant A: swimlane grid ================= */
+.A main { padding: 12px 16px 90px; }
+.A .colheads, .A .lanerow { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.A .colheads { position: sticky; top: var(--topH, 96px); z-index: 4; background: var(--bg); padding: 6px 0; }
+.A .colheads div { font-weight: 700; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--c); border-bottom: 2px solid var(--c); padding-bottom: 4px; }
+.A .lane { margin: 10px 0 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px; box-shadow: var(--shadow); }
+.A .lanehead { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: baseline; margin-bottom: 8px; cursor: pointer; }
+.A .lanehead .progress { flex: 1 1 120px; max-width: 200px; align-self: center; }
+.A .cell { display: flex; flex-direction: column; gap: 8px; min-height: 30px; }
+.A .card { border: 1px solid var(--line); border-left: 3px solid var(--c); border-radius: 8px; padding: 8px; background: var(--panel); cursor: pointer; }
+.A .card:hover, .A .card.sel { outline: 2px solid var(--c); outline-offset: -1px; }
+.A .card.decided { padding: 5px 8px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.A .card .t { font-weight: 600; }
+.A .card .sum { color: var(--dim); font-size: 12px; margin-top: 2px; }
+.A .colhead-sm { display: none; }
+.A .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(440px, 100%); background: var(--panel); border-left: 1px solid var(--line); box-shadow: -8px 0 30px rgb(0 0 0 / .15); transform: translateX(100%); transition: transform .18s; z-index: 20; display: flex; flex-direction: column; }
+.A .drawer.open { transform: none; }
+.drawer .dhead, .dialog .dhead { padding: 14px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 10px; align-items: flex-start; }
+.drawer .dbody, .dialog .dbody { padding: 14px 16px; overflow: auto; flex: 1; }
+.drawer .dfoot, .dialog .dfoot { padding: 12px 16px; border-top: 1px solid var(--line); display: flex; gap: 8px; flex-wrap: wrap; }
+.dbody h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; color: var(--dim); margin: 16px 0 6px; }
+.dbody pre { white-space: pre-wrap; font: 13px/1.5 ui-monospace, monospace; background: var(--bg); border-radius: 6px; padding: 10px; margin: 0; }
+.scrim { position: fixed; inset: 0; background: rgb(0 0 0 / .35); z-index: 30; display: grid; place-items: center; padding: 16px; }
+.confirm { background: var(--panel); border-radius: 12px; padding: 18px; max-width: 420px; width: 100%; box-shadow: var(--shadow); }
+.confirm h2 { margin: 0 0 8px; font-size: 16px; }
+.confirm .btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.toast { position: fixed; left: 50%; bottom: 74px; transform: translateX(-50%); background: var(--ink); color: var(--panel); padding: 8px 14px; border-radius: 8px; z-index: 40; font-size: 13px; max-width: calc(100% - 32px); }
+@media (max-width: 760px) {
+  .A .colheads { display: none; }
+  .A .lanerow { grid-template-columns: 1fr; }
+  .A .colhead-sm { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--c); }
+  .A .cell:not(:has(.card)) { display: none; }
+}
+
+/* ================= Variant B: columns first + lane sidebar ================= */
+.B .shell { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: calc(100vh - 96px); }
+.B aside { border-right: 1px solid var(--line); background: var(--panel); padding: 12px; overflow: auto; }
+.B aside .lanebtn { display: block; width: 100%; text-align: left; border: 0; border-radius: 8px; padding: 8px; margin-bottom: 4px; background: transparent; }
+.B aside .lanebtn[aria-current="true"] { background: var(--bg); outline: 1px solid var(--line); }
+.B aside .lanebtn .n { font-size: 12px; color: var(--dim); display: block; margin: 2px 0 5px; }
+.B aside .badges { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.B .board { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 12px; padding: 12px 16px 90px; overflow-x: auto; }
+.B .column { background: color-mix(in srgb, var(--c) 7%, var(--bg)); border-radius: 10px; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.B .column > h2 { margin: 2px 4px 4px; font-size: 13px; color: var(--c); display: flex; justify-content: space-between; }
+.B .card { background: var(--panel); border-radius: 8px; padding: 9px; box-shadow: var(--shadow); cursor: pointer; border-top: 3px solid var(--lc, var(--line)); }
+.B .card .lanename { font-size: 11px; color: var(--dim); }
+.B .card .t { font-weight: 600; margin-top: 2px; }
+.B .dialog { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: rgb(0 0 0 / .35); padding: 16px; }
+.B .dialog > div { background: var(--panel); border-radius: 12px; width: min(640px, 100%); max-height: calc(100vh - 32px); display: flex; flex-direction: column; box-shadow: var(--shadow); }
+.B .confirmbox { background: color-mix(in srgb, var(--frontier) 10%, var(--panel)); border: 1px solid var(--frontier); border-radius: 8px; padding: 10px; width: 100%; }
+.B .lanepick { display: none; }
+@media (max-width: 760px) {
+  .B .shell { grid-template-columns: 1fr; }
+  .B aside { display: none; }
+  .B .lanepick { display: block; padding: 8px 16px 0; }
+  .B .lanepick select { width: 100%; padding: 6px; font: inherit; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px; }
+  .B .board { grid-template-columns: repeat(4, 85%); scroll-snap-type: x mandatory; }
+  .B .column { scroll-snap-align: start; }
+}
+
+/* ================= Variants D and E: B with lane grouping ================= */
+.lgroup { font-size: 12px; font-weight: 700; color: var(--lc); padding: 4px 6px; border-left: 3px solid var(--lc); background: color-mix(in srgb, var(--lc) 10%, var(--panel)); border-radius: 0 6px 6px 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.D .card, .E .card { border-top: 0; border-left: 3px solid var(--lc); }
+.D .lanegroup { display: flex; flex-direction: column; gap: 6px; padding-bottom: 6px; }
+.D .lanegroup + .lanegroup { border-top: 1px dashed var(--line); padding-top: 8px; }
+.E .grid { padding: 0 16px 90px; overflow-x: auto; }
+.E .colheads, .E .bandrow { display: grid; grid-template-columns: repeat(4, minmax(200px, 1fr)); gap: 10px; }
+.E .colheads { position: sticky; top: var(--topH, 96px); z-index: 4; background: var(--bg); padding: 10px 0 6px; }
+.E .colheads div { font-weight: 700; font-size: 13px; color: var(--c); border-bottom: 2px solid var(--c); padding-bottom: 4px; display: flex; justify-content: space-between; }
+.E .band { margin: 8px 0 14px; }
+.E .band .lgroup { position: sticky; left: 0; margin-bottom: 6px; display: inline-block; max-width: 100%; }
+.E .bandrow .column { min-height: 24px; }
+body.hl-lane .card:not(.hl), body.hl-lane .lanegroup:not(.hl), body.hl-lane .band:not(.hl) { opacity: .3; }
+@media (max-width: 760px) { .E .colheads, .E .bandrow { grid-template-columns: repeat(4, 80%); } }
+
+/* ================= Variant C: lane list ================= */
+.C main { max-width: 1100px; margin: 0 auto; padding: 12px 16px 90px; }
+.C details.lane { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
+.C details.lane > summary { list-style: none; padding: 10px 14px; cursor: pointer; display: grid; grid-template-columns: 1fr auto; gap: 4px 14px; align-items: center; }
+.C details.lane > summary::-webkit-details-marker { display: none; }
+.C .counts { display: flex; gap: 10px; font-size: 12px; }
+.C .counts span b { color: var(--c); }
+.C .row { display: grid; grid-template-columns: 92px 64px minmax(0, 1fr) 170px 150px; gap: 10px; align-items: center; padding: 7px 14px; border-top: 1px solid var(--line); }
+.C .row:hover { background: var(--bg); }
+.C .pill { font-size: 11px; font-weight: 700; color: var(--c); border: 1px solid var(--c); border-radius: 999px; text-align: center; padding: 1px 6px; }
+.C .row .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.C .row .t:hover { text-decoration: underline; }
+.C .row .tags { margin: 0; flex-wrap: nowrap; overflow: hidden; }
+.C .row .act { display: flex; gap: 6px; justify-content: flex-end; }
+.C .row.decided { opacity: .65; }
+.C .expand { padding: 4px 14px 14px 180px; border-top: 1px dashed var(--line); background: var(--bg); }
+.C .confirming { background: var(--frontier); color: #fff; border-color: var(--frontier); }
+@media (max-width: 760px) {
+  .C .row { grid-template-columns: 78px minmax(0, 1fr); }
+  .C .row .ref { display: none; }
+  .C .row .tags, .C .row .badgecell { grid-column: 2; }
+  .C .row .act { grid-column: 1 / -1; justify-content: flex-start; }
+  .C .expand { padding: 8px 14px 14px; }
+}
+
+/* prototype switcher: deliberately not part of the design */
+#proto { position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 100; display: flex; align-items: center; gap: 6px; padding: 6px; border-radius: 999px; background: #111; color: #fff; box-shadow: 0 6px 24px rgb(0 0 0 / .4); font: 600 13px system-ui; white-space: nowrap; }
+#proto button { background: #333; color: #fff; border: 0; border-radius: 999px; width: 30px; height: 30px; padding: 0; }
+#proto span { padding: 0 8px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="proto"><button id="prev" aria-label="Previous variant">←</button><span id="plabel"></span><button id="next" aria-label="Next variant">→</button></div>
+<script>
+const VARIANTS = { A: "Swimlanes + drawer", B: "Columns + lane sidebar", C: "Lane list + inline", D: "B, lane groups in each column", E: "B shell, A's lane rows" };
+const COLS = ["Blocked", "Frontier", "Claimed", "Decided"];
+const TRACKER = "https://github.com/kareblak/ticketmaster/issues/";
+const STATUS = { working: ["●", "working", "s-working"], needs: ["⚠", "needs you", "s-needs"], idle: ["◌", "idle", "s-idle"], done: ["✓", "done", "s-done"], unknown: ["?", "unknown", "s-unknown"] };
+
+// ---- fake board ----
+const t = (n, title, col, o = {}) => ({ n, title, col, type: null, mode: null, who: [], blockers: [], pr: false, sessions: [], summary: "", author: "kareblak", ...o });
+const lanes = [
+  { id: 149, kind: "map", title: "Ticketmaster web board view", sessions: [{ status: "idle", wt: "map-149" }], specs: [],
+    tickets: [
+      t(150, "Board model seam between TUI and web", "Decided", { type: "grilling", mode: "HITL" }),
+      t(151, "SSE vs polling from the browser", "Decided", { type: "research", mode: "AFK" }),
+      t(152, "Web board layout and interactions", "Claimed", { type: "prototype", mode: "HITL", who: ["kareblak"], sessions: [{ status: "working", wt: "issue-152" }], summary: "How should the web board look and behave: lanes, cards, detail panel, Start confirm, filters." }),
+      t(153, "Go to a session from a browser", "Blocked", { type: "grilling", mode: "HITL", blockers: [152] }),
+      t(154, "Web view test split", "Blocked", { type: "grilling", mode: "HITL", blockers: [150, 152] }),
+      t(155, "Settings menu and responsive layout", "Frontier", { type: "prototype", mode: "HITL" }),
+    ] },
+  { id: 132, kind: "map", title: "Ticketmaster outside herdr", sessions: [], specs: [{ n: 148, open: true, counts: "3 done · 4 open · 1 blocked", sessions: [{ status: "needs", wt: "issue-148" }] }],
+    tickets: [
+      t(133, "Session backend seam", "Decided", { type: "grilling", mode: "HITL" }),
+      t(134, "Plain terminal: which emulators", "Decided", { type: "research", mode: "AFK" }),
+      t(160, "PlainBackend opens a Terminal.app window", "Claimed", { type: "impl", who: ["kareblak"], pr: true, sessions: [{ status: "done", wt: "issue-160" }], summary: "Open the session in a new terminal window when herdr is absent." }),
+      t(161, "Pidfile for the detached board", "Frontier", { type: "impl", summary: "The plain backend keeps the board alive with a pidfile." }),
+      t(162, "Backend override per repo", "Frontier", { type: "impl" }),
+      t(163, "Cleanup releases plain sessions", "Blocked", { type: "impl", blockers: [161] }),
+      t(164, "README: running outside herdr", "Claimed", { type: "impl", who: ["teammate"], summary: "Claimed by someone else, no session here." }),
+    ] },
+  { id: 120, kind: "spec", title: "Linear provider: OAuth login", sessions: [], specs: [],
+    tickets: [
+      t(121, "Device-code login flow", "Decided", { type: "impl" }),
+      t(122, "Token refresh on 401", "Frontier", { type: "impl", summary: "Refresh the access token once and retry." }),
+      t(123, "Logout command", "Claimed", { type: "impl", who: ["kareblak"], sessions: [{ status: "needs", wt: "issue-123" }] }),
+    ] },
+  { id: null, kind: "loose", title: "Loose tickets", sessions: [], specs: [],
+    tickets: [
+      t(140, "Empty board crashes on re-render", "Decided", { type: "impl" }),
+      t(170, "Rate-limit notice wording", "Frontier", { type: "impl", author: "teammate", summary: "The notice says 'next fetch' but means ticket fetch." }),
+    ] },
+];
+lanes.forEach(l => l.tickets.forEach(x => x.lane = l));
+const all = () => lanes.flatMap(l => l.tickets);
+const byN = n => all().find(x => x.n === n);
+
+// ---- view state (would live per tab) ----
+const S = { needle: "", type: new Set(), mode: new Set(), assignee: "anyone", sel: null, laneScope: "all", confirm: null, open: new Set(), collapsed: new Set() };
+const ME = "kareblak";
+
+const variant = () => { const v = new URLSearchParams(location.search).get("variant"); return VARIANTS[v] ? v : "A"; };
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const passes = x => {
+  const hay = [x.n, x.title, x.summary, x.author, x.type, ...x.who].join(" ").toLowerCase();
+  if (!S.needle.toLowerCase().split(/\s+/).filter(Boolean).every(w => hay.includes(w))) return false;
+  if (S.type.size && !S.type.has(x.type)) return false;
+  if (S.mode.size && !S.mode.has(x.mode)) return false;
+  if (S.assignee === "me" && !x.who.includes(ME)) return false;
+  if (S.assignee === "unassigned" && x.who.length) return false;
+  return true;
+};
+const filtering = () => S.needle || S.type.size || S.mode.size || S.assignee !== "anyone";
+const visibleLanes = () => lanes.filter(l => !filtering() || l.tickets.some(passes));
+const laneColor = l => `var(--${l.kind})`;
+const glyph = l => ({ map: "◆", spec: "▣", loose: "◇" }[l.kind]);
+const laneRef = l => l.id ? `<a class="ref ext" href="${TRACKER}${l.id}" target="_blank" onclick="event.stopPropagation()">#${l.id}</a>` : "";
+const counts = l => { const c = Object.fromEntries(COLS.map(k => [k, l.tickets.filter(x => x.col === k).length])); return c; };
+const progressBar = l => { const c = counts(l), tot = l.tickets.length || 1; return `<div class="progress">${COLS.slice().reverse().map(k => `<b class="col-${k}" style="width:${c[k] / tot * 100}%;background:var(--c)"></b>`).join("")}</div>`; };
+const badges = (sessions, x) => {
+  if (x && S.starting === x.n && !sessions.length) return `<div class="badge s-starting">▶ starting…</div>`;
+  if (!sessions.length) return x && x.col === "Claimed" ? `<div class="badge s-none">◇ claimed, no session here</div>` : "";
+  return sessions.map(s => { const [g, label, cls] = STATUS[s.status];
+    if (s.status === "needs") return `<div class="badge needsbar" data-flash="${s.wt}"><span>${g} ${label} <small>${s.wt}</small></span><button class="play" data-gowt="${s.wt}" title="Go to ${s.wt}" aria-label="Go to ${s.wt}">▶</button></div>`;
+    return `<div class="badge ${cls}" data-flash="${s.wt}">${g} ${label} <small>${s.wt}</small></div>`; }).join("");
+};
+const tags = x => {
+  const out = [];
+  if (x.type) out.push(`<span class="tag">${x.type}</span>`);
+  if (x.mode) out.push(`<span class="tag ${x.mode}">${x.mode}</span>`);
+  if (x.pr) out.push(`<span class="tag pr">PR open</span>`);
+  if (x.blockers.length && x.col !== "Decided") out.push(`<span class="tag blk">⛔ ${x.blockers.map(b => "#" + b).join(" ")}</span>`);
+  x.who.forEach(w => out.push(`<span class="tag who">@${w}</span>`));
+  return `<div class="tags">${out.join("")}</div>`;
+};
+
+// What Start would do on a card, or why it refuses (a rough stand-in for _start_plan).
+function plan(x) {
+  if (x.col === "Decided") return { refuse: `#${x.n} is decided` };
+  if (x.sessions.length) return { refuse: `#${x.n} has a live session: use Go to` };
+  if (x.col === "Blocked") return { refuse: `#${x.n} is blocked by ${x.blockers.map(b => "“" + byN(b).title + "”").join(", ")}` };
+  if (x.who.length && !x.who.includes(ME)) return { refuse: `#${x.n} is claimed by @${x.who[0]}` };
+  const skill = x.type === "impl" ? "/implement" : "/wayfinder";
+  return { skill, worktree: `issue-${x.n}`, text: `${skill} on #${x.n} “${x.title}” in a new worktree issue-${x.n}${x.lane.kind === "map" ? `, on map #${x.lane.id}` : ""}.` };
+}
+function doStart(x) {
+  S.confirm = null; S.starting = x.n; render();
+  toast(`Starting ${plan(x).skill} on #${x.n}…`);
+  setTimeout(() => { x.sessions.push({ status: "working", wt: `issue-${x.n}` }); if (!x.who.includes(ME)) x.who.push(ME); x.col = "Claimed"; S.starting = null; render(); flash(`issue-${x.n}`); }, 1600);
+}
+const allSessions = () => [...lanes.flatMap(l => [...l.sessions, ...l.specs.flatMap(s => s.sessions)]), ...all().flatMap(x => x.sessions)];
+function goWt(wt) { toast(`Go to ${wt}: herdr focuses its pane (what a browser does here is ticket “Go to a session from a browser”)`); flash(wt); }
+let needsIdx = 0;
+function nextNeeds() { const ns = allSessions().filter(s => s.status === "needs"); if (!ns.length) return; const s = ns[needsIdx++ % ns.length];
+  document.querySelector(`[data-flash="${s.wt}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" }); goWt(s.wt); }
+function goTo(x) { toast(x.sessions.length ? `Go to ${x.sessions[0].wt}: herdr focuses its pane (what a browser does here is ticket “Go to a session from a browser”)` : `#${x.n} has no session here`); }
+let toastT;
+function toast(msg) { document.querySelector(".toast")?.remove(); const d = document.createElement("div"); d.className = "toast"; d.textContent = msg; document.body.append(d); clearTimeout(toastT); toastT = setTimeout(() => d.remove(), 3500); }
+function flash(wt) { document.querySelectorAll(`[data-flash="${wt}"]`).forEach(e => { const c = e.closest(".card, .row, .lanebtn, .lanehead") || e; c.classList.remove("flash"); void c.offsetWidth; c.classList.add("flash"); }); }
+
+// ---- shared header ----
+function topbar() {
+  const chip = (group, v, label = v) => {
+    const on = group === "assignee" ? S.assignee === v : S[group].has(v);
+    return `<button class="chip" aria-pressed="${on}" data-chip="${group}:${v}">${label}</button>`;
+  };
+  const types = [...new Set(all().map(x => x.type).filter(Boolean))];
+  return `<header class="top">
+    <h1>Ticketmaster</h1><span class="repo">kareblak/ticketmaster</span>
+    ${(n => n ? `<button class="needsall" data-nextneeds title="Go to the next session that needs you">⚠ ${n} need${n === 1 ? "s" : ""} you ▶</button>` : "")(allSessions().filter(s => s.status === "needs").length)}
+    <span class="live" title="Server push; the server polls the tracker every 30 s"><i></i> live · updated <span id="ago">just now</span></span>
+    <div class="filterbar">
+      <input id="needle" type="search" placeholder="Filter: words match title, body, author, labels, assignees" value="${esc(S.needle)}">
+      <span class="chipgroup"><span>Type</span>${types.map(v => chip("type", v)).join("")}</span>
+      <span class="chipgroup"><span>Mode</span>${chip("mode", "HITL")}${chip("mode", "AFK")}</span>
+      <span class="chipgroup"><span>Assignee</span>${chip("assignee", "me")}${chip("assignee", "unassigned")}${chip("assignee", "anyone")}</span>
+      ${filtering() ? `<button class="ghost" data-clear>Clear</button>` : ""}
+    </div>
+  </header>`;
+}
+function detailBody(x) {
+  const p = plan(x);
+  return `<div class="muted">${glyph(x.lane)} ${esc(x.lane.title)} ${x.lane.id ? `· <a class="ext" href="${TRACKER}${x.lane.id}" target="_blank">#${x.lane.id}</a>` : ""}</div>
+    <div style="margin-top:8px">${badges(x.sessions, x)}</div>${tags(x)}
+    <h3>Column</h3><div class="col-${x.col}" style="color:var(--c);font-weight:700">${x.col}${x.blockers.length && x.col === "Blocked" ? " — waiting on " + x.blockers.map(b => `<a class="ext" href="${TRACKER}${b}" target="_blank">“${esc(byN(b).title)}”</a>`).join(", ") : ""}</div>
+    <h3>Body</h3><pre>## Question\n\n${esc(x.summary || x.title)}</pre>
+    <h3>Start would</h3><div class="${p.refuse ? "muted" : ""}">${esc(p.refuse || p.text)}</div>`;
+}
+function actions(x, startLabel = "Start session") {
+  const p = plan(x);
+  return `<button class="primary" data-start="${x.n}" ${p.refuse ? `disabled title="${esc(p.refuse)}"` : ""}>▶ ${startLabel}</button>
+    <button data-goto="${x.n}" ${x.sessions.length ? "" : "disabled title='No session here'"}>→ Go to session</button>
+    <a href="${TRACKER}${x.n}" target="_blank"><button class="ghost ext" tabindex="-1">Open in GitHub</button></a>`;
+}
+
+// ---- A: swimlanes ----
+function cardA(x) {
+  if (x.col === "Decided") return `<div class="card decided col-${x.col} ${S.sel === x.n ? "sel" : ""}" data-sel="${x.n}" title="${esc(x.title)}"><span class="ref" style="color:var(--c)">#${x.n}</span> ${esc(x.title)}</div>`;
+  return `<div class="card col-${x.col} ${S.sel === x.n ? "sel" : ""}" data-sel="${x.n}">${badges(x.sessions, x)}
+    <div class="t"><span class="ref" style="color:var(--c)">#${x.n}</span> ${esc(x.title)}</div>${x.summary ? `<div class="sum">${esc(x.summary)}</div>` : ""}${tags(x)}</div>`;
+}
+function renderA() {
+  const x = S.sel && byN(S.sel);
+  return `${topbar()}<main>
+    <div class="colheads">${COLS.map(c => `<div class="col-${c}">${c}</div>`).join("")}</div>
+    ${visibleLanes().map(l => `<section class="lane" style="border-top:3px solid ${laneColor(l)}">
+      <div class="lanehead" data-collapse="${l.id}"><span class="glyph-${l.kind}">${glyph(l)}</span> ${laneRef(l)} <b>${esc(l.title)}</b>
+        <span class="muted">${(c => `${c.Decided} decided · ${c.Frontier + c.Claimed} open · ${c.Blocked} blocked`)(counts(l))}</span>${progressBar(l)}
+        ${badges(l.sessions)}${l.specs.map(s => `<span class="muted">▣ <a class="ext" href="${TRACKER}${s.n}" target="_blank">#${s.n}</a> ${s.counts}</span> ${badges(s.sessions)}`).join("")}
+        <span class="muted" style="margin-left:auto">${S.collapsed.has(l.id) ? "▸" : "▾"}</span></div>
+      ${S.collapsed.has(l.id) ? "" : `<div class="lanerow">${COLS.map(c => `<div class="cell col-${c}"><div class="colhead-sm">${c}</div>${l.tickets.filter(t => t.col === c && passes(t)).map(cardA).join("")}</div>`).join("")}</div>`}
+    </section>`).join("") || `<p class="muted">No cards match the filters. <button data-clear>Clear</button></p>`}
+  </main>
+  <div class="drawer ${x ? "open" : ""}">${x ? `<div class="dhead"><div style="flex:1"><span class="ref col-${x.col}" style="color:var(--c)">#${x.n}</span> <b>${esc(x.title)}</b></div><button class="ghost" data-close aria-label="Close">✕</button></div>
+    <div class="dbody">${detailBody(x)}</div><div class="dfoot">${actions(x)}</div>` : ""}</div>
+  ${S.confirm ? (c => `<div class="scrim" data-cancel><div class="confirm" onclick="event.stopPropagation()"><h2>Start a session?</h2><p>${esc(plan(c).text)}</p>
+    <div class="btns"><button data-cancel>Cancel</button><button class="primary" data-yes="${c.n}">Start</button></div></div></div>`)(byN(S.confirm)) : ""}`;
+}
+
+// ---- B: columns first ----
+function renderB() {
+  const inScope = l => S.laneScope === "all" || String(l.id) === S.laneScope;
+  const x = S.sel && byN(S.sel);
+  const card = x2 => `<div class="card col-${x2.col}" style="--lc:${laneColor(x2.lane)}" data-sel="${x2.n}">
+    <div class="lanename">${glyph(x2.lane)} ${esc(x2.lane.title)}</div>${badges(x2.sessions, x2)}
+    <div class="t"><span class="ref" style="color:var(--c)">#${x2.n}</span> ${esc(x2.title)}</div>${x2.col === "Decided" ? "" : tags(x2)}</div>`;
+  const opts = [["all", "All lanes"], ...lanes.map(l => [String(l.id), `${glyph(l)} ${l.title}`])];
+  return `${topbar()}
+  <div class="lanepick"><select data-scope>${opts.map(([v, n]) => `<option value="${v}" ${S.laneScope === v ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></div>
+  <div class="shell"><aside>
+    <button class="lanebtn" data-scope="all" aria-current="${S.laneScope === "all"}"><b>All lanes</b><span class="n">${all().length} cards</span></button>
+    ${visibleLanes().map(l => `<button class="lanebtn" data-scope="${l.id}" aria-current="${S.laneScope === String(l.id)}">
+      <span class="lanehead"><span class="glyph-${l.kind}">${glyph(l)}</span> <b>${esc(l.title)}</b></span>
+      <span class="n">${l.id ? "#" + l.id + " · " : ""}${(c => `${c.Decided} decided · ${c.Frontier + c.Claimed} open · ${c.Blocked} blocked`)(counts(l))}</span>${progressBar(l)}
+      <span class="badges">${badges(l.sessions)}${l.specs.map(s => `<span class="muted" style="font-size:11px">▣ #${s.n} ${s.counts}</span>${badges(s.sessions)}`).join("")}</span></button>`).join("")}
+  </aside>
+  <div class="board">${COLS.map(c => { const cards = lanes.filter(inScope).flatMap(l => l.tickets).filter(t => t.col === c && passes(t));
+    return `<section class="column col-${c}"><h2>${c}<span>${cards.length}</span></h2>${cards.map(card).join("") || `<span class="muted" style="font-size:12px;padding:4px">—</span>`}</section>`; }).join("")}</div></div>
+  ${x ? `<div class="dialog" data-close><div onclick="event.stopPropagation()"><div class="dhead"><div style="flex:1"><span class="ref col-${x.col}" style="color:var(--c)">#${x.n}</span> <b>${esc(x.title)}</b></div><button class="ghost" data-close>✕</button></div>
+    <div class="dbody">${detailBody(x)}</div>
+    <div class="dfoot">${S.confirm === x.n ? `<div class="confirmbox"><b>Start?</b> ${esc(plan(x).text)}<div style="display:flex;gap:8px;margin-top:8px"><button class="primary" data-yes="${x.n}">Yes, start</button><button data-cancel>Cancel</button></div></div>` : actions(x)}</div></div></div>` : ""}`;
+}
+
+// ---- D and E: B's shell (sidebar, dialog, confirm in the dialog) with A's lane grouping ----
+const inScopeB = l => S.laneScope === "all" || String(l.id) === S.laneScope;
+function sidebarB() {
+  const opts = [["all", "All lanes"], ...lanes.map(l => [String(l.id), `${glyph(l)} ${l.title}`])];
+  return `<div class="lanepick"><select data-scope>${opts.map(([v, n]) => `<option value="${v}" ${S.laneScope === v ? "selected" : ""}>${esc(n)}</option>`).join("")}</select></div>
+  <aside>
+    <button class="lanebtn" data-scope="all" aria-current="${S.laneScope === "all"}"><b>All lanes</b><span class="n">${all().length} cards</span></button>
+    ${visibleLanes().map(l => `<button class="lanebtn" data-scope="${l.id}" data-hover="${l.id}" aria-current="${S.laneScope === String(l.id)}" style="border-left:3px solid ${laneColor(l)}">
+      <span class="lanehead"><span class="glyph-${l.kind}">${glyph(l)}</span> <b>${esc(l.title)}</b></span>
+      <span class="n">${l.id ? "#" + l.id + " · " : ""}${(c => `${c.Decided} decided · ${c.Frontier + c.Claimed} open · ${c.Blocked} blocked`)(counts(l))}</span>${progressBar(l)}
+      <span class="badges">${badges(l.sessions)}${l.specs.map(s => `<span class="muted" style="font-size:11px">▣ #${s.n} ${s.counts}</span>${badges(s.sessions)}`).join("")}</span></button>`).join("")}
+  </aside>`;
+}
+function dialogB() {
+  const x = S.sel && byN(S.sel);
+  return x ? `<div class="dialog" data-close><div onclick="event.stopPropagation()"><div class="dhead"><div style="flex:1"><span class="ref col-${x.col}" style="color:var(--c)">#${x.n}</span> <b>${esc(x.title)}</b></div><button class="ghost" data-close>✕</button></div>
+    <div class="dbody">${detailBody(x)}</div>
+    <div class="dfoot">${S.confirm === x.n ? `<div class="confirmbox"><b>Start?</b> ${esc(plan(x).text)}<div style="display:flex;gap:8px;margin-top:8px"><button class="primary" data-yes="${x.n}">Yes, start</button><button data-cancel>Cancel</button></div></div>` : actions(x)}</div></div></div>` : "";
+}
+const cardB = x => `<div class="card col-${x.col}" data-lane-of="${x.lane.id}" style="--lc:${laneColor(x.lane)}" data-sel="${x.n}">${badges(x.sessions, x)}
+  <div class="t"><span class="ref" style="color:var(--c)">#${x.n}</span> ${esc(x.title)}</div>${x.col === "Decided" ? "" : tags(x)}</div>`;
+const groupHead = l => `<div class="lgroup" style="--lc:${laneColor(l)}"><span class="glyph-${l.kind}">${glyph(l)}</span> ${l.id ? `#${l.id} ` : ""}${esc(l.title)}</div>`;
+
+// D: B's columns, but inside each column the cards are grouped under a lane header, lanes in board order.
+function renderD() {
+  return `${topbar()}<div class="shell">${sidebarB()}
+  <div class="board">${COLS.map(c => { const groups = visibleLanes().filter(inScopeB).map(l => [l, l.tickets.filter(t => t.col === c && passes(t))]).filter(([, ts]) => ts.length);
+    const n = groups.reduce((a, [, ts]) => a + ts.length, 0);
+    return `<section class="column col-${c}"><h2>${c}<span>${n}</span></h2>${groups.map(([l, ts]) => `<div class="lanegroup" data-lane-of="${l.id}" style="--lc:${laneColor(l)}">${groupHead(l)}${ts.map(cardB).join("")}</div>`).join("") || `<span class="muted" style="font-size:12px;padding:4px">—</span>`}</section>`; }).join("")}</div></div>
+  ${dialogB()}`;
+}
+
+// E: B's sidebar and dialog around A's grid: one band per lane, aligned across the four columns.
+function renderE() {
+  return `${topbar()}<div class="shell">${sidebarB()}
+  <div class="grid">
+    <div class="colheads">${COLS.map(c => `<div class="col-${c}">${c}<span>${visibleLanes().filter(inScopeB).flatMap(l => l.tickets).filter(t => t.col === c && passes(t)).length}</span></div>`).join("")}</div>
+    ${visibleLanes().filter(inScopeB).map(l => `<section class="band" data-lane-of="${l.id}" style="--lc:${laneColor(l)}">
+      ${groupHead(l)}
+      <div class="bandrow">${COLS.map(c => `<div class="column col-${c}">${l.tickets.filter(t => t.col === c && passes(t)).map(cardB).join("")}</div>`).join("")}</div></section>`).join("") || `<p class="muted">No cards match the filters.</p>`}
+  </div></div>
+  ${dialogB()}`;
+}
+
+// ---- C: lane list ----
+function renderC() {
+  const row = x => { const p = plan(x), open = S.open.has(x.n), arm = S.confirm === x.n;
+    return `<div class="row col-${x.col} ${x.col === "Decided" ? "decided" : ""}"><span class="pill">${x.col}</span><a class="ref ext" href="${TRACKER}${x.n}" target="_blank">#${x.n}</a>
+      <span class="t" data-toggle="${x.n}" title="${esc(x.title)}">${open ? "▾" : "▸"} ${esc(x.title)}</span>${x.col === "Decided" ? "<span></span>" : tags(x)}
+      <span class="act"><span class="badgecell">${badges(x.sessions, x)}</span>
+        ${x.sessions.length ? `<button data-goto="${x.n}">Go to</button>` : x.col === "Decided" ? "" : `<button class="${arm ? "confirming" : ""}" data-arm="${x.n}" ${p.refuse ? `disabled title="${esc(p.refuse)}"` : `title="${esc(p.text)}"`}>${arm ? "Confirm start" : "▶ Start"}</button>${arm ? `<button class="ghost" data-cancel>✕</button>` : ""}`}</span></div>
+      ${open ? `<div class="expand">${detailBody(x)}</div>` : ""}${arm ? `<div class="expand muted">${esc(p.text)}</div>` : ""}`; };
+  return `${topbar()}<main>${visibleLanes().map(l => { const c = counts(l);
+    return `<details class="lane" ${S.collapsed.has(l.id) ? "" : "open"} data-lane="${l.id}" style="border-left:4px solid ${laneColor(l)}"><summary>
+      <span class="lanehead"><span class="glyph-${l.kind}">${glyph(l)}</span> ${laneRef(l)} <b>${esc(l.title)}</b> ${badges(l.sessions)}${l.specs.map(s => `<span class="muted"> ▣ #${s.n} ${s.counts}</span> ${badges(s.sessions)}`).join("")}</span>
+      <span class="counts">${COLS.map(k => `<span class="col-${k}"><b>${c[k]}</b> ${k.toLowerCase()}</span>`).join("")}</span></summary>
+      ${COLS.flatMap(k => l.tickets.filter(x => x.col === k && passes(x))).map(row).join("")}</details>`; }).join("") || `<p class="muted">No cards match the filters.</p>`}</main>`;
+}
+
+// ---- render + events ----
+function render() {
+  const v = variant(), focused = document.activeElement?.id, caret = document.activeElement?.selectionStart;
+  document.body.className = { D: "B D", E: "B E" }[v] || v;
+  document.getElementById("app").innerHTML = { A: renderA, B: renderB, C: renderC, D: renderD, E: renderE }[v]();
+  document.getElementById("plabel").textContent = `${v} (${VARIANTS[v]})`;
+  const top = document.querySelector("header.top"); if (top) document.documentElement.style.setProperty("--topH", top.offsetHeight + "px");
+  if (focused === "needle") { const n = document.getElementById("needle"); n.focus(); n.setSelectionRange(caret, caret); }
+}
+document.addEventListener("input", e => { if (e.target.id === "needle") { S.needle = e.target.value; render(); } });
+document.addEventListener("change", e => { if (e.target.matches("[data-scope]")) { S.laneScope = e.target.value; render(); } });
+document.addEventListener("toggle", e => { if (e.target.matches("details.lane")) { const id = e.target.dataset.lane === "null" ? null : +e.target.dataset.lane; e.target.open ? S.collapsed.delete(id) : S.collapsed.add(id); } }, true);
+document.addEventListener("click", e => {
+  const d = k => e.target.closest(`[data-${k}]`)?.dataset[k];
+  let v;
+  if ((v = d("chip")) !== undefined) { const [g, val] = v.split(":"); if (g === "assignee") S.assignee = val; else S[g].has(val) ? S[g].delete(val) : S[g].add(val); return render(); }
+  if (d("clear") !== undefined) { S.needle = ""; S.type.clear(); S.mode.clear(); S.assignee = "anyone"; return render(); }
+  if ((v = d("yes"))) return doStart(byN(+v));
+  if (d("cancel") !== undefined) { S.confirm = null; return render(); }
+  if ((v = d("start"))) { S.confirm = +v; return render(); }
+  if ((v = d("arm"))) { if (S.confirm === +v) return doStart(byN(+v)); S.confirm = +v; return render(); }
+  if ((v = d("goto"))) return goTo(byN(+v));
+  if ((v = d("gowt"))) return goWt(v);
+  if (d("nextneeds") !== undefined) return nextNeeds();
+  if ((v = d("toggle"))) { S.open.has(+v) ? S.open.delete(+v) : S.open.add(+v); return render(); }
+  if (d("close") !== undefined) { S.sel = null; S.confirm = null; return render(); }
+  if ((v = d("scope"))) { S.laneScope = v; return render(); }
+  if ((v = d("collapse")) && !e.target.closest("a")) { const id = v === "null" ? null : +v; S.collapsed.has(id) ? S.collapsed.delete(id) : S.collapsed.add(id); return render(); }
+  if ((v = d("sel"))) { S.sel = +v; S.confirm = null; return render(); }
+});
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { S.confirm ? (S.confirm = null) : (S.sel = null); return render(); }
+  if (e.target.closest("input, textarea, select, [contenteditable]")) return;
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") step(e.key === "ArrowLeft" ? -1 : 1);
+  if (e.key === "/") { e.preventDefault(); document.getElementById("needle")?.focus(); }
+});
+function step(d) { const ks = Object.keys(VARIANTS), i = (ks.indexOf(variant()) + d + ks.length) % ks.length; const u = new URL(location); u.searchParams.set("variant", ks[i]); history.replaceState(null, "", u); S.sel = null; S.confirm = null; render(); }
+// Hovering a lane in the sidebar dims every card outside it (D and E).
+document.addEventListener("mouseover", e => {
+  const id = e.target.closest("[data-hover]")?.dataset.hover;
+  document.body.classList.toggle("hl-lane", !!id);
+  document.querySelectorAll("[data-lane-of]").forEach(el => el.classList.toggle("hl", el.dataset.laneOf === id));
+});
+document.getElementById("prev").onclick = () => step(-1);
+document.getElementById("next").onclick = () => step(1);
+
+// ---- fake server push: a session status changes every 6 s ----
+let last = Date.now();
+setInterval(() => { const ago = Math.round((Date.now() - last) / 1000); const el = document.getElementById("ago"); if (el) el.textContent = ago < 2 ? "just now" : `${ago}s ago`; }, 1000);
+const cycle = ["working", "needs", "idle", "working"];
+setInterval(() => {
+  const ss = [...lanes.flatMap(l => [...l.sessions, ...l.specs.flatMap(s => s.sessions)]), ...all().flatMap(x => x.sessions)];
+  const s = ss[Math.floor(Math.random() * ss.length)]; if (!s) return;
+  s.status = cycle[(cycle.indexOf(s.status) + 1) % cycle.length] || "working";
+  last = Date.now(); render(); flash(s.wt);
+}, 6000);
+render();
+</script>
+</body>
+</html>
