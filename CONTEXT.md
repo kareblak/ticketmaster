@@ -5,6 +5,14 @@ worktree.
 
 ## Language
 
+### Board
+
+**Board view**:
+How the board is shown: the TUI in a terminal, or the web view in a browser on the same machine. Independent of
+the session backend: either view starts and finds sessions through whichever backend is in use. Each view keeps one
+board per Claude session, so a TUI and a web board can run side by side.
+_Avoid_: web client, front end
+
 ### Lanes
 
 **Lane**:
