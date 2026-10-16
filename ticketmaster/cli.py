@@ -1,6 +1,7 @@
-"""Command line: `open` (the board in a herdr pane beside the caller, or right here when the caller is that
-pane) and `cleanup <map>` (removes what a closed map leaves behind; `--dry-run` lists it), which run inside herdr (HERDR_ENV=1), and `login`
-(Linear OAuth, in the browser), which runs anywhere.
+"""Command line: `open` (the board beside the caller, through the session backend: in herdr a pane split off the
+caller, or right here when the caller is that pane) and `cleanup <map>` (removes what a closed map leaves behind;
+`--dry-run` lists it), which run through a session backend (`--backend`, else TICKETMASTER_BACKEND, else `backend` in
+`.ticketmaster.toml`, else the first available), and `login` (Linear OAuth, in the browser), which runs anywhere.
 """
 
 from __future__ import annotations
@@ -11,7 +12,8 @@ import re
 import sys
 from pathlib import Path
 
-from . import __version__, herdr
+from . import __version__
+from .backends import BackendError, ChoiceError, resolve
 from .providers import ProviderError, Query
 
 
@@ -23,7 +25,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ticketmaster",
         usage="ticketmaster [open] [map] [options] | ticketmaster login | ticketmaster cleanup map [--dry-run]",
-        description="Live swimlane board of wayfinder maps and standalone specs, in herdr.",
+        description="Live swimlane board of wayfinder maps and standalone specs, starting sessions through herdr.",
     )
     parser.add_argument("--version", action="store_true", help="print the version")
     parser.add_argument("command", choices=COMMANDS)
@@ -35,8 +37,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--interval", type=float, help="refresh seconds (default 5, 30 on Linear)")
     parser.add_argument("--columns", choices=["auto", "one", "all"], default="auto",
                         help="one column at a time, all side by side, or auto by width (default)")
+    parser.add_argument("--backend", help="session backend (default: auto-detect; herdr inside herdr)")
     parser.add_argument("--dry-run", action="store_true",
-                        help="cleanup: only list the map's worktrees, branches and herdr sessions, changing nothing")
+                        help="cleanup: only list the map's worktrees, branches and sessions, changing nothing")
     if not argv or argv[0].startswith("-") or is_issue(argv[0]):
         argv = ["open", *argv]
     args = parser.parse_args(argv)
@@ -94,7 +97,7 @@ def passthrough(args: argparse.Namespace) -> list[str]:
     out: list[str] = []
     if args.map is not None:
         out.append(str(args.map))
-    for flag in ("repo", "provider", "host"):
+    for flag in ("repo", "provider", "host", "backend"):
         if getattr(args, flag):
             out += [f"--{flag}", getattr(args, flag)]
     if args.columns != "auto":
@@ -138,12 +141,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "login":
         return login(Path.cwd(), args.provider)
-    if not herdr.available():
-        print(f"ticketmaster: `{args.command}` runs inside herdr; start herdr and run it from a herdr pane", file=sys.stderr)
-        return 2
     cwd = Path.cwd()
-    from .config import resolve_provider
+    from .config import load_config, resolve_provider
 
+    config = load_config(cwd)
+    try:
+        backend = resolve(cwd, args.backend, config)
+    except ChoiceError as exc:
+        print(f"ticketmaster: {exc}", file=sys.stderr)
+        return 2
     try:
         provider = resolve_provider(cwd, args.provider, args.repo, args.host)
     except ProviderError as exc:
@@ -152,48 +158,42 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "cleanup":
         from .cleanup import CleanupError, clean, close_last, dry_run
 
-        pane = os.environ.get("HERDR_PANE_ID")
         try:
             if args.dry_run:
-                print(dry_run(cwd, provider, args.map, herdr.Herdr(), own_pane=pane))
+                print(dry_run(cwd, provider, args.map, backend))
                 return 0
-            bench = herdr.Herdr()
-            cleaned = clean(cwd, provider, args.map, bench, own_pane=pane)
-        except (CleanupError, ProviderError, herdr.HerdrError) as exc:
+            cleaned = clean(cwd, provider, args.map, backend)
+        except (CleanupError, ProviderError, BackendError) as exc:
             print(f"ticketmaster: {exc}", file=sys.stderr)
             return 1
-        print(cleaned.summary, flush=True)  # all of it, before closing the workspace this runs in
-        if not cwd.exists():  # its own worktree went: herdr runs from somewhere that still is
+        print(cleaned.summary, flush=True)  # all of it, before letting go of what this runs in
+        if not cwd.exists():  # its own worktree went: the backend runs from somewhere that still is
             os.chdir(Path.home())
-        refused = close_last(cleaned, bench)
+        refused = close_last(cwd, cleaned, backend)
         for complaint in refused:
             print(f"ticketmaster: {complaint}", file=sys.stderr)
         return 0 if cleaned.ok and not refused else 1
     try:
-        board = herdr.Herdr().open_board(
-            cwd, herdr.open_command(passthrough(args)), os.environ.get("HERDR_PANE_ID"), os.environ.get("CLAUDE_CODE_SESSION_ID"),
-        )
-    except herdr.HerdrError as exc:
-        print(f"ticketmaster: herdr: {exc}", file=sys.stderr)
+        report = backend.open_board(cwd, passthrough(args))
+    except BackendError as exc:
+        print(f"ticketmaster: {exc.source}: {exc}", file=sys.stderr)
         return 1
-    if board is not None:
-        how = f"restarted in {board.beside}'s workspace" if board.restarted else f"split off {board.beside}"
-        print(f"Board opened in herdr pane {board.pane} ({herdr.BOARD_LABEL}), {how}, for {provider.name}:{provider.repo}.")
+    if report is not None:
+        print(f"{report}, for {provider.name}:{provider.repo}.")
         return 0
-    # None: a board pane launched this, or it was typed at a shell, so the board runs here
+    # None: the board runs here (in herdr: a board pane launched this, or it was typed at a shell)
 
     from .board import BoardApp
-    from .config import load_config, settings_path
-    from .start import workbench_for, worktree_name
+    from .config import settings_path
+    from .start import workbench_for
 
-    workbench = workbench_for(cwd, load_config(cwd))
+    workbench = workbench_for(cwd, config, backend)
     BoardApp(
         provider,
         Query(named_map=named_number(args.map, provider)),
         interval=args.interval,
         workbench=workbench,
-        describe_start=lambda ticket: workbench.prompt(ticket)
-        + f"\nworktree: {worktree_name(ticket)}, in its own herdr workspace",
+        describe_start=workbench.describe,
         columns=args.columns,
         settings_path=settings_path(),
         map_key=args.map if isinstance(args.map, str) else None,

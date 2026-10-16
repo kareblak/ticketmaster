@@ -126,9 +126,10 @@ def test_a_key_env_without_the_linear_prefix_is_refused(tmp_path, monkeypatch):
 
 
 def test_provider_linear_without_a_team_prints_the_config_lines_to_add(tmp_path, monkeypatch, capsys):
-    from ticketmaster import cli, herdr
+    from ticketmaster import cli
+    from ticketmaster.backends import herdr
 
-    monkeypatch.setattr(herdr, "available", lambda: True)
+    monkeypatch.setattr(herdr, "unavailable", lambda env: None)
     monkeypatch.chdir(linear_repo(tmp_path, ""))
     assert cli.main(["--provider", "linear"]) == 2
     err = capsys.readouterr().err

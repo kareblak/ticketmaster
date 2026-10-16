@@ -244,9 +244,10 @@ def test_login_without_oauth_client_id_prints_the_config_line(tmp_path, config_h
 
 
 def test_login_runs_outside_herdr_and_reports_where_the_token_went(tmp_path, config_home, monkeypatch, capsys):
-    from ticketmaster import cli, herdr
+    from ticketmaster import cli
+    from ticketmaster.backends import herdr
 
-    monkeypatch.setattr(herdr, "available", lambda: False)
+    monkeypatch.setattr(herdr, "unavailable", lambda env: "HERDR_ENV is not 1")
     calls = []
     monkeypatch.setattr(linear_oauth, "login", lambda client_id: calls.append(client_id) or TokenStore.for_client(client_id))
     monkeypatch.chdir(linear_repo(tmp_path, 'provider = "linear"\nteam = "TM"\noauth_client_id = "cid"\n'))
@@ -268,7 +269,8 @@ def test_login_is_for_linear_only(tmp_path, config_home, monkeypatch, capsys):
 def test_the_board_path_never_opens_a_browser(tmp_path, config_home, monkeypatch, capsys, token):
     from types import SimpleNamespace
 
-    from ticketmaster import cli, herdr
+    from ticketmaster import cli
+    from ticketmaster.backends import herdr
 
     no_browser(monkeypatch)
     if token is not None:
@@ -276,7 +278,7 @@ def test_the_board_path_never_opens_a_browser(tmp_path, config_home, monkeypatch
         fake = fake_http(monkeypatch)
         fake.open = lambda request, timeout=None: (_ for _ in ()).throw(
             urllib_error(400, {"error": "invalid_grant"}, url=linear_oauth.TOKEN_URL))
-    monkeypatch.setattr(herdr, "available", lambda: True)
+    monkeypatch.setattr(herdr, "unavailable", lambda env: None)
     monkeypatch.setattr(herdr.Herdr, "open_board", lambda self, *args: SimpleNamespace(
         pane="p1", beside="claude", restarted=False))
     monkeypatch.chdir(linear_repo(tmp_path, 'provider = "linear"\nteam = "TM"\noauth_client_id = "cid"\n'))

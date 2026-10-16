@@ -3,7 +3,7 @@
 import json
 import subprocess
 
-from ticketmaster.herdr import HerdrError
+from ticketmaster.backends.herdr import HerdrError
 
 
 class FakeHerdr:
