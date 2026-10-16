@@ -2,17 +2,19 @@
 
 A map leaves behind the worktrees of the map itself and of its lane tickets (decision tickets, specs and their
 implementation tickets), wherever they are (herdr's `~/.herdr/worktrees/<repo>/` and Claude's `.claude/worktrees/`
-are both the repo's git worktrees), the herdr workspaces and agents in them, a ticket branch left without a
-worktree, and an agent titled with a lane ticket that runs elsewhere. Each is removable when its ticket is closed or
-a PR closing it is merged, by the tracker, and it holds no uncommitted changes. Unpushed commits say nothing: a
-squash merge whose remote branch was deleted leaves every local commit unpushed. The worktree cleanup runs in (its
-directory, or its herdr pane's workspace or agent) is the current one, judged like any other and removed last.
+are both the repo's git worktrees), what the session backend has in them (herdr's workspaces and agents), a ticket
+branch left without a worktree, and an agent titled with a lane ticket that runs elsewhere. Each is removable when
+its ticket is closed or a PR closing it is merged, by the tracker, and it holds no uncommitted changes and nothing
+the backend keeps it for. Unpushed commits say nothing: a squash merge whose remote branch was deleted leaves every
+local commit unpushed. The worktree cleanup runs in (its directory, or what the backend calls cleanup's own, such as
+its herdr pane's workspace or agent) is the current one, judged like any other and removed last.
 
-Without `--dry-run`, and only on a closed map, each removable worktree's herdr workspace and agents are closed,
-then the worktree is removed (`git worktree remove`, which refuses a worktree changed since), then its branch is
-deleted with `git branch -d`, which refuses a branch git calls unmerged. Nothing is forced; kept entries are left alone. This is
-the one command that changes anything: the board only reads. A removable current worktree goes after every other
-entry, its herdr workspace or pane, which would end cleanup itself, only after the summary is printed.
+Without `--dry-run`, and only on a closed map, the backend lets go of each removable worktree (herdr closes its
+workspace and agents), then the worktree is removed (`git worktree remove`, which refuses a worktree changed since),
+then its branch is deleted with `git branch -d`, which refuses a branch git calls unmerged. Nothing is forced; kept
+entries are left alone. This is the one command that changes anything: the board only reads. A removable current
+worktree goes after every other entry, and what the backend has there that would end cleanup itself (its herdr
+workspace or pane) is let go of only after the summary is printed.
 """
 
 from __future__ import annotations
@@ -24,8 +26,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import herdr
-from .herdr import Herdr, checkout_of, title_number
+from . import git as gitrepo
+from .backends import Backend, CleanupView, Occupant
+from .git import has_uncommitted
 from .model import Ticket, lane_tickets
 from .providers import Provider, Query
 from .start import branch_name, worktree_name
@@ -40,18 +43,15 @@ class CleanupError(RuntimeError):
 
 @dataclass(frozen=True)
 class Leftover:
-    """A worktree with its branch, herdr workspaces and agents; a branch alone (no path); or an agent outside the
-    ticket's worktrees (the checkout it runs in)."""
+    """A worktree with its branch and what the backend has in it; a branch alone (no path); or an occupant outside
+    the ticket's worktrees (the checkout it runs in)."""
 
     ticket: Ticket
     path: str | None
     branch: str | None
-    workspaces: tuple[str, ...]
-    agents: tuple[str, ...]  # each agent's status
+    occupants: tuple[Occupant, ...]
     removable: bool
     reason: str
-    panes: tuple[tuple[str, str | None], ...] = ()  # each agent's pane and workspace
-    opened: str | None = None  # the herdr workspace open on the worktree, closed with it
     current: bool = False  # cleanup runs in it, so it goes last
 
 
@@ -62,32 +62,22 @@ class Outcome:
     entry: Leftover
     removed: tuple[str, ...]
     note: str  # the kept reason, or what of a removed entry was left; "" when all of it went
-    failed: bool = False  # git or herdr refused a step; a branch git calls unmerged is no failure
-    last: tuple[tuple[str, str], ...] = ()  # (group, target) herdr closes that would end cleanup, for after the summary
+    failed: bool = False  # git or the backend refused a step; a branch git calls unmerged is no failure
+    last: bool = False  # the backend left what would end cleanup in it, for a release after the summary
 
 
 @dataclass(frozen=True)
 class Cleaned:
-    """The summary, whether every step went through, and the herdr closes left for after the summary is printed:
-    the workspace or pane cleanup runs in."""
+    """The summary, whether every step went through, and the worktrees the backend lets go of only after the
+    summary is printed: what cleanup runs in."""
 
     summary: str
     ok: bool
-    last: tuple[tuple[str, str], ...]
+    last: tuple[str, ...]
 
 
-def has_uncommitted(path: str) -> bool | None:
-    """`git status`, without refreshing the worktree's index, so looking writes nothing."""
-    try:
-        result = subprocess.run(["git", "--no-optional-locks", "-C", path, "status", "--porcelain"],
-                                capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return bool(result.stdout.strip()) if result.returncode == 0 else None
-
-
-def verdict(ticket: Ticket, dirty: bool | None, outside: bool = False) -> tuple[bool, str]:
-    """Removable, and why; or kept, with every reason."""
+def verdict(ticket: Ticket, dirty: bool | None, outside: bool = False, held: tuple[str, ...] = ()) -> tuple[bool, str]:
+    """Removable, and why; or kept, with every reason. `held`: what the backend keeps the worktree for."""
     kept = []
     if ticket.is_open and ticket.has_open_change_request:
         kept.append("unmerged PR")  # even beside a merged one: the ticket's work is not all in
@@ -99,23 +89,19 @@ def verdict(ticket: Ticket, dirty: bool | None, outside: bool = False) -> tuple[
         kept.append("uncommitted changes")
     if outside:
         kept.append("agent outside a ticket worktree")
+    kept += [reason for reason in dict.fromkeys(held) if reason]
     if kept:
         return False, ", ".join(kept)
     return True, "ticket closed" if not ticket.is_open else "PR merged"
 
 
-def leftover(ticket: Ticket, path: str | None, branch: str | None, agents: list[dict], dirty: bool | None,
-             outside: bool = False, current: bool = False, opened: str | None = None) -> Leftover:
-    """`current`: cleanup runs in it. `opened`: the herdr workspace open on the worktree."""
-    removable, reason = verdict(ticket, dirty, outside)
-    workspaces = [opened, *(a.get("workspace_id") for a in agents)]
-    return Leftover(ticket, path, branch, tuple(dict.fromkeys(w for w in workspaces if w)),
-                    tuple(a.get("agent_status") or "unknown" for a in agents), removable, reason,
-                    tuple((a["pane_id"], a.get("workspace_id")) for a in agents if a.get("pane_id")), opened, current)
-
-
-def workspace_of(pane: str | None) -> str | None:
-    return pane.split(":")[0] if pane else None
+def leftover(ticket: Ticket, path: str | None, branch: str | None, occupants: tuple[Occupant, ...],
+             dirty: bool | None, outside: bool = False, current: bool = False,
+             unreadable: str | None = None) -> Leftover:
+    """`current`: cleanup runs in it. `unreadable`: the backend could not look in the worktree."""
+    held = (*(o.blocks for o in occupants if o.blocks), *([unreadable] if unreadable and path else []))
+    removable, reason = verdict(ticket, dirty, outside, held)
+    return Leftover(ticket, path, branch, occupants, removable, reason, current)
 
 
 def ticket_branches(ticket: Ticket) -> set[str]:
@@ -135,43 +121,45 @@ def worktree_ticket(wt: dict, family: dict[int, Ticket], by_branch: dict[str, Ti
     return by_branch.get(wt.get("branch") or "")
 
 
-def leftovers(cwd: Path, map_ticket: Ticket, tickets: list[Ticket], bench: Herdr,
-              uncommitted: Uncommitted | None = None, own_pane: str | None = None) -> list[Leftover]:
-    """The map's and its lane tickets' worktrees in herdr's order with every agent running in them, then their
-    branches checked out nowhere, then agents titled with one of them that run outside those worktrees. Only
-    lists: herdr is asked, never told. A worktree `cwd` lies in, or whose workspace or agent is `own_pane`'s, is
-    current."""
+def strays(view: CleanupView, listed: set[str | None], family: dict[int, Ticket]) -> list[tuple[Ticket, str, tuple[Occupant, ...]]]:
+    """Occupants naming a family ticket in a checkout that is not one of its worktrees, each with what it runs in."""
+    found = []
+    for path, occupants in view.occupants.items():
+        if path in listed:
+            continue
+        for occupant in occupants:
+            if (ticket := family.get(occupant.ticket)) is not None:
+                within = [o for o in occupants if o is not occupant and o.name == occupant.within][:1]
+                found.append((ticket, path, (*within, occupant)))
+    return found
+
+
+def leftovers(cwd: Path, map_ticket: Ticket, tickets: list[Ticket], backend: Backend,
+              uncommitted: Uncommitted | None = None) -> list[Leftover]:
+    """The map's and its lane tickets' worktrees in git's order with what the backend has in them, then their
+    branches checked out nowhere, then occupants naming one of them that run outside those worktrees. Only lists:
+    the backend is asked, never told. A worktree `cwd` lies in, or with an occupant of cleanup's own, is current."""
     uncommitted = uncommitted or has_uncommitted
     where = cwd.resolve()
-    own_workspace = workspace_of(own_pane)
     family = {t.number: t for t in (map_ticket, *lane_tickets(map_ticket, tickets))}
     by_branch = {name: t for t in family.values() for name in ticket_branches(t)}
-    checkouts = bench.call("worktree", "list", "--cwd", str(cwd)).get("worktrees", [])
-    agents = bench.call("agent", "list").get("agents", [])
-    running: dict[str, list[dict]] = {}  # agents by the checkout they run in
-    for agent in agents:
-        if (checkout := checkout_of(agent, checkouts)) is not None:
-            running.setdefault(checkout["path"], []).append(agent)
+    checkouts = gitrepo.worktrees(cwd)
+    view = backend.cleanup_view(cwd)
     found: list[Leftover] = []
     for wt in checkouts:
         ticket = worktree_ticket(wt, family, by_branch) if wt.get("is_linked_worktree") else None
         if ticket is None:
             continue
-        here = running.get(wt["path"], [])
-        current = (where.is_relative_to(Path(wt["path"]).resolve())
-                   or (own_workspace is not None and wt.get("open_workspace_id") == own_workspace)
-                   or any(a.get("pane_id") == own_pane for a in here))
+        here = view.occupants.get(wt["path"], ())
+        current = where.is_relative_to(Path(wt["path"]).resolve()) or any(o.own for o in here)
         found.append(leftover(ticket, wt["path"], wt.get("branch"), here, uncommitted(wt["path"]),
-                              current=current, opened=wt.get("open_workspace_id")))
+                              current=current, unreadable=view.unreadable))
     checked_out = {wt.get("branch") for wt in checkouts}
-    for branch in herdr.local_branches(cwd):
+    for branch in gitrepo.local_branches(cwd):
         if branch in by_branch and branch not in checked_out:
-            found.append(leftover(by_branch[branch], None, branch, [], False))
-    listed = {entry.path for entry in found}
-    for path, here in running.items():
-        for agent in here:
-            if path not in listed and (ticket := family.get(title_number(agent))) is not None:
-                found.append(leftover(ticket, path, None, [agent], False, outside=True))
+            found.append(leftover(by_branch[branch], None, branch, (), False))
+    for ticket, path, occupants in strays(view, {entry.path for entry in found}, family):
+        found.append(leftover(ticket, path, None, occupants, False, outside=True))
     return found
 
 
@@ -185,10 +173,12 @@ def parts(entry: Leftover, home: Path) -> list[str]:
         out.append(f"worktree {shown(entry.path, home)}")
     if entry.branch:
         out.append(f"branch {entry.branch}")
-    if entry.workspaces:
-        out.append(f"workspace{'s' if len(entry.workspaces) > 1 else ''} {' '.join(entry.workspaces)}")
-    if entry.agents:
-        out.append(f"agent{'s' if len(entry.agents) > 1 else ''} {', '.join(entry.agents)}")
+    kinds: dict[str, list[str]] = {}
+    for occupant in entry.occupants:
+        kinds.setdefault(occupant.kind, []).append(occupant.name)
+    for kind, names in kinds.items():
+        joined = " ".join(names) if kind == "workspace" else ", ".join(names)  # ids side by side, states listed
+        out.append(f"{kind}{'s' if len(names) > 1 else ''} {joined}")
     return out
 
 
@@ -224,40 +214,30 @@ def main_checkout(cwd: Path) -> Path:
     return Path(common).parent if ok and common else cwd
 
 
-def remove(cwd: Path, found: list[Leftover], bench: Herdr, home: Path | None = None,
-           own_pane: str | None = None) -> list[Outcome]:
-    """Removes each removable entry: closes the herdr workspace open on it and the panes of its agents in other
-    workspaces, then removes its worktree, then its branch if git calls it merged. A worktree git refuses to remove
-    keeps its branch. Kept entries are not touched. The current entries go last, and a close of `own_pane` or its
-    workspace, which would end cleanup itself, is left in the outcome's `last` for after the summary; a current
-    worktree git refuses to remove leaves them open. Outcomes come in the order entries were handled."""
+def remove(cwd: Path, found: list[Leftover], backend: Backend, home: Path | None = None) -> list[Outcome]:
+    """Removes each removable entry: the backend lets go of its worktree (herdr closes the workspace open on it and
+    the panes of its agents in other workspaces), then its worktree goes, then its branch if git calls it merged. A
+    worktree git refuses to remove keeps its branch. Kept entries are not touched. The current entries go last, and
+    what the backend leaves because it would end cleanup itself is marked `last`, for a release after the summary; a
+    current worktree git refuses to remove leaves it open. Outcomes come in the order entries were handled."""
     home = Path.home() if home is None else home
     checkout = main_checkout(cwd)
-    own_workspace = workspace_of(own_pane)
     ordered = [entry for entry in found if not entry.current] + [entry for entry in found if entry.current]
-    return [remove_one(checkout, entry, bench, home, own_pane, own_workspace) for entry in ordered]
+    return [remove_one(cwd, checkout, entry, backend, home) for entry in ordered]
 
 
-def remove_one(checkout: Path, entry: Leftover, bench: Herdr, home: Path, own_pane: str | None,
-               own_workspace: str | None) -> Outcome:
+def remove_one(cwd: Path, checkout: Path, entry: Leftover, backend: Backend, home: Path) -> Outcome:
     if not entry.removable:
         return Outcome(entry, (), entry.reason)
     removed: list[str] = []
     left: list[str] = []
-    failed = False
-    closing = [("workspace", entry.opened, f"workspace {entry.opened}")] if entry.opened else []
-    closing += [("pane", pane, f"agent {pane}") for pane, workspace in entry.panes if workspace != entry.opened]
-    ending = [close for close in closing if close[1] in (own_pane, own_workspace)]
-    for group, target, label in closing:
-        if (group, target, label) in ending:
-            continue
-        try:
-            bench.call(group, "close", target)
-        except herdr.HerdrError as exc:
-            left.append(f"{label} not closed: {exc}")
-            failed = True
-        else:
-            removed.append(label)
+    later: tuple[str, ...] = ()
+    if entry.path:
+        released = backend.release(cwd, entry.path)
+        removed += released.closed
+        left += released.refused
+        later = released.later
+    failed = bool(left)
     if entry.path:
         ok, complaint = git(checkout, "worktree", "remove", entry.path)
         if not ok:
@@ -273,23 +253,16 @@ def remove_one(checkout: Path, entry: Leftover, bench: Herdr, home: Path, own_pa
         else:
             left.append(f"branch {entry.branch} kept: {complaint}")
             failed = True
-    if ending:
-        labels = [label for _, _, label in ending]
-        left.append(f"cleanup runs in it: {' and '.join(labels)} close{'s' if len(labels) == 1 else ''} after this summary")
+    if later:
+        left.append(f"cleanup runs in it: {' and '.join(later)} close{'s' if len(later) == 1 else ''} after this summary")
     elif entry.current:
-        left.append("cleanup ran in it")  # with no herdr close of its own: whatever runs there is left in a removed directory
-    return Outcome(entry, tuple(removed), ", ".join(left), failed, tuple((group, target) for group, target, _ in ending))
+        left.append("cleanup ran in it")  # with nothing of its own to close: whatever runs there is left in a removed directory
+    return Outcome(entry, tuple(removed), ", ".join(left), failed, bool(later))
 
 
-def close_last(cleaned: Cleaned, bench: Herdr) -> list[str]:
-    """Closes what cleanup runs in, once its summary is out; what herdr refused to close."""
-    refused = []
-    for group, target in cleaned.last:
-        try:
-            bench.call(group, "close", target)
-        except herdr.HerdrError as exc:
-            refused.append(f"{'agent' if group == 'pane' else group} {target} not closed: {exc}")
-    return refused
+def close_last(cwd: Path, cleaned: Cleaned, backend: Backend) -> list[str]:
+    """Lets go of what cleanup runs in, once its summary is out; what the backend refused to close."""
+    return [complaint for path in cleaned.last for complaint in backend.release(cwd, path).refused]
 
 
 def render_outcomes(map_ticket: Ticket, outcomes: list[Outcome], home: Path | None = None) -> str:
@@ -320,22 +293,22 @@ def named_map(provider: Provider, named: int | str) -> tuple[Ticket, list[Ticket
     return map_ticket, tickets
 
 
-def dry_run(cwd: Path, provider: Provider, named: int | str, bench: Herdr,
-            uncommitted: Uncommitted | None = None, own_pane: str | None = None) -> str:
+def dry_run(cwd: Path, provider: Provider, named: int | str, backend: Backend,
+            uncommitted: Uncommitted | None = None) -> str:
     """The named map's leftovers, open or closed."""
     map_ticket, tickets = named_map(provider, named)
-    return render(map_ticket, leftovers(cwd, map_ticket, tickets, bench, uncommitted, own_pane))
+    return render(map_ticket, leftovers(cwd, map_ticket, tickets, backend, uncommitted))
 
 
-def clean(cwd: Path, provider: Provider, named: int | str, bench: Herdr,
-          uncommitted: Uncommitted | None = None, own_pane: str | None = None) -> Cleaned:
+def clean(cwd: Path, provider: Provider, named: int | str, backend: Backend,
+          uncommitted: Uncommitted | None = None) -> Cleaned:
     """Removes the named closed map's removable leftovers, the current worktree last; the summary, whether every
-    step went through (a branch git calls unmerged is no failure), and what `close_last` closes once the summary is
-    printed. An open map is refused before herdr or git is touched: a human closes it in the tracker."""
+    step went through (a branch git calls unmerged is no failure), and the worktrees `close_last` lets go of once
+    the summary is printed. An open map is refused before the backend or git is touched: a human closes it in the
+    tracker."""
     map_ticket, tickets = named_map(provider, named)
     if map_ticket.is_open:
         raise CleanupError(f"{map_ticket.ref} is still open: close the map in the tracker first; nothing changed")
-    outcomes = remove(cwd, leftovers(cwd, map_ticket, tickets, bench, uncommitted, own_pane), bench,
-                      own_pane=own_pane)
+    outcomes = remove(cwd, leftovers(cwd, map_ticket, tickets, backend, uncommitted), backend)
     return Cleaned(render_outcomes(map_ticket, outcomes), not any(outcome.failed for outcome in outcomes),
-                   tuple(close for outcome in outcomes for close in outcome.last))
+                   tuple(outcome.entry.path for outcome in outcomes if outcome.last and outcome.entry.path))

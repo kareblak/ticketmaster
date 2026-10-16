@@ -25,10 +25,11 @@ from textual.widgets import Button, Footer, Input, Label, Static
 
 from .config import (DEFAULT_BUDGET, board_budget, board_decided_age, board_fetch_limit, board_interval, load_settings,
                      parse_budget, parse_decided_age, parse_fetch_limit, parse_interval, save_settings, seconds_text)
-from .herdr import HerdrError, Session
 from .model import (COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, LaneKind, SpecProgress, Ticket, build_board,
                     frontier)
+from .backends import BackendError
 from .providers import ErrorNotice, Provider, ProviderError, Query, Quota, RateLimited, error_notice
+from .session import Session
 from .start import branch_name, worktree_name
 
 NARROW_WIDTH = 100  # below this the "auto" view shows one column at a time
@@ -402,7 +403,7 @@ class StartPlan(NamedTuple):
 
 
 class Workbench(Protocol):
-    """The herdr side of the board, see start.Workbench. Every call blocks."""
+    """The session side of the board, see start.Workbench. Every call blocks."""
 
     def sessions(self) -> dict[int, list[Session]]: ...
     def start(self, ticket: Ticket) -> str: ...
@@ -848,7 +849,7 @@ class BoardApp(App):
         self.sessions: dict[int, list[Session]] = {}
         self.settings_path = settings_path  # None: settings live only as long as the board
         self.settings = load_settings(settings_path) if settings_path else {}
-        self.herdr_error: str | None = None
+        self.session_error: str | None = None
         self.repo_key = f"{provider.name}:{provider.repo}"
         self.board_query = replace(query, limit=board_fetch_limit(self._repo_settings()))
         self.cut_off: str | None = None  # what the last ticket fetch cut off at the fetch limit
@@ -932,14 +933,14 @@ class BoardApp(App):
         self.run_worker(lambda: self._fetch(tickets), thread=True, group="fetch")
 
     def _fetch(self, tickets: bool = True) -> None:
-        sessions, herdr_error = self.sessions, None
+        sessions, session_error = self.sessions, None
         if self.workbench is not None:
             try:
                 sessions = self.workbench.sessions()
-            except HerdrError as exc:
-                herdr_error = f"herdr: {exc}"
+            except BackendError as exc:
+                session_error = f"{exc.source}: {exc}"
         if not tickets:
-            self.call_from_thread(self._apply, None, None, sessions, herdr_error, fetched_tickets=False)
+            self.call_from_thread(self._apply, None, None, sessions, session_error, fetched_tickets=False)
             return
         query = self.board_query
         try:
@@ -949,13 +950,13 @@ class BoardApp(App):
             cut = getattr(self.provider, "cut_off", [])  # what the fetch cut off at the limit, when it says
             cut_off = f"cut off at {query.limit}: {', '.join(cut)}" if cut else None
             quota = getattr(self.provider, "quota", None)  # GitHub's, after this fetch
-            self.call_from_thread(self._apply, board, None, sessions, herdr_error, cut_off=cut_off, quota=quota)
+            self.call_from_thread(self._apply, board, None, sessions, session_error, cut_off=cut_off, quota=quota)
         except RateLimited as exc:
             explain = getattr(self.provider, "explain", None)  # GitHub can say which limit it was
-            self.call_from_thread(self._apply, None, explain(exc) if explain else exc, sessions, herdr_error,
+            self.call_from_thread(self._apply, None, explain(exc) if explain else exc, sessions, session_error,
                                   rate_limited=True)
         except ProviderError as exc:
-            self.call_from_thread(self._apply, None, exc, sessions, herdr_error)
+            self.call_from_thread(self._apply, None, exc, sessions, session_error)
         except BaseException:
             self.call_from_thread(setattr, self, "fetching", False)
             raise
@@ -969,7 +970,7 @@ class BoardApp(App):
             return None  # claimed tickets then start after the confirm, as before the login was known
 
     def _apply(self, board: Board | None, error: ProviderError | None, sessions: dict[int, list[Session]] | None = None,
-               herdr_error: str | None = None, fetched_tickets: bool = True, rate_limited: bool = False,
+               session_error: str | None = None, fetched_tickets: bool = True, rate_limited: bool = False,
                cut_off: str | None = None, quota: Quota | None = None) -> None:
         self.fetching = False
         if fetched_tickets:
@@ -992,7 +993,7 @@ class BoardApp(App):
             self.starting -= {n for n in self.starting if any(s.status is not None for s in sessions.get(n, []))}
             self.sessions = sessions
             changed = True
-        self.herdr_error = herdr_error
+        self.session_error = session_error
         if changed:
             self._render_board()  # rebuilding resets scroll, so only when tickets changed
         else:
@@ -1119,7 +1120,7 @@ class BoardApp(App):
             if chosen := self._chosen(section):
                 values = [f"#{v}" if v.isdigit() else v for v in chosen] if section == MAP else chosen
                 status.append(f" · {section.lower()}: {', '.join(values)}", style="yellow")
-        for error in (self.last_error, self.herdr_error):
+        for error in (self.last_error, self.session_error):
             if error:
                 status.append(f"  ⚠ {error}", style="bold red")
         self.query_one("#status", Static).update(status)
@@ -1248,8 +1249,8 @@ class BoardApp(App):
         def work() -> None:
             try:
                 message, severity = job(), "information"
-            except HerdrError as exc:
-                message, severity = f"herdr: {exc}", "error"
+            except BackendError as exc:
+                message, severity = f"{exc.source}: {exc}", "error"
             self.call_from_thread(self.notify, message, severity=severity)
             self.call_from_thread(self._refresh_now)
 
@@ -1351,7 +1352,7 @@ class BoardApp(App):
         def start() -> str:
             try:
                 return self.workbench.start(ticket)
-            except HerdrError:
+            except BackendError:
                 # a lambda: Textual inspects the callback's signature, and set.discard (a builtin) has none
                 self.call_from_thread(lambda: self.starting.discard(ticket.number))
                 raise

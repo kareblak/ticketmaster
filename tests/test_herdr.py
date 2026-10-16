@@ -3,8 +3,9 @@ from pathlib import Path
 import pytest
 
 from fake_herdr import FakeHerdr
-from ticketmaster import herdr
-from ticketmaster.herdr import BoardOpened, Herdr, HerdrError, Session
+from ticketmaster.backends import herdr
+from ticketmaster.backends.herdr import BoardOpened, Handle, Herdr, HerdrBackend, HerdrError
+from ticketmaster.session import Session
 from ticketmaster.model import Ticket
 from ticketmaster.start import Workbench, session_label
 
@@ -32,8 +33,8 @@ def ticket():
                   labels=("wayfinder:map",))
 
 
-def bench(fake, **kw):
-    return Workbench(REPO, herdr=Herdr(fake), **kw)
+def bench(fake, claude="claude", **kw):
+    return Workbench(REPO, HerdrBackend(Herdr(fake), claude=claude), **kw)
 
 
 def test_available_needs_env_and_binary(monkeypatch):
@@ -455,6 +456,14 @@ def test_implement_in_a_workspace_without_panes_reopens_the_worktree():
     assert fake.first("agent", "start")[6] == "wD:p1"
 
 
+def pane_of(session):
+    return session.handle.pane if session.handle else None
+
+
+def workspace_of(session):
+    return session.handle.workspace if session.handle else None
+
+
 def tree(path, branch=None, workspace=None):
     entry = {"path": path, "branch": branch or Path(path).name, "is_linked_worktree": True}
     if workspace:
@@ -490,7 +499,7 @@ def test_other_worktree_names_tie_to_no_ticket(name):
 def test_a_terminal_title_starting_with_the_key_ties_to_the_ticket(title):
     found = found_by(agents=[agent("w3:p1", "working", title=title)])
     assert set(found) == {5}
-    assert (found[5][0].pane, found[5][0].status, found[5][0].path) == ("w3:p1", "working", str(REPO))
+    assert (pane_of(found[5][0]), found[5][0].status, found[5][0].path) == ("w3:p1", "working", str(REPO))
 
 
 @pytest.mark.parametrize("title", ["TM-50 other", "#55", "Fix TM-5 later", "5 awaiting input · claude agents", ""])
@@ -503,7 +512,7 @@ def test_an_agent_outside_the_repo_is_ignored():
         agent("w3:p1", "working", cwd="/code/tickets", title="TM-5 elsewhere"),
         agent("w4:p1", "blocked", cwd="/h/wt/other/tm-5"),
     ])
-    assert [(s.pane, s.status) for s in found[5]] == [(None, None)]  # only the worktree, no agent
+    assert [(pane_of(s), s.status) for s in found[5]] == [(None, None)]  # only the worktree, no agent
 
 
 def test_a_claude_w_agent_in_another_workspace_gets_its_state_through_the_foreground_cwd():
@@ -516,7 +525,7 @@ def test_a_claude_w_agent_in_another_workspace_gets_its_state_through_the_foregr
     ])
     assert set(found) == {5}
     (session,) = found[5]
-    assert (session.path, session.pane, session.workspace, session.status) == (path, "wX:p2", "wX", "blocked")
+    assert (session.path, pane_of(session), workspace_of(session), session.status) == (path, "wX:p2", "wX", "blocked")
 
 
 def test_the_join_ignores_the_open_workspace_and_falls_back_to_the_pane_cwd():
@@ -525,7 +534,7 @@ def test_the_join_ignores_the_open_workspace_and_falls_back_to_the_pane_cwd():
         agent("wA:p1", "working", cwd=REPO),  # the worktree's workspace, but not in its checkout
         {**agent("wB:p1", "idle", cwd=path), "foreground_cwd": None},
     ])
-    assert [(s.pane, s.status) for s in found[713]] == [("wB:p1", "idle")]
+    assert [(pane_of(s), s.status) for s in found[713]] == [("wB:p1", "idle")]
 
 
 def test_each_agent_is_a_session_most_urgent_first_and_a_dead_worktree_follows():
@@ -536,7 +545,7 @@ def test_each_agent_is_a_session_most_urgent_first_and_a_dead_worktree_follows()
     assert [(s.status, s.path) for s in found[7]] == [
         ("blocked", live), ("working", live), ("idle", live), (None, dead),
     ]
-    assert found[7][-1].workspace == "wD"
+    assert workspace_of(found[7][-1]) == "wD"
 
 
 def test_a_titled_agent_in_a_ticket_worktree_counts_once():
@@ -547,7 +556,7 @@ def test_a_titled_agent_in_a_ticket_worktree_counts_once():
 
 def test_go_to_focuses_a_live_sessions_agent_pane():
     fake = FakeHerdr({})
-    session = Session(713, "/w/issue-713", workspace="wA", status="working", pane="wA:p3")
+    session = Session(713, "/w/issue-713", status="working", handle=Handle("wA", "wA:p3"))
     assert bench(fake).go_to(ticket(), session) == "#686: focused issue-713"
     assert fake.calls == [["agent", "focus", "wA:p3"]]
 
@@ -561,7 +570,7 @@ def test_go_to_opens_a_dead_worktree_with_a_shell_without_resuming_claude():
 
 def test_go_to_an_open_workspace_without_claude_focuses_it_without_resuming():
     fake = FakeHerdr({})
-    assert bench(fake).go_to(ticket(), Session(686, "/w/issue-686", workspace="wA")) == \
+    assert bench(fake).go_to(ticket(), Session(686, "/w/issue-686", handle=Handle("wA"))) == \
         "#686: focused issue-686 (no Claude running)"
     assert fake.calls == [["workspace", "focus", "wA"]]
 

@@ -5,7 +5,7 @@ herdr agent, or continues Claude in that worktree with `claude --continue` when 
 copy. The board finds every session working a ticket, including ones it did not start: a worktree named after
 the ticket (`issue-<n>`/`tm-<n>`, from herdr or `claude -w`), or an agent in the repo whose terminal title
 starts with the ticket's key. It shows each agent's state and jumps to it, and never removes or adopts a
-worktree.
+worktree. Cleanup closes the workspaces and agents in a worktree before it goes, its own workspace last.
 """
 
 from __future__ import annotations
@@ -19,25 +19,26 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..git import checkout_of, local_branches, repo_root, ticket_number
+from ..session import Session
+from .base import BackendError, CleanupView, Occupant, Released
+
+NAME = "herdr"
 BOARD_LABEL = "ticketmaster"
 BOARD_ENV = "TICKETMASTER_BOARD"  # set on the `open` a board pane runs, so it knows it is the board
 CLAUDE_ENV = "CLAUDECODE"  # set in Claude's shell; without it `open` was typed at a shell, so the board runs there
 WRAPPER_ENV = "TICKETMASTER_WRAPPER"  # the plugin's bin/ticketmaster, exported by the wrapper itself
 DATA_ENV = "CLAUDE_PLUGIN_DATA"  # the wrapper's venv lives here; exported with WRAPPER_ENV
 BOARD_RATIO = 0.7  # share the caller keeps; leaves the board ~1/3, i.e. single-column mode
-# `issue-12`, `tm-12` (the lowercased Linear key), `worktree-issue-12` (claude -w), `issue-12-2` (an older copy).
-WORKTREE_NAME = re.compile(r"^(?:worktree-)?(?:issue|tm)-(?P<number>\d+)(?:-\d+)?$", re.IGNORECASE)
 # A terminal title starting with the key, `TM-12 …` or `#12 …`, after any spinner glyph Claude puts first.
 TITLE_KEY = re.compile(r"^[^\w#]*(?:#|tm-)(?P<number>\d+)(?!\w)", re.IGNORECASE)
-# Which session Enter goes to first: needs you > working > idle, any agent before a worktree without one (None).
-URGENCY = {"blocked": 0, "working": 1, "idle": 2, "done": 3, "unknown": 4, None: 9}
 
 
-class HerdrError(RuntimeError):
-    pass
+class HerdrError(BackendError):
+    source = "herdr"
 
 
 Runner = Callable[[list[str], float], subprocess.CompletedProcess]
@@ -47,9 +48,22 @@ def default_runner(argv: list[str], timeout: float) -> subprocess.CompletedProce
     return subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
 
 
-def available(env: Mapping[str, str] | None = None) -> bool:
+def unavailable(env: Mapping[str, str] | None = None) -> str | None:
+    """Why herdr cannot be the backend here; None when it can."""
     env = os.environ if env is None else env
-    return env.get("HERDR_ENV") == "1" and shutil.which("herdr") is not None
+    if env.get("HERDR_ENV") != "1":
+        return "HERDR_ENV is not 1"
+    if shutil.which("herdr") is None:
+        return "herdr not on PATH"
+    return None
+
+
+def available(env: Mapping[str, str] | None = None) -> bool:
+    return unavailable(env) is None
+
+
+def make(cwd: Path, config: dict, env: Mapping[str, str]) -> HerdrBackend:
+    return HerdrBackend(own_pane=env.get("HERDR_PANE_ID"), env=env)
 
 
 def open_command(args: list[str], env: Mapping[str, str] | None = None) -> str:
@@ -63,20 +77,15 @@ def open_command(args: list[str], env: Mapping[str, str] | None = None) -> str:
 
 
 @dataclass(frozen=True)
-class Session:
-    """An agent working a ticket, in the worktree it runs in; or a ticket's worktree with no agent (status None)."""
+class Handle:
+    """Where a session is in herdr: the agent's workspace (or the one open on an agentless worktree) and pane."""
 
-    number: int
-    path: str
-    branch: str | None = None
-    workspace: str | None = None  # the agent's workspace, or the herdr workspace open on an agentless worktree
-    status: str | None = None  # the agent's idle/working/blocked/done/unknown; None without one
-    pane: str | None = None  # the agent's pane
+    workspace: str | None = None
+    pane: str | None = None
 
-    @property
-    def urgency(self) -> tuple[int, bool]:
-        """Sorts the one to go to first: needs you, working, idle, then a worktree without an agent."""
-        return URGENCY.get(self.status, URGENCY["unknown"]), self.workspace is None
+
+def handle(workspace: str | None, pane: str | None = None) -> Handle | None:
+    return Handle(workspace, pane) if workspace or pane else None
 
 
 @dataclass(frozen=True)
@@ -90,6 +99,10 @@ def pane_workspace(pane: dict) -> str:
     return pane.get("workspace_id") or pane["pane_id"].split(":")[0]
 
 
+def workspace_of(pane: str | None) -> str | None:
+    return pane.split(":")[0] if pane else None
+
+
 def belongs(pane: dict, cwd: Path, session: str | None) -> bool:
     """Whether a listed pane is the calling Claude session's: by herdr's agent session id when both sides
     have one, else by its working directory lying in the repo being opened."""
@@ -100,13 +113,6 @@ def belongs(pane: dict, cwd: Path, session: str | None) -> bool:
     return any(d and Path(d).resolve().is_relative_to(root) for d in (pane.get("cwd"), pane.get("foreground_cwd")))
 
 
-def ticket_number(worktree: dict) -> int | None:
-    for name in (Path(worktree["path"]).name, worktree.get("branch") or ""):
-        if match := WORKTREE_NAME.match(name):
-            return int(match["number"])
-    return None
-
-
 def title_number(agent: dict) -> int | None:
     """The ticket an agent's terminal title starts with (`TM-5 …`, `#5 …`), as `claude -n` sets it."""
     title = agent.get("terminal_title_stripped") or agent.get("terminal_title") or ""
@@ -114,15 +120,9 @@ def title_number(agent: dict) -> int | None:
     return int(match["number"]) if match else None
 
 
-def checkout_of(agent: dict, worktrees: list[dict]) -> dict | None:
-    """The repo checkout the agent runs in, by its foreground cwd (else its pane's cwd); the deepest wins, since
-    `claude -w` worktrees lie inside the main checkout. None: the agent is not in this repo."""
-    where = agent.get("foreground_cwd") or agent.get("cwd")
-    if not where:
-        return None
-    where = Path(where).resolve()
-    inside = [w for w in worktrees if where.is_relative_to(Path(w["path"]).resolve())]
-    return max(inside, key=lambda w: len(Path(w["path"]).parts), default=None)
+def agent_checkout(agent: dict, worktrees: list[dict]) -> dict | None:
+    """The repo checkout the agent runs in, by its foreground cwd (else its pane's cwd)."""
+    return checkout_of(agent.get("foreground_cwd") or agent.get("cwd"), worktrees)
 
 
 @dataclass
@@ -208,18 +208,19 @@ class Herdr:
         found: dict[int, list[Session]] = {}
         busy: set[str] = set()  # worktrees with an agent in them
         for agent in self.call("agent", "list").get("agents", []):
-            if (checkout := checkout_of(agent, checkouts)) is None:
+            if (checkout := agent_checkout(agent, checkouts)) is None:
                 continue
             busy.add(checkout["path"])
             by_name = ticket_number(checkout) if checkout.get("is_linked_worktree") else None
             for number in sorted({n for n in (by_name, title_number(agent)) if n is not None}):
                 found.setdefault(number, []).append(Session(
-                    number, checkout["path"], checkout.get("branch"), agent.get("workspace_id"),
-                    agent.get("agent_status") or "unknown", agent.get("pane_id"),
+                    number, checkout["path"], checkout.get("branch"), agent.get("agent_status") or "unknown",
+                    handle(agent.get("workspace_id"), agent.get("pane_id")),
                 ))
         for wt in checkouts:
             if wt.get("is_linked_worktree") and wt["path"] not in busy and (number := ticket_number(wt)) is not None:
-                found.setdefault(number, []).append(Session(number, wt["path"], wt.get("branch"), wt.get("open_workspace_id")))
+                found.setdefault(number, []).append(Session(number, wt["path"], wt.get("branch"),
+                                                            handle=handle(wt.get("open_workspace_id"))))
         return {number: sorted(sessions, key=lambda s: s.urgency) for number, sessions in found.items()}
 
     def start_in_worktree(self, cwd: Path, name: str, branch: str, label: str, claude_args: list[str],
@@ -267,11 +268,12 @@ class Herdr:
         """Focuses a live session's agent; for a worktree without one, its herdr workspace, opened with a shell
         when none is open. Going there never starts or resumes Claude."""
         name = Path(session.path).name
-        if session.status is not None and session.pane:
-            self.call("agent", "focus", session.pane)
+        where = session.handle or Handle()
+        if session.status is not None and where.pane:
+            self.call("agent", "focus", where.pane)
             return f"focused {name}"
-        if session.workspace:
-            self.call("workspace", "focus", session.workspace)
+        if where.workspace:
+            self.call("workspace", "focus", where.workspace)
             return f"focused {name}" if session.status is not None else f"focused {name} (no Claude running)"
         self.call("worktree", "open", "--cwd", str(cwd), "--path", session.path, "--label", label, "--focus")
         return f"opened {name} with a shell"
@@ -294,19 +296,98 @@ class Herdr:
         return f" as agent {unique}"
 
 
-def repo_root(cwd: Path) -> Path:
-    result = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True)
-    return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else cwd.resolve()
+# A close cleanup makes: herdr group, target, and how the summary names it.
+Close = tuple[str, str, str]
+
+
+@dataclass
+class HerdrBackend:
+    """Herdr as the session backend. `own_pane` is the pane this process runs in (HERDR_PANE_ID): cleanup closes
+    it, or its workspace, only on a second release, once its summary is out."""
+
+    herdr: Herdr = field(default_factory=Herdr)
+    own_pane: str | None = None
+    claude: str = "claude"
+    env: Mapping[str, str] = field(default_factory=lambda: os.environ)
+    name: str = NAME
+    where: str = "in its own herdr workspace"
+    held: dict[str, tuple[str | None, list[tuple[str, str | None]]]] = field(default_factory=dict)  # per path
+    later: dict[str, list[Close]] = field(default_factory=dict)  # per path, the closes that would end cleanup
+
+    def open_board(self, cwd: Path, args: list[str]) -> str | None:
+        board = self.herdr.open_board(cwd, open_command(args, self.env), self.env.get("HERDR_PANE_ID"),
+                                      self.env.get("CLAUDE_CODE_SESSION_ID"))
+        if board is None:
+            return None
+        how = f"restarted in {board.beside}'s workspace" if board.restarted else f"split off {board.beside}"
+        return f"Board opened in herdr pane {board.pane} ({BOARD_LABEL}), {how}"
+
+    def sessions(self, cwd: Path) -> dict[int, list[Session]]:
+        return self.herdr.sessions(cwd)
+
+    def start_in_worktree(self, cwd: Path, name: str, branch: str, label: str, claude_args: list[str],
+                          continue_args: list[str]) -> str:
+        return self.herdr.start_in_worktree(cwd, name, branch, label, claude_args, continue_args, self.claude)
+
+    def go_to(self, cwd: Path, session: Session, label: str) -> str:
+        return self.herdr.go_to(cwd, session, label)
+
+    def cleanup_view(self, cwd: Path) -> CleanupView:
+        """Per checkout: the herdr workspace open on it, then every agent running in it with its workspace. The
+        open workspace, if it is this pane's, and this pane's agent are cleanup's own."""
+        checkouts = self.herdr.call("worktree", "list", "--cwd", str(cwd)).get("worktrees", [])
+        agents = self.herdr.call("agent", "list").get("agents", [])
+        own_workspace = workspace_of(self.own_pane)
+        running: dict[str, list[dict]] = {}  # agents by the checkout they run in
+        for agent in agents:
+            if (checkout := agent_checkout(agent, checkouts)) is not None:
+                running.setdefault(checkout["path"], []).append(agent)
+        opened = {wt["path"]: wt.get("open_workspace_id") for wt in checkouts}
+        occupants: dict[str, tuple[Occupant, ...]] = {}
+        self.held = {}
+        for path in [*running, *(p for p in opened if p not in running)]:
+            here = running.get(path, [])
+            workspace = opened.get(path)
+            workspaces = dict.fromkeys(w for w in (workspace, *(a.get("workspace_id") for a in here)) if w)
+            occupants[path] = (
+                *(Occupant("workspace", w, own=w == workspace and w == own_workspace) for w in workspaces),
+                *(Occupant("agent", a.get("agent_status") or "unknown", own=a.get("pane_id") == self.own_pane,
+                           ticket=title_number(a), within=a.get("workspace_id")) for a in here),
+            )
+            self.held[path] = (workspace, [(a["pane_id"], a.get("workspace_id")) for a in here if a.get("pane_id")])
+        return CleanupView({path: found for path, found in occupants.items() if found})
+
+    def release(self, cwd: Path, path: str) -> Released:
+        """Closes the workspace open on the worktree and the panes of its agents in other workspaces. A close of
+        this pane or its workspace waits for the next release of the path."""
+        if path in self.later:
+            return self.close(self.later.pop(path))
+        if path not in self.held:
+            self.cleanup_view(cwd)
+        workspace, panes = self.held.get(path, (None, []))
+        closing = [("workspace", workspace, f"workspace {workspace}")] if workspace else []
+        closing += [("pane", pane, f"agent {pane}") for pane, in_workspace in panes if in_workspace != workspace]
+        ending = [close for close in closing if close[1] in (self.own_pane, workspace_of(self.own_pane))]
+        if ending:
+            self.later[path] = ending
+        released = self.close([close for close in closing if close not in ending])
+        return Released(released.closed, released.refused, tuple(label for _, _, label in ending))
+
+    def close(self, closing: list[Close]) -> Released:
+        closed, refused = [], []
+        for group, target, label in closing:
+            try:
+                self.herdr.call(group, "close", target)
+            except HerdrError as exc:
+                refused.append(f"{label} not closed: {exc}")
+            else:
+                closed.append(label)
+        return Released(tuple(closed), tuple(refused))
 
 
 def worktree_home(cwd: Path) -> Path:
     """Where herdr puts a repo's worktrees by default: `~/.herdr/worktrees/<repo>/`."""
     return Path.home() / ".herdr" / "worktrees" / repo_root(cwd).name
-
-
-def local_branches(cwd: Path) -> list[str]:
-    result = subprocess.run(["git", "branch", "--format=%(refname:short)"], cwd=cwd, capture_output=True, text=True)
-    return result.stdout.split() if result.returncode == 0 else []
 
 
 def error_code(stderr: str) -> str | None:

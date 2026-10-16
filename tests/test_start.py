@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from fake_backend import FakeBackend
 from ticketmaster import start
 from ticketmaster.config import load_config
 from ticketmaster.model import Ticket
@@ -91,14 +92,14 @@ def test_claude_args_are_single_line_because_herdr_rejects_newlines():
 
 def test_workbench_reads_the_implement_command_from_ticketmaster_toml(tmp_path):
     (tmp_path / ".git").mkdir()
-    assert workbench_for(tmp_path, load_config(tmp_path)).implement_command == "/mattpocock-skills:implement"
+    assert workbench_for(tmp_path, load_config(tmp_path), FakeBackend()).implement_command == "/mattpocock-skills:implement"
     (tmp_path / ".ticketmaster.toml").write_text('implement_command = "/implement"\n')
-    assert workbench_for(tmp_path, load_config(tmp_path)).implement_command == "/implement"
+    assert workbench_for(tmp_path, load_config(tmp_path), FakeBackend()).implement_command == "/implement"
 
 
 def test_workbench_reads_the_wayfinder_command_from_config():
-    assert workbench_for(Path("/r"), {}).wayfinder_command == "/mattpocock-skills:wayfinder"
-    assert workbench_for(Path("/r"), {"wayfinder_command": "/wayfinder"}).wayfinder_command == "/wayfinder"
+    assert workbench_for(Path("/r"), {}, FakeBackend()).wayfinder_command == "/mattpocock-skills:wayfinder"
+    assert workbench_for(Path("/r"), {"wayfinder_command": "/wayfinder"}, FakeBackend()).wayfinder_command == "/wayfinder"
 
 
 def test_only_wayfinder_starts_remain():
@@ -108,6 +109,6 @@ def test_only_wayfinder_starts_remain():
 
 def test_workbench_reads_the_to_tickets_command_from_ticketmaster_toml(tmp_path):
     (tmp_path / ".git").mkdir()
-    assert workbench_for(tmp_path, load_config(tmp_path)).to_tickets_command == "/mattpocock-skills:to-tickets"
+    assert workbench_for(tmp_path, load_config(tmp_path), FakeBackend()).to_tickets_command == "/mattpocock-skills:to-tickets"
     (tmp_path / ".ticketmaster.toml").write_text('to_tickets_command = "/to-tickets"\n')
-    assert workbench_for(tmp_path, load_config(tmp_path)).to_tickets_command == "/to-tickets"
+    assert workbench_for(tmp_path, load_config(tmp_path), FakeBackend()).to_tickets_command == "/to-tickets"

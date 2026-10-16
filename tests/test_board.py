@@ -9,7 +9,9 @@ from textual.widgets import Input
 
 from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, SettingsMenu,
                                budget_pace, clamp_lines, passes_filters, render_card)
-from ticketmaster.herdr import HerdrError, Session
+from fake_backend import FailingBackend, FakeBackend, workbench
+from ticketmaster.backends import BackendError
+from ticketmaster.session import Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, Quota, RateLimited
 from ticketmaster.config import load_config
@@ -294,27 +296,8 @@ def test_provider_error_is_shown_in_status():
     run(scenario())
 
 
-class FakeBench:
-    """Records the board's herdr actions; `sessions` is what herdr reports."""
-
-    def __init__(self, sessions=None):
-        self.calls = []
-        self.current = sessions or {}
-
-    def sessions(self):
-        return self.current
-
-    def start(self, ticket):
-        self.calls.append(("start", ticket.number))
-        return f"Started #{ticket.number}"
-
-    def go_to(self, ticket, session):
-        self.calls.append(("go_to", ticket.number, session.path))
-        return "ok"
-
-
 def bench_app(bench, tickets=TICKETS, login="me"):
-    return BoardApp(FakeProvider(tickets, login), Query(), interval=60, workbench=bench)
+    return BoardApp(FakeProvider(tickets, login), Query(), interval=60, workbench=workbench(bench))
 
 
 async def loaded(app, pilot):
@@ -328,7 +311,7 @@ def is_confirm(app):
 
 def test_start_frontier_ticket_after_confirm():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -350,7 +333,7 @@ THEIRS = on(9, 6, "Bob's", assignees=("bob",))
 
 def test_s_refuses_a_blocked_ticket_naming_its_blockers_and_enter_says_it_has_no_session():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench, [MAP, BLOCKED])
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -369,7 +352,7 @@ def test_s_refuses_a_blocked_ticket_naming_its_blockers_and_enter_says_it_has_no
 
 def test_s_refuses_a_ticket_claimed_by_someone_else_and_enter_says_it_has_no_session():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench, [MAP, THEIRS])
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -388,7 +371,7 @@ def test_s_refuses_a_ticket_claimed_by_someone_else_and_enter_says_it_has_no_ses
 
 def test_own_claimed_ticket_still_starts():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench, [MAP, THEIRS], login="Bob")
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -405,7 +388,7 @@ def test_own_claimed_ticket_still_starts():
 
 def test_unknown_viewer_does_not_refuse_a_claimed_ticket():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench, [MAP, THEIRS], login=ProviderError("gh: not logged in"))
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -419,9 +402,9 @@ def test_unknown_viewer_does_not_refuse_a_claimed_ticket():
 
 def test_s_refuses_a_decided_ticket_and_a_closed_map():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = BoardApp(FakeProvider([*TICKETS, a_map(40, is_open=False)]), Query(named_map=40), interval=60,
-                       workbench=bench)
+                       workbench=workbench(bench))
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             await pilot.press("escape")  # off the map preset: every open map and the named closed one
@@ -439,7 +422,7 @@ def test_s_refuses_a_decided_ticket_and_a_closed_map():
 
 def test_cancel_does_not_start():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -453,7 +436,7 @@ def test_cancel_does_not_start():
 
 def test_enter_on_a_card_without_session_never_starts_and_says_so():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -468,7 +451,7 @@ def test_enter_on_a_card_without_session_never_starts_and_says_so():
 
 def test_double_click_acts_like_enter_and_never_starts():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -482,12 +465,12 @@ def test_double_click_acts_like_enter_and_never_starts():
 
 
 def live(number, path, status, pane="w5:p1"):
-    return Session(number, path, workspace=pane.split(":")[0], status=status, pane=pane)
+    return Session(number, path, status=status, handle=pane)
 
 
 def test_each_session_shows_its_badge_and_a_claimed_ticket_without_one_says_so():
     async def scenario():
-        bench = FakeBench({
+        bench = FakeBackend({
             1: [live(1, "/w/tm-1", "working"), live(1, "/code/r", "idle", "w6:p2"), Session(1, "/w/issue-1-2")],
             3: [live(3, "/w/issue-3", "blocked")],
         })
@@ -520,13 +503,13 @@ def test_without_herdr_a_claimed_card_does_not_claim_there_is_no_session():
 def test_enter_focuses_the_most_urgent_live_session_on_any_card():
     """Closed, blocked, claimed by someone else or a map: a live session is always where Enter goes."""
     sessions = {
-        number: [Session(number, f"/w/dead-{number}", workspace="wD"), live(number, f"/w/idle-{number}", "idle"),
+        number: [Session(number, f"/w/dead-{number}", handle="wD"), live(number, f"/w/idle-{number}", "idle"),
                  live(number, f"/w/needs-{number}", "blocked"), live(number, f"/w/busy-{number}", "working")]
         for number in (9, 3, 4, 6)
     }
 
     async def scenario():
-        bench = FakeBench(sessions)
+        bench = FakeBackend(sessions)
         app = bench_app(bench, [*TICKETS, THEIRS])
         async with app.run_test(size=(160, 50)) as pilot:
             await loaded(app, pilot)
@@ -542,7 +525,7 @@ def test_enter_focuses_the_most_urgent_live_session_on_any_card():
 
 def test_enter_prefers_working_over_idle_and_any_agent_over_a_dead_worktree():
     async def scenario():
-        bench = FakeBench({1: [Session(1, "/w/dead", workspace="wD"), live(1, "/w/idle", "idle"),
+        bench = FakeBackend({1: [Session(1, "/w/dead", handle="wD"), live(1, "/w/idle", "idle"),
                                live(1, "/w/busy", "working")],
                            2: [Session(2, "/w/dead-2"), live(2, "/w/idle-2", "idle")]})
         app = bench_app(bench)
@@ -559,7 +542,7 @@ def test_enter_prefers_working_over_idle_and_any_agent_over_a_dead_worktree():
 
 def test_enter_on_a_dead_worktree_goes_to_it_and_never_starts():
     async def scenario():
-        bench = FakeBench({1: [Session(1, "/w/issue-1")]})
+        bench = FakeBackend({1: [Session(1, "/w/issue-1")]})
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -573,7 +556,7 @@ def test_enter_on_a_dead_worktree_goes_to_it_and_never_starts():
 
 def test_enter_on_a_map_card_targets_the_maps_own_session_never_a_tickets():
     async def scenario():
-        bench = FakeBench({1: [live(1, "/w/tm-1", "blocked")], 2: [live(2, "/w/tm-2", "working")]})
+        bench = FakeBackend({1: [live(1, "/w/tm-1", "blocked")], 2: [live(2, "/w/tm-2", "working")]})
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -595,7 +578,7 @@ def test_enter_on_a_map_card_targets_the_maps_own_session_never_a_tickets():
 
 def test_cards_show_agent_state_and_enter_goes_to_the_session():
     async def scenario():
-        bench = FakeBench({2: [Session(2, "/w/issue-2", workspace="w5", status="blocked")]})
+        bench = FakeBackend({2: [Session(2, "/w/issue-2", handle="w5", status="blocked")]})
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -610,11 +593,11 @@ def test_cards_show_agent_state_and_enter_goes_to_the_session():
 
 def test_new_herdr_session_shows_up_on_refresh():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
-            bench.current = {1: [Session(1, "/w/issue-1", workspace="w9", status="working")]}
+            bench.current = {1: [Session(1, "/w/issue-1", handle="w9", status="working")]}
             await pilot.press("r")
             await loaded(app, pilot)
             assert "working" in card_text(app, 1)
@@ -630,8 +613,8 @@ def test_removed_keys_do_nothing_on_any_card(tmp_path):
 
     async def scenario():
         sessions = {n: [Session(n, f"/w/issue-{n}")] for n in (1, 2, 3, 4, 9)}
-        bench = FakeBench(sessions)
-        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, workbench=bench, settings_path=settings)
+        bench = FakeBackend(sessions)
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, workbench=workbench(bench), settings_path=settings)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             before = notifications(app)
@@ -912,12 +895,12 @@ class SequenceProvider(FakeProvider):
 
 def test_rate_limit_backs_off_shows_countdown_and_r_does_not_bypass():
     async def scenario():
-        clock, bench = Clock(), FakeBench()
+        clock, bench = Clock(), FakeBackend()
         bench_calls = []
-        bench.sessions = lambda: bench_calls.append(clock.now) or {}
+        bench.sessions = lambda cwd: bench_calls.append(clock.now) or {}
         provider = SequenceProvider([TICKETS, RateLimited("gh: API rate limit exceeded"), TICKETS,
                                      RateLimited("gh: You have exceeded a secondary rate limit")])
-        app = BoardApp(provider, Query(), interval=5, workbench=bench, clock=clock)
+        app = BoardApp(provider, Query(), interval=5, workbench=workbench(bench), clock=clock)
 
         async def tick(seconds):
             clock.now += seconds
@@ -1172,9 +1155,9 @@ def test_the_github_board_stretches_further_when_the_points_left_cannot_last_to_
 def test_r_fetches_at_once_and_the_next_fetch_is_one_pace_later():
     async def scenario():
         far = NOW + timedelta(hours=1)
-        bench, calls = FakeBench(), []
-        app, clock = quota_app([Quota(20, 4000, far)] * 3, workbench=bench)
-        bench.sessions = lambda: calls.append(clock.now) or {}
+        bench, calls = FakeBackend(), []
+        app, clock = quota_app([Quota(20, 4000, far)] * 3, workbench=workbench(bench))
+        bench.sessions = lambda cwd: calls.append(clock.now) or {}
         async with app.run_test(size=(200, 30)) as pilot:
             await loaded(app, pilot)
             assert "every 72s" in status_of(app)
@@ -1281,7 +1264,7 @@ def notifications(app):
 
 def test_typed_ticket_with_its_map_starts():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         typed = on(1, 5, "Which store?", labels=("wayfinder::grilling",))
         app = bench_app(bench, [a_map(1), typed])
         async with app.run_test(size=(160, 40)) as pilot:
@@ -1301,7 +1284,7 @@ CHORE = on(9, 13, "Sign up", "task", body="## Question\nAFK: the agent can sign 
 
 def test_wayfinder_cards_show_hitl_or_afk():
     async def scenario():
-        app = bench_app(FakeBench(), [GRILL, DIG, CHORE, *TICKETS])
+        app = bench_app(FakeBackend(), [GRILL, DIG, CHORE, *TICKETS])
         async with app.run_test(size=(200, 40)) as pilot:
             await loaded(app, pilot)
             assert "HITL" in card_text(app, 11)
@@ -1350,7 +1333,7 @@ def test_no_code_reads_or_writes_the_issue_tracker_doc():
 
 def test_s_on_the_map_starts_its_first_frontier_ticket_on_that_tickets_card():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench, MAP_BOARD)
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
@@ -1370,7 +1353,7 @@ def test_s_on_the_map_starts_its_first_frontier_ticket_on_that_tickets_card():
 
 def test_two_quick_presses_on_the_map_start_two_different_frontier_tickets():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench, MAP_BOARD)
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
@@ -1386,7 +1369,7 @@ def test_two_quick_presses_on_the_map_start_two_different_frontier_tickets():
 
 def test_frontier_skips_tickets_that_already_have_a_live_session():
     async def scenario():
-        bench = FakeBench({5: [live(5, "/w/issue-5", "working")]})
+        bench = FakeBackend({5: [live(5, "/w/issue-5", "working")]})
         app = bench_app(bench, MAP_BOARD)
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
@@ -1399,7 +1382,7 @@ def test_frontier_skips_tickets_that_already_have_a_live_session():
 
 def test_frontier_continues_a_ticket_whose_worktree_has_no_agent():
     async def scenario():
-        bench = FakeBench({5: [Session(5, "/w/issue-5")]})
+        bench = FakeBackend({5: [Session(5, "/w/issue-5")]})
         app = bench_app(bench, MAP_BOARD)
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
@@ -1418,7 +1401,7 @@ EMPTY_FRONTIER = [MAP_CARD, map_child(5, assignees=("bob",)), map_child(7, open_
 
 def test_empty_frontier_starts_the_map_itself_and_enter_says_so_first():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench, EMPTY_FRONTIER)
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
@@ -1439,7 +1422,7 @@ def test_empty_frontier_starts_the_map_itself_and_enter_says_so_first():
 
 def test_empty_frontier_continues_the_maps_own_agentless_worktree():
     async def scenario():
-        bench = FakeBench({1: [Session(1, "/w/issue-1")]})
+        bench = FakeBackend({1: [Session(1, "/w/issue-1")]})
         app = bench_app(bench, EMPTY_FRONTIER)
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
@@ -1452,7 +1435,7 @@ def test_empty_frontier_continues_the_maps_own_agentless_worktree():
 
 def test_empty_frontier_with_a_live_map_session_says_press_enter():
     async def scenario():
-        bench = FakeBench({1: [live(1, "/w/issue-1", "idle")]})
+        bench = FakeBackend({1: [live(1, "/w/issue-1", "idle")]})
         app = bench_app(bench, EMPTY_FRONTIER)
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
@@ -1466,7 +1449,7 @@ def test_empty_frontier_with_a_live_map_session_says_press_enter():
 
 def test_s_refuses_a_ticket_with_a_live_session_and_names_enter():
     async def scenario():
-        bench = FakeBench({1: [Session(1, "/w/old"), live(1, "/w/issue-1", "working")]})
+        bench = FakeBackend({1: [Session(1, "/w/old"), live(1, "/w/issue-1", "working")]})
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -1481,7 +1464,7 @@ def test_s_refuses_a_ticket_with_a_live_session_and_names_enter():
 
 def test_s_on_my_claimed_ticket_with_only_an_agentless_worktree_continues_it():
     async def scenario():
-        bench = FakeBench({2: [Session(2, "/w/issue-2")]})
+        bench = FakeBackend({2: [Session(2, "/w/issue-2")]})
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -1497,22 +1480,16 @@ def test_s_on_my_claimed_ticket_with_only_an_agentless_worktree_continues_it():
     run(scenario())
 
 
-class FailingBench(FakeBench):
-    def start(self, ticket):
-        super().start(ticket)
-        raise HerdrError("agent_start_failed")
-
-
 def test_a_failed_start_frees_the_ticket_for_another_s():
     async def scenario():
-        bench = FailingBench()
+        bench = FailingBackend()
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             await select(app, pilot, 1)
             await pilot.press("s", "y")
             await loaded(app, pilot)
-            assert notifications(app)[-1] == ("herdr: agent_start_failed", "error")
+            assert notifications(app)[-1] == ("fake: agent_start_failed", "error")
             await pilot.press("s")
             await pilot.pause()
             assert is_confirm(app)
@@ -1522,7 +1499,7 @@ def test_a_failed_start_frees_the_ticket_for_another_s():
 
 def test_s_stays_refused_while_the_new_worktree_waits_for_its_agent():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -1547,7 +1524,7 @@ def test_s_stays_refused_while_the_new_worktree_waits_for_its_agent():
 
 def test_s_offers_to_continue_only_the_worktree_named_by_the_key():
     async def scenario():
-        bench = FakeBench({1: [Session(1, "/w/issue-1-2"), Session(1, "/w/issue-1")]})
+        bench = FakeBackend({1: [Session(1, "/w/issue-1-2"), Session(1, "/w/issue-1")]})
         app = bench_app(bench)
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
@@ -1568,7 +1545,7 @@ def test_s_offers_to_continue_only_the_worktree_named_by_the_key():
 
 def test_s_starts_decision_tickets_of_all_four_types():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         kinds = ["research", "prototype", "grilling", "task"]
         app = bench_app(bench, [MAP, *(on(9, 20 + i, kind=kind) for i, kind in enumerate(kinds))])
         async with app.run_test(size=(160, 60)) as pilot:
@@ -1584,7 +1561,7 @@ def test_s_starts_decision_tickets_of_all_four_types():
 
 def test_enter_on_a_map_with_a_frontier_names_the_ticket_s_would_start():
     async def scenario():
-        app = bench_app(FakeBench(), MAP_BOARD)
+        app = bench_app(FakeBackend(), MAP_BOARD)
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
             await pilot.press("enter")
@@ -1611,9 +1588,9 @@ class OrderedProvider(FakeProvider):
 
 def test_s_on_the_map_follows_the_trackers_map_order():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         provider = OrderedProvider(MAP_BOARD, [6, 7, 5])
-        app = BoardApp(provider, Query(), interval=60, workbench=bench)
+        app = BoardApp(provider, Query(), interval=60, workbench=workbench(bench))
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
             await pilot.press("s")
@@ -1628,8 +1605,8 @@ def test_s_on_the_map_follows_the_trackers_map_order():
 
 def test_map_order_lookup_failure_falls_back_to_board_order():
     async def scenario():
-        bench = FakeBench()
-        app = BoardApp(OrderedProvider(MAP_BOARD, ProviderError("boom")), Query(), interval=60, workbench=bench)
+        bench = FakeBackend()
+        app = BoardApp(OrderedProvider(MAP_BOARD, ProviderError("boom")), Query(), interval=60, workbench=workbench(bench))
         async with app.run_test(size=(160, 40)) as pilot:
             await focus_map(app, pilot)
             await pilot.press("s")
@@ -1725,17 +1702,17 @@ SPEC = spec_of(9, 50, assignees=("me",), has_tickets=True)
 SLICES = [impl_of(SPEC, 51), impl_of(SPEC, 52, is_open=False, closed_at=datetime.now(timezone.utc)),
           impl_of(SPEC, 53, open_blockers=1, blocked_by=("#51",)), impl_of(SPEC, 54, assignees=("bob",)),
           impl_of(SPEC, 55), impl_of(SPEC, 56, has_open_change_request=True), impl_of(SPEC, 57, assignees=("me",))]
-LIVE = {55: [Session(55, "/w/issue-55", "issue-55", "wA", "working", "wA:p1")]}
+LIVE = {55: [Session(55, "/w/issue-55", "issue-55", "working", "wA:p1")]}
 
 
 def implement_app(bench):
-    return BoardApp(FakeProvider([MAP, SPEC, *SLICES]), Query(), interval=60, workbench=bench,
+    return BoardApp(FakeProvider([MAP, SPEC, *SLICES]), Query(), interval=60, workbench=workbench(bench),
                     describe_start=build_prompt)
 
 
 def test_s_on_an_open_unblocked_unclaimed_impl_card_starts_implement():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = implement_app(bench)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
@@ -1748,14 +1725,15 @@ def test_s_on_an_open_unblocked_unclaimed_impl_card_starts_implement():
             await pilot.press("y")
             await loaded(app, pilot)
             assert bench.calls == [("start", 51)]
-            assert notifications(app)[-1][0] == "Started #51"  # the workbench's own report
+            assert notifications(app)[-1][0] == ("Started /mattpocock-skills:implement on #51 in new worktree issue-51, "
+                                                "unfocused: Enter goes to it")  # the workbench's own report
 
     run(scenario())
 
 
 def test_s_on_an_impl_card_refuses_and_leaves_the_workbench_untouched():
     async def scenario():
-        bench = FakeBench(LIVE)
+        bench = FakeBackend(LIVE)
         app = implement_app(bench)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
@@ -1774,7 +1752,7 @@ def test_s_on_an_impl_card_refuses_and_leaves_the_workbench_untouched():
 
 def test_s_on_my_claimed_impl_card_starts_while_its_spec_is_open_and_reuses_an_agentless_worktree():
     async def scenario():
-        bench = FakeBench({57: [Session(57, "/w/issue-57", "issue-57")]})
+        bench = FakeBackend({57: [Session(57, "/w/issue-57", "issue-57")]})
         app = implement_app(bench)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
@@ -1809,12 +1787,12 @@ def test_a_maps_spec_is_a_line_of_its_map_card_and_no_card_in_any_column():
 
 def spec_app(bench, spec=None, describe_start=build_prompt, map_ticket=MAP):
     tickets = [map_ticket, *TICKETS[1:], spec or spec_of(9, 80)]
-    return BoardApp(FakeProvider(tickets), Query(), interval=60, workbench=bench, describe_start=describe_start)
+    return BoardApp(FakeProvider(tickets), Query(), interval=60, workbench=workbench(bench), describe_start=describe_start)
 
 
 def test_s_on_the_map_card_of_a_ticketless_spec_starts_to_tickets_on_the_spec():
     async def scenario(map_ticket):
-        bench = FakeBench()
+        bench = FakeBackend()
         app = spec_app(bench, map_ticket=map_ticket)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
@@ -1833,7 +1811,7 @@ def test_s_on_the_map_card_of_a_ticketless_spec_starts_to_tickets_on_the_spec():
 
 def test_a_spec_linked_only_as_a_sub_issue_of_the_map_is_on_its_spec_line_and_s_starts_to_tickets_on_it():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         spec = spec_of(9, 80, body="## Problem Statement\n\nIt hurts.\n\n## Solution\n\nFix it.\n")
         app = spec_app(bench, spec=spec)
         async with app.run_test(size=(200, 60)) as pilot:
@@ -1855,11 +1833,11 @@ def test_a_spec_linked_only_as_a_sub_issue_of_the_map_is_on_its_spec_line_and_s_
 def test_s_on_a_map_card_takes_to_tickets_command_from_ticketmaster_toml(tmp_path):
     (tmp_path / ".git").mkdir()
     (tmp_path / ".ticketmaster.toml").write_text('to_tickets_command = "/to-tickets"\n')
-    workbench = workbench_for(tmp_path, load_config(tmp_path))
+    configured = workbench_for(tmp_path, load_config(tmp_path), FakeBackend())
 
     async def scenario():
-        bench = FakeBench()
-        app = spec_app(bench, describe_start=workbench.prompt)
+        bench = FakeBackend()
+        app = spec_app(bench, describe_start=configured.prompt)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
             await select(app, pilot, 9)
@@ -1880,9 +1858,9 @@ def test_s_on_a_map_card_whose_spec_has_tickets_is_closed_or_is_missing_starts_t
              (spec_of(9, 80, is_open=False), []), (None, [])]  # a spec closed without tickets is passed over
 
     async def scenario(spec, impls):
-        bench = FakeBench()
+        bench = FakeBackend()
         tickets = [*TICKETS, *([spec] if spec else []), *impls]
-        app = BoardApp(FakeProvider(tickets), Query(), interval=60, workbench=bench, describe_start=build_prompt)
+        app = BoardApp(FakeProvider(tickets), Query(), interval=60, workbench=workbench(bench), describe_start=build_prompt)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
             await select(app, pilot, 9)
@@ -1898,10 +1876,10 @@ def test_s_on_a_map_card_whose_spec_has_tickets_is_closed_or_is_missing_starts_t
 
 
 def test_s_on_a_map_card_refuses_a_blocked_or_someone_elses_spec_or_one_with_a_live_session():
-    live = {80: [Session(80, "/w/issue-80", "issue-80", "wA", "working", "wA:p1")]}
+    live = {80: [Session(80, "/w/issue-80", "issue-80", "working", "wA:p1")]}
 
     async def scenario(spec, sessions, refusal):
-        bench = FakeBench(sessions)
+        bench = FakeBackend(sessions)
         app = spec_app(bench, spec)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
@@ -1918,7 +1896,7 @@ def test_s_on_a_map_card_refuses_a_blocked_or_someone_elses_spec_or_one_with_a_l
 
 def test_the_map_card_badges_its_specs_session_and_enter_goes_there_when_the_map_has_none():
     async def scenario():
-        bench = FakeBench({80: [Session(80, "/w/issue-80", "issue-80", "wA", "working", "wA:p1")]})
+        bench = FakeBackend({80: [Session(80, "/w/issue-80", "issue-80", "working", "wA:p1")]})
         app = spec_app(bench)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
@@ -1926,7 +1904,7 @@ def test_the_map_card_badges_its_specs_session_and_enter_goes_there_when_the_map
             await select(app, pilot, 9)
             await pilot.press("enter")
             await loaded(app, pilot)
-            assert bench.calls == [("go_to", 9, "/w/issue-80")]
+            assert bench.calls == [("go_to", 80, "/w/issue-80")]  # the spec's session, from the map card
 
     run(scenario())
 
@@ -1947,7 +1925,7 @@ def test_the_spec_type_filter_keeps_a_lane_whose_map_card_carries_a_spec(tmp_pat
 
 def test_enter_on_an_impl_card_without_a_worktree_names_the_implement_start_or_the_refusal():
     async def scenario():
-        bench = FakeBench()
+        bench = FakeBackend()
         app = implement_app(bench)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
@@ -2883,8 +2861,8 @@ def test_the_map_filter_hides_the_loose_lane_and_the_impl_filter_keeps_it(tmp_pa
 
 def test_s_on_a_loose_ticket_starts_implement_and_the_loose_header_starts_nothing():
     async def scenario():
-        bench = FakeBench()
-        app = BoardApp(FakeProvider(LOOSE_LANE), Query(), interval=60, workbench=bench, describe_start=build_prompt)
+        bench = FakeBackend()
+        app = BoardApp(FakeProvider(LOOSE_LANE), Query(), interval=60, workbench=workbench(bench), describe_start=build_prompt)
         async with app.run_test(size=(200, 90)) as pilot:
             await loaded(app, pilot)
             await select(app, pilot, "loose")
@@ -2922,8 +2900,8 @@ def test_help_describes_the_loose_lane():
 
 def test_s_on_a_ticketless_standalone_spec_starts_to_tickets():
     async def scenario():
-        bench = FakeBench()
-        app = BoardApp(FakeProvider(SPEC_LANES), Query(), interval=60, workbench=bench, describe_start=build_prompt)
+        bench = FakeBackend()
+        app = BoardApp(FakeProvider(SPEC_LANES), Query(), interval=60, workbench=workbench(bench), describe_start=build_prompt)
         async with app.run_test(size=(200, 80)) as pilot:
             await loaded(app, pilot)
             await select(app, pilot, 85)
@@ -2943,8 +2921,8 @@ def test_s_on_a_ticketless_standalone_spec_starts_to_tickets():
 
 def test_s_on_a_standalone_spec_with_tickets_is_refused_after_closed_blocked_and_claimed():
     async def scenario(spec, children, refusal):
-        bench = FakeBench()
-        app = BoardApp(FakeProvider([*TICKETS, spec, *children]), Query(), interval=60, workbench=bench)
+        bench = FakeBackend()
+        app = BoardApp(FakeProvider([*TICKETS, spec, *children]), Query(), interval=60, workbench=workbench(bench))
         async with app.run_test(size=(200, 80)) as pilot:
             await loaded(app, pilot)
             await select(app, pilot, 60)
@@ -2964,8 +2942,8 @@ def test_s_on_a_standalone_spec_with_tickets_is_refused_after_closed_blocked_and
 
 def test_s_on_a_spec_lane_ticket_starts_implement():
     async def scenario():
-        bench = FakeBench()
-        app = BoardApp(FakeProvider(SPEC_LANES), Query(), interval=60, workbench=bench, describe_start=build_prompt)
+        bench = FakeBackend()
+        app = BoardApp(FakeProvider(SPEC_LANES), Query(), interval=60, workbench=workbench(bench), describe_start=build_prompt)
         async with app.run_test(size=(200, 80)) as pilot:
             await loaded(app, pilot)
             await select(app, pilot, 71)
@@ -2976,5 +2954,35 @@ def test_s_on_a_spec_lane_ticket_starts_implement():
             await pilot.press("y")
             await loaded(app, pilot)
             assert bench.calls == [("start", 71)]
+
+    run(scenario())
+
+
+class DownBackend(FakeBackend):
+    def sessions(self, cwd):
+        raise BackendError("server_unavailable", source="fake")
+
+
+def test_a_session_error_on_the_status_line_names_the_backend_it_came_from():
+    async def scenario():
+        app = bench_app(DownBackend())
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "⚠ fake: server_unavailable" in status_of(app)
+
+    run(scenario())
+
+
+def test_the_confirm_says_where_the_backend_puts_the_session():
+    async def scenario():
+        bench = FakeBackend()
+        board = workbench(bench)
+        app = BoardApp(FakeProvider(TICKETS), Query(), interval=60, workbench=board, describe_start=board.describe)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s")
+            await pilot.pause()
+            assert app.screen.detail.endswith("\nworktree: issue-1, in a fake place")
 
     run(scenario())

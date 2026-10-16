@@ -3,14 +3,19 @@ from pathlib import Path
 
 import pytest
 
+from fake_backend import FakeBackend
 from fake_herdr import FakeHerdr
-from ticketmaster import cleanup, cli, config, herdr
+from ticketmaster import cleanup, cli, config
+from ticketmaster import git as gitrepo
+from ticketmaster.backends import herdr
+from ticketmaster.backends.herdr import Herdr, HerdrBackend
+from ticketmaster.backends import Occupant, Released
 from ticketmaster.cleanup import Leftover
-from ticketmaster.herdr import Herdr
 from ticketmaster.model import Ticket
 from ticketmaster.providers import Query
 
-REAL_LOCAL_BRANCHES = herdr.local_branches
+REAL_LOCAL_BRANCHES = gitrepo.local_branches
+REAL_WORKTREES = gitrepo.worktrees
 
 REPO = Path("/code/shiplog")
 HERDR_HOME = "/home/me/.herdr/worktrees/shiplog"
@@ -64,8 +69,28 @@ DIRTY = {f"{CLAUDE_HOME}/worktree-issue-41"}
 
 @pytest.fixture(autouse=True)
 def branches(monkeypatch):
-    """issue-50 is left without a worktree; issue-62 is not this map's."""
-    monkeypatch.setattr(herdr, "local_branches", lambda cwd: ["main", "issue-40", "issue-50", "issue-62"])
+    """issue-50 is left without a worktree; issue-62 is not this map's. Git lists herdr's worktrees."""
+    monkeypatch.setattr(gitrepo, "local_branches", lambda cwd: ["main", "issue-40", "issue-50", "issue-62"])
+    checkouts(monkeypatch, WORKTREES)
+
+
+def checkouts(monkeypatch, listed):
+    monkeypatch.setattr(gitrepo, "worktrees", lambda cwd: listed["worktrees"])
+
+
+def bench(spy=None, own_pane=None):
+    return HerdrBackend(Herdr(spy or fake()), own_pane=own_pane)
+
+
+def use_herdr(monkeypatch, spy):
+    """`main` resolves herdr, inside herdr, run by the spy, in the pane HERDR_PANE_ID names."""
+    monkeypatch.delenv("TICKETMASTER_BACKEND", raising=False)
+    monkeypatch.setattr(herdr, "unavailable", lambda env: None)
+    monkeypatch.setattr(herdr, "make", lambda cwd, config, env: bench(spy, env.get("HERDR_PANE_ID")))
+
+
+def held(entry, kind):
+    return tuple(o.name for o in entry.occupants if o.kind == kind)
 
 
 def fake():
@@ -73,7 +98,7 @@ def fake():
 
 
 def leftovers(fake_herdr=None, tickets=TICKETS):
-    return cleanup.leftovers(REPO, MAP, tickets, Herdr(fake_herdr or fake()), uncommitted=lambda path: path in DIRTY)
+    return cleanup.leftovers(REPO, MAP, tickets, bench(fake_herdr or fake()), uncommitted=lambda path: path in DIRTY)
 
 
 def by_place(found: list[Leftover]) -> dict[str, Leftover]:
@@ -90,13 +115,13 @@ def test_lists_the_maps_and_its_lane_tickets_worktrees_in_both_homes_and_leftove
 def test_another_maps_worktree_agent_and_branch_are_not_listed():
     found = leftovers()
     assert all(entry.ticket.number in (40, 41, 42, 50, 51, 52) for entry in found)
-    assert "w9" not in {w for entry in found for w in entry.workspaces}
+    assert "w9" not in {w for entry in found for w in held(entry, "workspace")}
 
 
 def test_a_closed_ticket_with_a_clean_worktree_is_removable():
     entry = by_place(leftovers())[f"{HERDR_HOME}/issue-40"]
     assert (entry.removable, entry.reason) == (True, "ticket closed")
-    assert (entry.branch, entry.workspaces) == ("issue-40", ("w2",))
+    assert (entry.branch, held(entry, "workspace")) == ("issue-40", ("w2",))
 
 
 def test_uncommitted_changes_keep_a_closed_tickets_worktree():
@@ -107,7 +132,7 @@ def test_uncommitted_changes_keep_a_closed_tickets_worktree():
 def test_an_open_ticket_is_kept_with_its_workspace_and_agent():
     entry = by_place(leftovers())[f"{HERDR_HOME}/issue-42"]
     assert (entry.removable, entry.reason) == (False, "open ticket")
-    assert (entry.workspaces, entry.agents) == (("w5",), ("working",))
+    assert (held(entry, "workspace"), held(entry, "agent")) == (("w5",), ("working",))
 
 
 def test_a_merged_pr_makes_an_open_tickets_worktree_removable():
@@ -123,12 +148,12 @@ def test_an_unmerged_pr_keeps_the_worktree():
 
 
 def test_reasons_add_up():
-    found = cleanup.leftovers(REPO, MAP, TICKETS, Herdr(fake()), uncommitted=lambda path: True)
+    found = cleanup.leftovers(REPO, MAP, TICKETS, bench(fake()), uncommitted=lambda path: True)
     assert by_place(found)[f"{HERDR_HOME}/issue-42"].reason == "open ticket, uncommitted changes"
 
 
 def test_unreadable_git_status_keeps_the_worktree():
-    found = cleanup.leftovers(REPO, MAP, TICKETS, Herdr(fake()), uncommitted=lambda path: None)
+    found = cleanup.leftovers(REPO, MAP, TICKETS, bench(fake()), uncommitted=lambda path: None)
     entry = by_place(found)[f"{HERDR_HOME}/issue-40"]
     assert (entry.removable, entry.reason) == (False, "git status unreadable")
 
@@ -142,32 +167,35 @@ def test_an_agent_titled_with_a_lane_ticket_outside_its_worktree_is_kept():
     entry = by_place(leftovers())[str(REPO)]
     assert entry.ticket == RESEARCH
     assert (entry.removable, entry.reason) == (False, "open ticket, agent outside a ticket worktree")
-    assert (entry.workspaces, entry.agents) == (("w1",), ("idle",))
+    assert (held(entry, "workspace"), held(entry, "agent")) == (("w1",), ("idle",))
 
 
-def test_a_claude_worktree_with_a_descriptive_suffix_is_its_tickets():
+def test_a_claude_worktree_with_a_descriptive_suffix_is_its_tickets(monkeypatch):
     suffixed = wt(f"{CLAUDE_HOME}/issue-42-carrier-api", "worktree-issue-42-carrier-api")
+    checkouts(monkeypatch, {"worktrees": [*WORKTREES["worktrees"], suffixed]})
     spy = FakeHerdr({("worktree", "list"): {"worktrees": [*WORKTREES["worktrees"], suffixed]},
                      ("agent", "list"): {"agents": []}})
     entry = by_place(leftovers(spy))[suffixed["path"]]
     assert (entry.ticket, entry.removable, entry.reason) == (RESEARCH, False, "open ticket")
 
 
-def test_every_agent_in_a_listed_worktree_is_listed_with_it_whatever_its_title():
+def test_every_agent_in_a_listed_worktree_is_listed_with_it_whatever_its_title(monkeypatch):
     """A worktree found by the tracker's branch alone, with an agent whose title names no ticket."""
     linear = on_map(43, kind="task", is_open=False, key="TM-43", branch_name="me/tm-43-pick-a-carrier")
     checkout = wt("/code/elsewhere", "me/tm-43-pick-a-carrier")
+    checkouts(monkeypatch, {"worktrees": [*WORKTREES["worktrees"], checkout]})
     spy = FakeHerdr({
         ("worktree", "list"): {"worktrees": [*WORKTREES["worktrees"], checkout]},
         ("agent", "list"): {"agents": [{"pane_id": "w7:p1", "workspace_id": "w7", "agent_status": "idle",
                                         "foreground_cwd": "/code/elsewhere", "terminal_title": "Pick a carrier"}]},
     })
     entry = by_place(leftovers(spy, [*TICKETS, linear]))["/code/elsewhere"]
-    assert (entry.ticket, entry.workspaces, entry.agents) == (linear, ("w7",), ("idle",))
+    assert (entry.ticket, held(entry, "workspace"), held(entry, "agent")) == (linear, ("w7",), ("idle",))
 
 
-def test_a_ticket_branch_checked_out_in_the_main_checkout_is_not_left_over():
+def test_a_ticket_branch_checked_out_in_the_main_checkout_is_not_left_over(monkeypatch):
     main_on_50 = {"worktrees": [{**WORKTREES["worktrees"][0], "branch": "issue-50"}, *WORKTREES["worktrees"][1:]]}
+    checkouts(monkeypatch, main_on_50)
     spy = FakeHerdr({("worktree", "list"): main_on_50, ("agent", "list"): AGENTS})
     assert "branch issue-50" not in by_place(leftovers(spy))
 
@@ -227,21 +255,21 @@ class FakeProvider:
 
 def test_dry_run_fetches_the_named_map_even_when_closed():
     provider = FakeProvider(TICKETS)
-    text = cleanup.dry_run(REPO, provider, 40, Herdr(fake()), uncommitted=lambda path: False)
+    text = cleanup.dry_run(REPO, provider, 40, bench(fake()), uncommitted=lambda path: False)
     assert provider.queries == [Query(named_map=40)]
     assert text.startswith("#40 Ship deviations (closed)")
 
 
 def test_dry_run_on_a_linear_key_matches_the_maps_key():
     linear_map = issue(7, title="Linear map", labels=MAP_LABELS, key="TM-7")
-    text = cleanup.dry_run(REPO, FakeProvider([linear_map]), "TM-7", Herdr(fake()), uncommitted=lambda path: False)
+    text = cleanup.dry_run(REPO, FakeProvider([linear_map]), "TM-7", bench(fake()), uncommitted=lambda path: False)
     assert text.startswith("TM-7 Linear map (open)")
 
 
 @pytest.mark.parametrize("named", [41, 99, "ENG-4"])
 def test_dry_run_on_something_other_than_a_map_says_so(named):
     with pytest.raises(cleanup.CleanupError, match="not a wayfinder map"):
-        cleanup.dry_run(REPO, FakeProvider(TICKETS), named, Herdr(fake()))
+        cleanup.dry_run(REPO, FakeProvider(TICKETS), named, bench(fake()))
 
 
 def test_cli_parses_cleanup_with_its_map_and_dry_run():
@@ -268,9 +296,8 @@ def test_cli_refuses_cleanup_without_a_map_or_dry_run(argv, error, capsys, monke
 
 
 def run_main(monkeypatch, tickets, argv):
-    monkeypatch.setattr(herdr, "available", lambda: True)
     monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(tickets))
-    monkeypatch.setattr(herdr, "Herdr", lambda: Herdr(fake()))
+    use_herdr(monkeypatch, fake())
     monkeypatch.setattr(cleanup, "has_uncommitted", lambda path: False)
     return cli.main(argv)
 
@@ -288,13 +315,13 @@ def test_main_on_no_map_fails_with_the_reason(monkeypatch, capsys):
 
 
 def test_the_worktree_of_the_agent_cleanup_runs_in_is_current_and_keeps_its_own_reasons():
-    found = cleanup.leftovers(REPO, MAP, TICKETS, Herdr(fake()), uncommitted=lambda path: False, own_pane="w5:p1")
+    found = cleanup.leftovers(REPO, MAP, TICKETS, bench(fake(), "w5:p1"), uncommitted=lambda path: False)
     entry = by_place(found)[f"{HERDR_HOME}/issue-42"]
     assert (entry.current, entry.removable, entry.reason) == (True, False, "open ticket")
 
 
 def test_the_worktree_cleanup_runs_in_is_current_and_removable():
-    found = cleanup.leftovers(Path(f"{HERDR_HOME}/issue-40/sub"), MAP, TICKETS, Herdr(fake()),
+    found = cleanup.leftovers(Path(f"{HERDR_HOME}/issue-40/sub"), MAP, TICKETS, bench(fake()),
                               uncommitted=lambda path: False)
     entry = by_place(found)[f"{HERDR_HOME}/issue-40"]
     assert (entry.current, entry.removable, entry.reason) == (True, True, "ticket closed")
@@ -302,7 +329,7 @@ def test_the_worktree_cleanup_runs_in_is_current_and_removable():
 
 
 def test_the_dry_run_says_the_current_worktree_goes_last():
-    found = cleanup.leftovers(Path(f"{HERDR_HOME}/issue-40"), MAP, TICKETS, Herdr(fake()),
+    found = cleanup.leftovers(Path(f"{HERDR_HOME}/issue-40"), MAP, TICKETS, bench(fake()),
                               uncommitted=lambda path: False)
     line = next(line for line in cleanup.render(MAP, found).splitlines() if "  #40  " in line)
     assert line.startswith("removable") and line.endswith("ticket closed, removed last: cleanup runs in it")
@@ -315,7 +342,8 @@ def test_the_dry_run_says_the_current_worktree_goes_last():
 def repo(tmp_path, monkeypatch):
     """main, with worktrees issue-40 (merged into main), issue-51 (its PR squash-merged, so unmerged in git) and
     issue-42 (open ticket), and branch issue-50 merged with no worktree."""
-    monkeypatch.setattr(herdr, "local_branches", REAL_LOCAL_BRANCHES)
+    monkeypatch.setattr(gitrepo, "local_branches", REAL_LOCAL_BRANCHES)
+    monkeypatch.setattr(gitrepo, "worktrees", REAL_WORKTREES)
     root = tmp_path / "shiplog"
     root.mkdir()
     git("init", "-q", "-b", "main", cwd=root)
@@ -345,7 +373,7 @@ def real_fake(repo, agents=()):
 
 def run_cleanup(repo, spy, tickets=TICKETS, own_pane=None, cwd=None):
     """The summary and whether every step went through; what closes last is left unclosed."""
-    cleaned = cleanup.clean(cwd or repo, FakeProvider(tickets), 40, Herdr(spy), own_pane=own_pane)
+    cleaned = cleanup.clean(cwd or repo, FakeProvider(tickets), 40, bench(spy, own_pane))
     return cleaned.summary, cleaned.ok
 
 
@@ -394,8 +422,8 @@ def test_cleanup_never_forces_a_worktree_with_new_changes_out(repo):
     """Changes made after the look: git refuses to remove the worktree, which keeps its branch too."""
     (repo.parent / "issue-40" / "new.txt").write_text("x")
     spy = real_fake(repo)
-    found = cleanup.leftovers(repo, MAP, TICKETS, Herdr(spy), uncommitted=lambda path: False)
-    outcomes = cleanup.remove(repo, found, Herdr(spy))
+    found = cleanup.leftovers(repo, MAP, TICKETS, bench(spy), uncommitted=lambda path: False)
+    outcomes = cleanup.remove(repo, found, bench(spy))
     assert (repo.parent / "issue-40" / "new.txt").exists()
     assert "issue-40" in REAL_LOCAL_BRANCHES(repo)
     entry = next(o for o in outcomes if o.entry.ticket.number == 40)
@@ -441,15 +469,14 @@ def test_a_refused_herdr_close_fails_the_cleanup_and_main_exits_non_zero(repo, m
     spy = real_fake(repo)
     spy.answers[("workspace", "close")] = herdr.HerdrError("workspace_not_found")
     monkeypatch.chdir(repo)
-    monkeypatch.setattr(herdr, "available", lambda: True)
     monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(TICKETS))
-    monkeypatch.setattr(herdr, "Herdr", lambda: Herdr(spy))
+    use_herdr(monkeypatch, spy)
     assert cli.main(["cleanup", "40"]) == 1
     assert "workspace w2 not closed: workspace_not_found" in capsys.readouterr().out
 
 
 def test_from_the_main_checkout_nothing_is_left_to_close_last(repo):
-    cleaned = cleanup.clean(repo, FakeProvider(TICKETS), 40, Herdr(real_fake(repo)))
+    cleaned = cleanup.clean(repo, FakeProvider(TICKETS), 40, bench(real_fake(repo)))
     assert cleaned.last == ()
 
 
@@ -457,8 +484,8 @@ def test_from_the_main_checkout_nothing_is_left_to_close_last(repo):
 
 
 def clean_from_40(repo, spy, own_pane="w2:p4", dirty=()):
-    return cleanup.clean(repo.parent / "issue-40", FakeProvider(TICKETS), 40, Herdr(spy),
-                         uncommitted=lambda path: Path(path).name in dirty, own_pane=own_pane)
+    return cleanup.clean(repo.parent / "issue-40", FakeProvider(TICKETS), 40, bench(spy, own_pane),
+                         uncommitted=lambda path: Path(path).name in dirty)
 
 
 def test_from_inside_a_map_worktree_every_other_entry_goes_first(repo):
@@ -472,7 +499,7 @@ def test_from_inside_a_map_worktree_every_other_entry_goes_first(repo):
     assert not (repo.parent / "issue-40").exists()
     assert "issue-40" not in REAL_LOCAL_BRANCHES(repo)
     assert ["workspace", "close", "w2"] not in spy.calls  # that is cleanup's own, closed after the summary
-    assert cleaned.last == (("workspace", "w2"),)
+    assert cleaned.last == (str(repo.parent / "issue-40"),)
     assert cleaned.ok
 
 
@@ -486,8 +513,9 @@ def test_the_current_entry_is_summarised_last_with_its_workspace_closing_after(r
 
 def test_close_last_closes_cleanups_own_workspace(repo):
     spy = real_fake(repo)
-    cleaned = clean_from_40(repo, spy)
-    assert cleanup.close_last(cleaned, Herdr(spy)) == []
+    backend = bench(spy, "w2:p4")
+    cleaned = cleanup.clean(repo.parent / "issue-40", FakeProvider(TICKETS), 40, backend, uncommitted=lambda path: False)
+    assert cleanup.close_last(repo, cleaned, backend) == []
     assert spy.calls[-1] == ["workspace", "close", "w2"]
 
 
@@ -506,8 +534,8 @@ def test_an_unmerged_pr_keeps_the_current_worktree(repo):
     spy = real_fake(repo, [{"pane_id": "w5:p1", "workspace_id": "w5", "agent_status": "working",
                             "foreground_cwd": str(repo.parent / "issue-42")}])
     in_review = [t if t.number != 42 else on_map(42, kind="research", has_open_change_request=True) for t in TICKETS]
-    cleaned = cleanup.clean(repo.parent / "issue-42", FakeProvider(in_review), 40, Herdr(spy),
-                            uncommitted=lambda path: False, own_pane="w5:p1")
+    cleaned = cleanup.clean(repo.parent / "issue-42", FakeProvider(in_review), 40, bench(spy, "w5:p1"),
+                            uncommitted=lambda path: False)
     assert (repo.parent / "issue-42").exists()
     assert cleaned.last == ()
     assert any(line.startswith("kept") and "#42" in line and "unmerged PR" in line
@@ -528,9 +556,8 @@ def test_main_prints_the_whole_summary_before_closing_its_own_workspace(repo, mo
     spy.answers[("workspace", "close")] = lambda argv: printed.setdefault(argv[2], capsys.readouterr().out)
     monkeypatch.chdir(repo.parent / "issue-40")
     monkeypatch.setenv("HERDR_PANE_ID", "w2:p4")
-    monkeypatch.setattr(herdr, "available", lambda: True)
     monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(TICKETS))
-    monkeypatch.setattr(herdr, "Herdr", lambda: Herdr(spy))
+    use_herdr(monkeypatch, spy)
     monkeypatch.setattr(cleanup, "has_uncommitted", lambda path: False)
     assert cli.main(["cleanup", "40"]) == 0
     assert printed["w2"].endswith("3 removed, 1 kept\n")
@@ -542,9 +569,8 @@ def test_main_reports_its_own_workspace_left_open(repo, monkeypatch, capsys):
     spy.answers[("workspace", "close")] = lambda argv: herdr.HerdrError("boom") if argv[2] == "w2" else {}
     monkeypatch.chdir(repo.parent / "issue-40")
     monkeypatch.setenv("HERDR_PANE_ID", "w2:p4")
-    monkeypatch.setattr(herdr, "available", lambda: True)
     monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(TICKETS))
-    monkeypatch.setattr(herdr, "Herdr", lambda: Herdr(spy))
+    use_herdr(monkeypatch, spy)
     monkeypatch.setattr(cleanup, "has_uncommitted", lambda path: False)
     assert cli.main(["cleanup", "40"]) == 1
     assert "ticketmaster: workspace w2 not closed: boom" in capsys.readouterr().err
@@ -558,3 +584,44 @@ def test_without_its_own_pane_the_current_worktree_still_goes_last_and_says_so(r
     assert ["workspace", "close", "w2"] in spy.calls
     assert cleaned.last == ()
     assert cleaned.summary.splitlines()[-2].endswith("· cleanup ran in it")
+
+
+# --- cleanup through any backend: verdicts from its occupants ----------------------------------------
+
+
+def judged(backend, cwd=REPO):
+    return by_place(cleanup.leftovers(cwd, MAP, TICKETS, backend, uncommitted=lambda path: False))
+
+
+def test_an_occupant_that_blocks_removal_keeps_its_worktree_with_the_reason():
+    backend = FakeBackend(occupants={f"{HERDR_HOME}/issue-40": (Occupant("session", "idle", blocks="live session"),)})
+    entry = judged(backend)[f"{HERDR_HOME}/issue-40"]
+    assert (entry.removable, entry.reason) == (False, "live session")
+    assert "session idle" in cleanup.render(MAP, [entry])
+
+
+def test_an_unreadable_backend_keeps_every_worktree_and_judges_branches_as_usual():
+    found = judged(FakeBackend(unreadable="sessions unreadable"))
+    assert (found[f"{HERDR_HOME}/issue-40"].removable, found[f"{HERDR_HOME}/issue-40"].reason) == \
+        (False, "sessions unreadable")
+    assert found[f"{HERDR_HOME}/issue-42"].reason == "open ticket, sessions unreadable"
+    assert found["branch issue-50"].removable
+
+
+def test_a_worktree_with_an_occupant_of_cleanups_own_is_current():
+    backend = FakeBackend(occupants={f"{HERDR_HOME}/issue-51": (Occupant("session", "working", own=True),)})
+    found = judged(backend)
+    assert [path for path, entry in found.items() if entry.current] == [f"{HERDR_HOME}/issue-51"]
+
+
+def test_the_backend_releases_a_worktree_before_git_removes_it_and_never_a_kept_one(repo):
+    class Watching(FakeBackend):
+        def release(self, cwd, path):
+            self.calls.append(("release", Path(path).name, Path(path).exists()))
+            return Released()
+
+    backend = Watching()
+    cleaned = cleanup.clean(repo, FakeProvider(TICKETS), 40, backend, uncommitted=lambda path: False)
+    assert sorted(backend.calls) == [("release", "issue-40", True), ("release", "issue-51", True)]
+    assert not (repo.parent / "issue-40").exists() and (repo.parent / "issue-42").exists()
+    assert cleaned.last == ()

@@ -1,14 +1,15 @@
-"""What the board's keys do in herdr: start or continue a ticket's /wayfinder or /implement session in its own
-worktree, or go to its session."""
+"""What the board's keys do through the session backend: start or continue a ticket's /wayfinder or /implement
+session in its own worktree, or go to its session."""
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
-from .herdr import Herdr, Session
+from .backends import Backend
 from .model import Ticket
+from .session import Session
 
 DEFAULT_WAYFINDER_COMMAND = "/mattpocock-skills:wayfinder"
 DEFAULT_IMPLEMENT_COMMAND = "/mattpocock-skills:implement"
@@ -65,7 +66,7 @@ def session_label(ticket: Ticket) -> str:
 
 
 def claude_args(ticket: Ticket, prompt: str) -> list[str]:
-    """One line per argument: `herdr agent start` rejects newlines (invalid_agent_argument)."""
+    """One line per argument: herdr's `agent start` rejects newlines (invalid_agent_argument)."""
     return ["-n", session_label(ticket), one_line(prompt)]
 
 
@@ -80,17 +81,21 @@ def one_line(text: str) -> str:
 
 @dataclass
 class Workbench:
-    """The board's herdr actions for one repo. Every call blocks; the board runs them in a worker."""
+    """The board's session actions for one repo, through its backend. Every call blocks; the board runs them in a
+    worker."""
 
     cwd: Path
+    backend: Backend
     wayfinder_command: str = DEFAULT_WAYFINDER_COMMAND
     implement_command: str = DEFAULT_IMPLEMENT_COMMAND
     to_tickets_command: str = DEFAULT_TO_TICKETS_COMMAND
-    claude: str = "claude"
-    herdr: Herdr = field(default_factory=Herdr)
 
     def sessions(self) -> dict[int, list[Session]]:
-        return self.herdr.sessions(self.cwd)
+        return self.backend.sessions(self.cwd)
+
+    def describe(self, ticket: Ticket) -> str:
+        """What s starts, for its confirm: the prompt, the worktree and where the backend puts the session."""
+        return self.prompt(ticket) + f"\nworktree: {worktree_name(ticket)}, {self.backend.where}"
 
     def prompt(self, ticket: Ticket) -> str:
         return build_prompt(ticket, self.wayfinder_command, self.implement_command, self.to_tickets_command)
@@ -98,9 +103,9 @@ class Workbench:
     def start(self, ticket: Ticket) -> str:
         """In the ticket's own worktree, named by its key: created with the prompt, or reopened with
         `claude --continue` when it exists without an agent; never a `-2` copy."""
-        where = self.herdr.start_in_worktree(
+        where = self.backend.start_in_worktree(
             self.cwd, worktree_name(ticket), branch_name(ticket), session_label(ticket),
-            claude_args(ticket, self.prompt(ticket)), continue_args(ticket), self.claude,
+            claude_args(ticket, self.prompt(ticket)), continue_args(ticket),
         )
         if ticket.spec_kind == "impl":
             return f"Started {self.implement_command} on {ticket.ref} in {where}{UNFOCUSED}"
@@ -109,11 +114,11 @@ class Workbench:
         return f"Started {ticket.ref} in {where}{UNFOCUSED}"
 
     def go_to(self, ticket: Ticket, session: Session) -> str:
-        return f"{ticket.ref}: " + self.herdr.go_to(self.cwd, session, session_label(ticket))
+        return f"{ticket.ref}: " + self.backend.go_to(self.cwd, session, session_label(ticket))
 
 
-def workbench_for(cwd: Path, config: dict) -> Workbench:
+def workbench_for(cwd: Path, config: dict, backend: Backend) -> Workbench:
     """`.ticketmaster.toml` can rename the wayfinder, implement and to-tickets skills the sessions start with."""
-    return Workbench(cwd, wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND),
+    return Workbench(cwd, backend, wayfinder_command=config.get("wayfinder_command", DEFAULT_WAYFINDER_COMMAND),
                      implement_command=config.get("implement_command", DEFAULT_IMPLEMENT_COMMAND),
                      to_tickets_command=config.get("to_tickets_command", DEFAULT_TO_TICKETS_COMMAND))

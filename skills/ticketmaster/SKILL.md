@@ -30,8 +30,10 @@ The first run, and the first after a plugin update, builds the plugin's venv, wh
 
 If it fails:
 
-- **Runs inside herdr**: this session is not in a herdr pane. Tell the user to start herdr and run
-  `/ticketmaster` from a Claude session inside it.
+- **No session backend available** or **backend herdr unavailable** (exit 2): this session is not in a herdr
+  pane (`HERDR_ENV is not 1`) or `herdr` is not on PATH. Tell the user to start herdr and run `/ticketmaster`
+  from a Claude session inside it. **Unknown backend** (exit 2): report the known backends it lists; the name
+  came from `--backend`, `TICKETMASTER_BACKEND` or `backend` in `.ticketmaster.toml`.
 - **Building the plugin venv failed**: report the printed reason. The fix is Python 3.11 or newer as `python3` on
   PATH (`brew install python@3.12`) and network access for pip, then `/ticketmaster` again.
 - **Provider or login error** (CLI missing or not logged in, unknown host): report it as printed, with the fix:

@@ -59,17 +59,21 @@ so code changes apply on the next `/ticketmaster` without rebuilding. Changing `
 
 ```
 ticketmaster [open] [map] [--repo OWNER/NAME] [--provider github|gitlab|gitea|forgejo|linear]
-             [--host HOST] [--columns auto|one|all] [--interval SECONDS]
+             [--host HOST] [--columns auto|one|all] [--interval SECONDS] [--backend NAME]
 ticketmaster login
-ticketmaster cleanup MAP [--dry-run]
+ticketmaster cleanup MAP [--dry-run] [--backend NAME]
 ```
 
 `open` is the default command: it opens the board in a herdr pane right of the
 calling pane (the focused pane when `HERDR_PANE_ID` is stale or another session's), labelled
 `ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there.
 Typed at a shell rather than run by Claude (no `CLAUDECODE` in the env), it runs the board right in
-the current pane, with no split. It
-only runs inside herdr (`HERDR_ENV=1`). `login` logs in to Linear with OAuth instead of an API key
+the current pane, with no split. `open` and `cleanup` run through a session backend, which opens the
+board and starts, finds and cleans up sessions; `herdr` is the only one so far, available inside herdr
+(`HERDR_ENV=1` and `herdr` on PATH). It is `--backend` for this run, else `TICKETMASTER_BACKEND`, else
+`backend = "<name>"` in `.ticketmaster.toml`, else the first available. A named backend that is unknown or
+unavailable exits 2 with the reason (an unknown name lists the known ones), never falling back to
+another; with none available it exits 2 too. A `--backend` given to `open` carries over to the board pane. `login` logs in to Linear with OAuth instead of an API key
 (see [Providers](#providers)); it runs anywhere.
 
 `cleanup MAP --dry-run` lists what a map, open or closed, leaves behind: the worktrees of the map and its
@@ -80,7 +84,7 @@ ticket is closed, or a PR that closes it is merged (GitHub), and it has no uncom
 **kept**, with the reasons: open ticket, unmerged PR, uncommitted changes. Merged comes from the tracker, never
 from unpushed commits, which a squash merge with its remote branch deleted leaves behind. The worktree the
 command runs in (its directory, or its herdr pane's workspace or agent) is judged like the others and marked to
-go last. With `--dry-run` it changes nothing. It runs inside herdr.
+go last. With `--dry-run` it changes nothing. It runs through the session backend, as `open` does.
 
 `cleanup MAP` without `--dry-run` removes what the dry run marks removable, on a closed map only: an open map
 is refused with a non-zero exit and nothing changed, since a human closes the map in the tracker. For each
