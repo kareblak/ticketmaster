@@ -71,3 +71,15 @@ unclear.
 **Status unavailable**:
 The session source itself can't be read and has never answered, so the board can't tell whether a worktree has a
 session at all. Not the same as unknown.
+
+### Views
+
+**Board view**:
+How the board is shown: the TUI in a terminal, or the web view in a browser on the same machine. Every view shows
+the same lanes, filters and start flow; which view is open is independent of the session backend, and a TUI and a
+web view of one repo can run side by side.
+_Avoid_: frontend, UI mode
+
+**Starting**:
+A card a board view has just started a session on, until the session appears or 30 s pass. Every board view of the
+repo sees it and refuses a second start meanwhile.
