@@ -5,14 +5,6 @@ worktree.
 
 ## Language
 
-### Board
-
-**Board view**:
-How the board is shown: the TUI in a terminal, or the web view in a browser on the same machine. Independent of
-the session backend: either view starts and finds sessions through whichever backend is in use. Each view keeps one
-board per Claude session, so a TUI and a web board can run side by side.
-_Avoid_: web client, front end
-
 ### Lanes
 
 **Lane**:
@@ -86,7 +78,7 @@ session at all. Not the same as unknown.
 How the board is shown: the TUI in a terminal, or the web view in a browser on the same machine. Every view shows
 the same lanes, filters and start flow; which view is open is independent of the session backend, and a TUI and a
 web view of one repo can run side by side.
-_Avoid_: frontend, UI mode
+_Avoid_: frontend, front end, web client, UI mode
 
 **Starting**:
 A card a board view has just started a session on, until the session appears or 30 s pass. Every board view of the
