@@ -1352,7 +1352,8 @@ class BoardApp(App):
             try:
                 return self.workbench.start(ticket)
             except HerdrError:
-                self.call_from_thread(self.starting.discard, ticket.number)
+                # a lambda: Textual inspects the callback's signature, and set.discard (a builtin) has none
+                self.call_from_thread(lambda: self.starting.discard(ticket.number))
                 raise
 
         def confirmed(yes: bool | None) -> None:
