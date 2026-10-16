@@ -181,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
     if report is not None:
         print(f"{report}, for {provider.name}:{provider.repo}.")
         return 0
-    # None: the board runs here
+    # None: the board runs here (in herdr: a board pane launched this, or it was typed at a shell)
 
     from .board import BoardApp
     from .config import settings_path

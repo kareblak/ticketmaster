@@ -51,10 +51,12 @@ def test_error_code_from_stderr_json():
         Herdr(fake).open_board(REPO, "tm open", caller="w1:p1")
 
 
-def pane(pane_id, label=None, cwd=REPO, session=None, focused=False):
+def pane(pane_id, label=None, cwd=REPO, session=None, focused=False, agent=None):
     entry = {"pane_id": pane_id, "workspace_id": pane_id.split(":")[0], "cwd": str(cwd), "foreground_cwd": str(cwd), "focused": focused}
     if label:
         entry["label"] = label
+    if agent:
+        entry["agent"] = agent
     if session:
         entry["agent_session"] = {"agent": "claude", "kind": "id", "value": session}
     return entry
@@ -218,10 +220,41 @@ def test_open_board_typed_at_a_shell_runs_in_place_without_a_split(monkeypatch):
     assert fake.calls == []
 
 
-def test_open_board_from_the_board_pane_itself_leaves_the_pane_alone():
-    fake = FakeHerdr({("pane", "list"): {"panes": [pane("w1:p5", label="ticketmaster")]}})
-    assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p5") is None
-    assert fake.verbs() == [("pane", "list")]
+def test_open_board_from_a_claude_pane_labelled_like_the_board_splits_a_new_board_beside_it():
+    """Claude's own pane is never the board, whatever its label: running in place would run the TUI in Claude's Bash tool."""
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [pane("w1:p1", label="ticketmaster", agent="claude", session="me")]},
+        ("pane", "split"): {"pane": {"pane_id": "w1:p2"}},
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p1", session="me") == BoardOpened("w1:p2", "w1:p1", restarted=False)
+    assert ("pane", "send-keys") not in fake.verbs()
+
+
+def test_open_board_from_its_own_board_labelled_pane_without_a_detected_agent_still_splits():
+    """Run by Claude from its own pane, that pane is not the board even before herdr lists the agent in it."""
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [pane("w1:p5", label="ticketmaster")]},
+        ("pane", "split"): {"pane": {"pane_id": "w1:p6"}},
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p5") == BoardOpened("w1:p6", "w1:p5", restarted=False)
+    assert ("pane", "send-keys") not in fake.verbs()
+
+
+def test_open_board_restarts_the_board_beside_a_claude_pane_that_carries_the_board_label():
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [pane("w1:p1", label="ticketmaster", agent="claude"), pane("w1:p5", label="ticketmaster")]},
+        ("pane", "process-info"): AT_PROMPT,
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w1:p1") == BoardOpened("w1:p5", "w1:p1", restarted=True)
+
+
+def test_a_focused_claude_pane_labelled_like_the_board_is_split_not_restarted():
+    fake = FakeHerdr({
+        ("pane", "list"): {"panes": [pane("wJ:p1", label="ticketmaster", agent="claude", focused=True)]},
+        ("pane", "split"): {"pane": {"pane_id": "wJ:p2"}},
+    })
+    assert Herdr(fake).open_board(REPO, "tm open", caller="w9:p9") == BoardOpened("wJ:p2", "wJ:p1", restarted=False)
+    assert ("pane", "send-keys") not in fake.verbs()
 
 
 def decision(kind="grilling", **kw):
