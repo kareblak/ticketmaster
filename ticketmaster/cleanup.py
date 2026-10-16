@@ -121,11 +121,17 @@ def worktree_ticket(wt: dict, family: dict[int, Ticket], by_branch: dict[str, Ti
     return by_branch.get(wt.get("branch") or "")
 
 
-def strays(view: CleanupView, listed: set[str | None], family: dict[int, Ticket]) -> list[tuple[Ticket, str, tuple[Occupant, ...]]]:
-    """Occupants naming a family ticket in a checkout that is not one of its worktrees, each with what it runs in."""
+def real(path: str) -> str:
+    """A path as the filesystem resolves it, so git's and a backend's spelling of one worktree compare equal."""
+    return os.path.realpath(path)
+
+
+def strays(view: CleanupView, listed: set[str], family: dict[int, Ticket]) -> list[tuple[Ticket, str, tuple[Occupant, ...]]]:
+    """Occupants naming a family ticket in a checkout that is not one of its worktrees (`listed`, resolved), each with
+    what it runs in."""
     found = []
     for path, occupants in view.occupants.items():
-        if path in listed:
+        if real(path) in listed:
             continue
         for occupant in occupants:
             if (ticket := family.get(occupant.ticket)) is not None:
@@ -145,12 +151,13 @@ def leftovers(cwd: Path, map_ticket: Ticket, tickets: list[Ticket], backend: Bac
     by_branch = {name: t for t in family.values() for name in ticket_branches(t)}
     checkouts = gitrepo.worktrees(cwd)
     view = backend.cleanup_view(cwd)
+    occupied = {real(path): occupants for path, occupants in view.occupants.items()}
     found: list[Leftover] = []
     for wt in checkouts:
         ticket = worktree_ticket(wt, family, by_branch) if wt.get("is_linked_worktree") else None
         if ticket is None:
             continue
-        here = view.occupants.get(wt["path"], ())
+        here = occupied.get(real(wt["path"]), ())
         current = where.is_relative_to(Path(wt["path"]).resolve()) or any(o.own for o in here)
         found.append(leftover(ticket, wt["path"], wt.get("branch"), here, uncommitted(wt["path"]),
                               current=current, unreadable=view.unreadable))
@@ -158,7 +165,7 @@ def leftovers(cwd: Path, map_ticket: Ticket, tickets: list[Ticket], backend: Bac
     for branch in gitrepo.local_branches(cwd):
         if branch in by_branch and branch not in checked_out:
             found.append(leftover(by_branch[branch], None, branch, (), False))
-    for ticket, path, occupants in strays(view, {entry.path for entry in found}, family):
+    for ticket, path, occupants in strays(view, {real(entry.path) for entry in found if entry.path}, family):
         found.append(leftover(ticket, path, None, occupants, False, outside=True))
     return found
 

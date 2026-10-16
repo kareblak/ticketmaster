@@ -625,3 +625,19 @@ def test_the_backend_releases_a_worktree_before_git_removes_it_and_never_a_kept_
     assert sorted(backend.calls) == [("release", "issue-40", True), ("release", "issue-51", True)]
     assert not (repo.parent / "issue-40").exists() and (repo.parent / "issue-42").exists()
     assert cleaned.last == ()
+
+
+def test_herdr_and_git_spelling_one_worktree_differently_still_meet(tmp_path, monkeypatch):
+    """macOS lists /var/… and /private/var/… for one directory: git and herdr may each use either."""
+    actual = tmp_path / "real" / "issue-40"
+    actual.mkdir(parents=True)
+    (tmp_path / "link").symlink_to(tmp_path / "real")
+    linked = str(tmp_path / "link" / "issue-40")
+    checkouts(monkeypatch, {"worktrees": [WORKTREES["worktrees"][0], wt(str(actual), "issue-40")]})
+    spy = FakeHerdr({("worktree", "list"): {"worktrees": [WORKTREES["worktrees"][0], wt(linked, "issue-40", "w2")]},
+                     ("agent", "list"): {"agents": [{"pane_id": "w2:p1", "workspace_id": "w2", "agent_status": "idle",
+                                                     "foreground_cwd": linked}]}})
+    backend = bench(spy, "w2:p1")
+    entry = by_place(cleanup.leftovers(REPO, MAP, TICKETS, backend, uncommitted=lambda path: False))[str(actual)]
+    assert (held(entry, "workspace"), held(entry, "agent"), entry.current) == (("w2",), ("idle",), True)
+    assert backend.release(REPO, str(actual)).later == ("workspace w2",)

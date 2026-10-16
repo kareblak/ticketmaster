@@ -354,12 +354,14 @@ class HerdrBackend:
                 *(Occupant("agent", a.get("agent_status") or "unknown", own=a.get("pane_id") == self.own_pane,
                            ticket=title_number(a), within=a.get("workspace_id")) for a in here),
             )
-            self.held[path] = (workspace, [(a["pane_id"], a.get("workspace_id")) for a in here if a.get("pane_id")])
+            self.held[os.path.realpath(path)] = (workspace, [(a["pane_id"], a.get("workspace_id")) for a in here if a.get("pane_id")])
         return CleanupView({path: found for path, found in occupants.items() if found})
 
     def release(self, cwd: Path, path: str) -> Released:
         """Closes the workspace open on the worktree and the panes of its agents in other workspaces. A close of
-        this pane or its workspace waits for the next release of the path."""
+        this pane or its workspace waits for the next release of the path. Paths compare resolved, as git and
+        herdr may spell one worktree differently."""
+        path = os.path.realpath(path)
         if path in self.later:
             return self.close(self.later.pop(path))
         if path not in self.held:

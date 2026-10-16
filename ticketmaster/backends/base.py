@@ -68,7 +68,8 @@ class Backend(Protocol):
     def go_to(self, cwd: Path, session: Session, label: str) -> str:
         """Goes to a session, or its worktree; never starts or resumes Claude."""
 
-    def cleanup_view(self, cwd: Path) -> CleanupView: ...
+    def cleanup_view(self, cwd: Path) -> CleanupView:
+        """What the backend has in each of the repo's checkouts, for cleanup to judge and name."""
 
     def release(self, cwd: Path, path: str) -> Released:
         """Closes what the backend has in a worktree, before cleanup removes it."""
