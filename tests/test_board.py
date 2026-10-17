@@ -7,52 +7,15 @@ from pathlib import Path
 from rich.text import Text
 from textual.widgets import Input
 
-from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, SettingsMenu,
-                               budget_pace, clamp_lines, passes_filters, render_card)
+from fakes import FakeProvider, a_map, impl_of, on, spec_of
+from ticketmaster.board import BoardApp, Card, Cell, FilterPicker, HelpScreen, PickerOption, SettingsMenu, clamp_lines
 from fake_backend import FailingBackend, FakeBackend, workbench
 from ticketmaster.backends import BackendError
 from ticketmaster.session import Session
-from ticketmaster.model import Column, Ticket
+from ticketmaster.model import Ticket
 from ticketmaster.providers import ProviderError, Query, Quota, RateLimited
 from ticketmaster.config import load_config
 from ticketmaster.start import build_prompt, workbench_for
-
-
-class FakeProvider:
-    name = "fake"
-    repo = "o/r"
-
-    def __init__(self, tickets, login="me"):
-        self.tickets = tickets
-        self.calls = 0
-        self.queries = []
-        self.login = login
-
-    def viewer(self):
-        if isinstance(self.login, Exception):
-            raise self.login
-        return self.login
-
-    def fetch(self, query):
-        self.calls += 1
-        self.queries.append(query)
-        if isinstance(self.tickets, Exception):
-            raise self.tickets
-        return self.tickets
-
-
-def a_map(number, title="", **kw):
-    base = dict(number=number, title=title or f"Map {number}", url=f"https://gh/o/r/issues/{number}", is_open=True,
-                labels=("wayfinder:map",))
-    return Ticket(**{**base, **kw})
-
-
-def on(map_number, number, title="", kind="grilling", **kw):
-    """A decision ticket of map #<map_number>."""
-    base = dict(number=number, title=title or f"Question {number}", url=f"u{number}", is_open=True,
-                labels=(f"wayfinder:{kind}",), parent_number=map_number,
-                parent_url=f"https://gh/o/r/issues/{map_number}", parent_labels=("wayfinder:map",))
-    return Ticket(**{**base, **kw})
 
 
 MAP = a_map(9, "Pick a stack")
@@ -173,19 +136,6 @@ def test_a_closed_map_is_hidden_unless_named_and_then_shows_as_its_header_alone(
 
     run(scenario(Query(), [9]))
     run(scenario(Query(named_map=40), [40]))  # the map filter is preset to it; Esc shows the open maps too
-
-
-def test_ticket_cards_show_type_mode_assignee_blockers_and_the_maps_name():
-    text = render_card(on(9, 3, kind="research", assignees=("bob",), open_blockers=2, blocked_by=("#1", "o/x#4")),
-                       Column.BLOCKED, lane_title="Pick a stack").plain
-    assert "research ·  AFK " in text and "@bob" in text and "⛔ #1 o/x#4" in text and "◆ Pick a stack" in text
-
-
-def test_a_decided_card_is_only_its_ref_and_title():
-    done = on(9, 4, "Shipped", kind="research", assignees=("bob",), is_open=False, closed_at=datetime.now(timezone.utc))
-    sessions = [Session(number=4, path="/w/issue-4", status="done")]
-    text = render_card(done, Column.DECIDED, sessions, lane_title="Pick a stack").plain
-    assert text == "#4 Shipped"
 
 
 def test_clamp_lines_cuts_to_the_line_count_and_ends_in_an_ellipsis():
@@ -811,65 +761,6 @@ async def pick(pilot, app, value, section=None, times=1):
     await pilot.pause()
 
 
-def test_pacer_backs_off_to_a_minute_and_sessions_to_ten_seconds():
-    pacer = Pacer(5, now=0)
-    assert pacer.due(0) == (True, True)
-    pacer.started(0, tickets=True)
-    pacer.fetched(1, ok=False, rate_limited=True)
-    assert pacer.limited and not pacer.stuck and pacer.wait(1) == 60
-    assert pacer.due(5) == (False, True)  # sessions were last fetched with the tickets at 0
-    pacer.started(5, tickets=False)
-    assert pacer.due(14) == (False, False) and pacer.due(15) == (False, True)
-    assert pacer.due(61) == (True, True)
-
-
-def test_pacer_recovers_once_then_stays_slow_until_restart():
-    pacer = Pacer(5, now=0)
-    pacer.started(0, tickets=True)
-    pacer.fetched(1, ok=False, rate_limited=True)
-    pacer.started(61, tickets=True)
-    pacer.fetched(62, ok=False, rate_limited=True)  # still limited on the minute-poll: not yet recovered
-    assert pacer.limited and not pacer.stuck
-    pacer.started(122, tickets=True)
-    pacer.fetched(123, ok=True, rate_limited=False)
-    assert not pacer.limited and pacer.due(128) == (True, True)  # normal interval again
-    pacer.started(128, tickets=True)
-    pacer.fetched(128, ok=False, rate_limited=True)
-    assert pacer.limited and pacer.stuck
-    pacer.started(188, tickets=True)
-    pacer.fetched(189, ok=True, rate_limited=False)
-    assert pacer.limited and pacer.due(197) == (False, False) and pacer.due(198) == (False, True)
-    assert pacer.due(248) == (True, True)
-
-
-def test_pacer_other_errors_keep_the_interval():
-    pacer = Pacer(5, now=0)
-    pacer.started(0, tickets=True)
-    pacer.fetched(1, ok=False, rate_limited=False)
-    assert not pacer.limited and pacer.due(5) == (True, True)
-
-
-def test_a_new_interval_reschedules_from_the_last_fetch():
-    pacer = Pacer(60, now=0)
-    pacer.started(0, tickets=True)
-    pacer.set_interval(5)
-    assert pacer.due(4) == (False, False) and pacer.due(5) == (True, True)
-    pacer.started(5, tickets=True)
-    pacer.set_interval(30)
-    assert pacer.due(34) == (False, False) and pacer.due(35) == (True, True)
-
-
-def test_a_new_interval_keeps_the_rate_limit_back_off():
-    pacer = Pacer(5, now=0)
-    pacer.started(0, tickets=True)
-    pacer.fetched(1, ok=False, rate_limited=True)
-    pacer.set_interval(1)
-    assert pacer.limited and pacer.wait(1) == 60
-    assert pacer.due(9) == (False, False) and pacer.due(10) == (False, True)  # sessions every 10s at least
-    pacer.set_interval(20)
-    assert pacer.due(19) == (False, False) and pacer.due(20) == (False, True)
-
-
 class Clock:
     def __init__(self):
         self.now = 1000.0
@@ -1048,48 +939,6 @@ def test_errors_without_a_status_notify_each_time_the_message_changes():
 
 
 NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
-
-
-def test_budget_pace_is_the_cost_spread_over_the_hourly_budget_in_whole_seconds():
-    assert budget_pace(Quota(cost=1, remaining=4000, resets_at=None), 1000, NOW) == 4  # 3.6
-    assert budget_pace(Quota(cost=12, remaining=4000, resets_at=None), 1000, NOW) == 44  # 43.2
-    assert budget_pace(Quota(cost=12, remaining=None, resets_at=None), 2000, NOW) == 22  # 21.6
-    assert budget_pace(Quota(cost=0, remaining=0, resets_at=NOW + timedelta(minutes=5)), 1000, NOW) == 0
-
-
-def test_budget_pace_stretches_until_the_points_left_last_to_the_reset():
-    reset = NOW + timedelta(minutes=50)
-    assert budget_pace(Quota(cost=12, remaining=4000, resets_at=reset), 1000, NOW) == 44  # plenty left
-    assert budget_pace(Quota(cost=12, remaining=100, resets_at=reset), 1000, NOW) == 12 * 3000 / 100
-    assert budget_pace(Quota(cost=12, remaining=0, resets_at=reset), 1000, NOW) == 3000  # wait for the reset
-    assert budget_pace(Quota(cost=12, remaining=0, resets_at=NOW - timedelta(seconds=1)), 1000, NOW) == 44
-
-
-def test_a_pace_slows_tickets_but_never_below_the_interval_and_never_sessions():
-    pacer = Pacer(5, now=0)
-    pacer.started(0, tickets=True)
-    pacer.pace(3.6)
-    assert pacer.tickets_every == 5 and pacer.due(5) == (True, True)
-    pacer.started(5, tickets=True)
-    pacer.pace(44)
-    assert pacer.tickets_every == 44
-    assert pacer.due(10) == (False, True) and pacer.due(48.9) == (False, True) and pacer.due(49) == (True, True)
-    pacer.started(10, tickets=False)
-    assert pacer.due(15) == (False, True)  # sessions keep the interval
-
-
-def test_a_rate_limit_overrides_the_pace_and_its_recovery_returns_to_it():
-    pacer = Pacer(5, now=0)
-    pacer.started(0, tickets=True)
-    pacer.pace(100)
-    pacer.started(100, tickets=True)
-    pacer.fetched(101, ok=False, rate_limited=True)
-    pacer.pace(100)  # a pace never cuts the back-off's minute short or stretches it
-    assert pacer.limited and pacer.wait(101) == 60
-    pacer.started(161, tickets=True)
-    pacer.fetched(162, ok=True, rate_limited=False)
-    pacer.pace(100)  # the board paces after every good fetch
-    assert not pacer.limited and pacer.due(260) == (False, True) and pacer.due(261) == (True, True)
 
 
 class QuotaProvider(FakeProvider):
@@ -1616,44 +1465,6 @@ def test_map_order_lookup_failure_falls_back_to_board_order():
     run(scenario())
 
 
-def blocked_card(**fields) -> str:
-    return render_card(Ticket(number=5, title="Waits", url="u5", is_open=True, **fields), Column.BLOCKED).plain
-
-
-def test_blocked_card_lists_each_open_blocker_in_order():
-    assert "⛔ #12 " in blocked_card(blocked_by=("#12",), open_blockers=1)
-    many = tuple(f"#{n}" for n in range(20, 0, -1))
-    assert f"⛔ {' '.join(many)} " in blocked_card(blocked_by=many, open_blockers=len(many))
-
-
-def test_blocked_card_names_blockers_in_another_repo():
-    assert "⛔ #3 other/lib#12 " in blocked_card(blocked_by=("#3", "other/lib#12"), open_blockers=2)
-
-
-def test_blocked_card_without_refs_keeps_the_count_and_a_label_only_card_shows_no_chip():
-    assert "⛔ 2 " in blocked_card(open_blockers=2)
-    assert "⛔" not in blocked_card(labels=("blocked",))
-    assert "⛔" not in blocked_card(labels=("blocked",), open_blockers=0)
-
-
-def spec_of(map_number, number, title="", **kw):
-    """A spec of map #<map_number>: `Part of #<map>`, no `wayfinder:` label, and the map as its parent."""
-    map_url = f"https://gh/o/r/issues/{map_number}"
-    base = dict(number=number, title=title or f"Spec {number}", url=f"u{number}", is_open=True,
-                body=f"Part of #{map_number}\n\n## Problem Statement", labels=("ready-for-agent",),
-                parent_number=map_number, parent_url=map_url, parent_labels=("wayfinder:map",),
-                map_number=map_number, map_url=map_url)
-    return Ticket(**{**base, **kw})
-
-
-def impl_of(spec, number, title="", **kw):
-    """An implementation ticket of `spec`, linked by its `## Parent` section."""
-    base = dict(number=number, title=title or f"Slice {number}", url=f"u{number}", is_open=True,
-                body=f"## Parent\n\n#{spec.number}\n\n## What to build", map_number=spec.map_number,
-                map_url=spec.map_url)
-    return Ticket(**{**base, **kw})
-
-
 def chips_of(app, number):
     return card_text(app, number).split("\n")[-1]
 
@@ -2016,22 +1827,6 @@ def filters_app(tmp_path, query=Query(), tickets=FILTERED):
 
 def picker_values(app, section):
     return [o.value for o in app.screen.query(PickerOption) if o.section == section]
-
-
-def test_passes_filters_ors_within_a_section_ands_across_and_ignores_values_not_on_the_board():
-    known = {"Type": {"grilling", "research", "task", "prototype", "spec", "impl"}, "HITL/AFK": {"HITL", "AFK"},
-             "Author": {"alice", "bob", "carol", "dana"}}
-    cards = [t for t in FILTERED if not t.is_wayfinder_map]
-    shown = lambda filters, viewer="me": [t.number for t in cards if passes_filters(t, filters, known, viewer)]
-    chosen = lambda *values: dict.fromkeys(values, "include")
-    assert shown({}) == [1, 2, 3, 21, 30, 31]
-    assert shown({"Type": chosen("research", "impl")}) == [2, 31]
-    assert shown({"HITL/AFK": chosen("HITL")}) == [1, 3, 21]
-    assert shown({"HITL/AFK": chosen("HITL"), "Author": chosen("bob")}) == [3]
-    assert shown({"Assignee": chosen("me")}) == [2, 31]  # the login, in any case
-    assert shown({"Assignee": chosen("me")}, viewer=None) == []  # an unknown login is nobody
-    assert shown({"Assignee": chosen("unassigned")}) == [1, 21, 30]
-    assert shown({"Author": chosen("gone"), "Type": chosen("spec")}) == [30]  # a saved author no longer on the board
 
 
 def test_f_picker_offers_values_from_the_board_and_each_filter_narrows_it(tmp_path):

@@ -1,17 +1,13 @@
 """Live Textual swimlane board: a lane per wayfinder map and per standalone spec, and the Loose lane, its tickets in
-four columns."""
+four columns. It draws a BoardModel's snapshot with Rich."""
 
 from __future__ import annotations
 
-import math
-import re
 import time
 import webbrowser
 from collections.abc import Callable
-from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import NamedTuple, Protocol
 
 from rich.console import Console
 from rich.text import Text
@@ -23,14 +19,10 @@ from textual.screen import ModalScreen
 from textual.timer import Timer
 from textual.widgets import Button, Footer, Input, Label, Static
 
-from .config import (DEFAULT_BUDGET, board_budget, board_decided_age, board_fetch_limit, board_interval, load_settings,
-                     parse_budget, parse_decided_age, parse_fetch_limit, parse_interval, save_settings, seconds_text)
-from .model import (COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, LaneKind, SpecProgress, Ticket, build_board,
-                    frontier)
-from .backends import BackendError
-from .providers import ErrorNotice, Provider, ProviderError, Query, Quota, RateLimited, error_notice
-from .session import Session
-from .start import branch_name, worktree_name
+from .board_model import (ANYONE, ASSIGNEE, INCLUDE, LOOSE_TITLE, NO_ISSUE, Badge, BoardModel, CardView, GoTo,
+                          HeaderView, Notice, Refusal, Setting, StartPlan, Workbench)
+from .model import COLUMN_ORDER, Column, Lane, LaneKind, Ticket
+from .providers import Provider, Query
 
 NARROW_WIDTH = 100  # below this the "auto" view shows one column at a time
 COLUMN_COLORS = {
@@ -43,8 +35,6 @@ MAP_COLOR = "cyan"
 SPEC_COLOR = "magenta"  # a standalone spec's lane
 LOOSE_COLOR = "blue"  # the Loose lane
 LANE_GLYPHS = {LaneKind.MAP: "◆", LaneKind.SPEC: "▣", LaneKind.LOOSE: "◇"}
-LOOSE_TITLE = "Loose tickets"
-NO_ISSUE = "The Loose lane has no issue; select one of its tickets"
 STATUS_STYLES = {  # herdr agent states
     "working": ("● working", "bold yellow"),
     "blocked": ("⚠ needs you", "bold red"),
@@ -55,68 +45,69 @@ STATUS_STYLES = {  # herdr agent states
 }
 MODE_STYLES = {"HITL": "black on yellow", "AFK": "black on cyan"}  # who a wayfinder ticket needs at the keyboard
 PR_STYLE = "black on magenta"  # an open pull/merge request that closes the card
+SEGMENT_STYLES = {"title": "bold", "warn": "bold yellow", "filter": "yellow", "error": "bold red", "": ""}
 NOTICE_SECONDS = 10  # a tracker error's notification stays up this long
-LIMITED_TICKETS_EVERY = 60.0  # ticket fetches while the tracker rate-limits the board
-LIMITED_SESSIONS_EVERY = 10.0  # herdr session refreshes meanwhile
 DECIDED_LINES = 2  # a Decided card's height: its ref and title, truncated
+GO_TO_LIVE = ": press Enter to go to it"  # how this board goes to the live session a start refuses for
 
 
-def session_lines(sessions: list[Session], starting: bool, claimed: bool = False) -> Text:
-    """A badge per session; for a claimed ticket without one, that the claim's session is not in this herdr."""
+def session_lines(badges: tuple[Badge, ...]) -> Text:
+    """A line per badge: a session's agent state and worktree, starting, or claimed with no session here."""
     text = Text()
-    for session in sessions:
-        label, style = STATUS_STYLES.get(session.status, STATUS_STYLES["unknown"])
-        text.append(f"{label} ", style=style)
-        text.append(f"{Path(session.path).name}\n", style="dim")
-    if starting and not sessions:
-        text.append("▶ starting…\n", style="bold green")
-    elif claimed and not sessions:
-        text.append("◇ claimed, no session here\n", style="grey62")
+    for badge in badges:
+        if badge.kind == "session":
+            label, style = STATUS_STYLES.get(badge.status, STATUS_STYLES["unknown"])
+            text.append(f"{label} ", style=style)
+            text.append(f"{badge.worktree}\n", style="dim")
+        elif badge.kind == "starting":
+            text.append("▶ starting…\n", style="bold green")
+        elif badge.kind == "claimed":
+            text.append("◇ claimed, no session here\n", style="grey62")
     return text
 
 
-def render_card(ticket: Ticket, column: Column, sessions: list[Session] = (), starting: bool = False,
-                lane_title: str = "", claimed: bool = False, glyph: str = "◆") -> Text:
-    """A ticket: type · HITL/AFK (or spec/impl), an open closing PR, assignee, open blockers and its lane's title
-    after the lane's `glyph`. A Decided ticket is only its ref and title, which its Card clamps to DECIDED_LINES."""
+def render_card(view: CardView) -> Text:
+    """A ticket: its badges, ref, title and summary, then its chips, the lane's title after the lane's glyph. A
+    Decided ticket is only its ref and title, which its Card clamps to DECIDED_LINES."""
+    ticket, column = view.ticket, view.column
     if column is Column.DECIDED:
         return Text.assemble((f"{ticket.ref} ", f"bold {COLUMN_COLORS[column]}"), (ticket.title, "bold"))
-    text = session_lines(sessions, starting, claimed)
+    text = session_lines(view.badges)
     text.append(f"{ticket.ref} ", style=f"bold {COLUMN_COLORS[column]}")
     text.append(ticket.title, style="bold")
     if ticket.summary:
         text.append("\n" + ticket.summary, style="dim")
     chips = Text()
-    if ticket.wayfinder_type:
-        chips.append(ticket.wayfinder_type, style="bold")
-        if ticket.mode:
+    moded = any(chip.kind == "mode" for chip in view.chips)
+    for chip in view.chips:
+        if chip.kind == "type":
+            chips.append(chip.text if moded else f"{chip.text} ", style="bold")
+        elif chip.kind == "mode":
             chips.append(" · ")
-            chips.append(f" {ticket.mode} ", style=MODE_STYLES[ticket.mode])
-        chips.append(" ")
-    elif ticket.spec_kind:
-        chips.append(f"{ticket.spec_kind} ", style="bold")
-    if ticket.is_open and ticket.has_open_change_request:
-        chips.append(" PR open ", style=PR_STYLE)
-        chips.append(" ")
-    if ticket.is_open and (ticket.blocked_by or ticket.open_blockers):
-        chips.append(f"⛔ {' '.join(ticket.blocked_by) or ticket.open_blockers} ", style="red")
-    if ticket.assignees:
-        chips.append(" ".join("@" + a for a in ticket.assignees) + " ", style="italic cyan")
-    if lane_title:
-        chips.append(f"{glyph} {lane_title}", style="grey62")
+            chips.append(f" {chip.text} ", style=MODE_STYLES[chip.text])
+            chips.append(" ")
+        elif chip.kind == "pr":
+            chips.append(" PR open ", style=PR_STYLE)
+            chips.append(" ")
+        elif chip.kind == "blockers":
+            chips.append(f"⛔ {chip.text} ", style="red")
+        elif chip.kind == "assignees":
+            chips.append(" ".join("@" + a for a in chip.text.split()) + " ", style="italic cyan")
+        elif chip.kind == "lane":
+            chips.append(f"{LANE_GLYPHS[view.lane_kind]} {chip.text}", style="grey62")
     if chips.plain:
         text.append("\n")
         text.append(chips)
     return text
 
 
-def render_lane_header(lane: Lane, sessions: list[Session] = (), starting: bool = False, claimed: bool = False,
-               spec_sessions: dict[int, list[Session]] | None = None, spec_starting: set[int] = frozenset()) -> Text:
+def render_lane_header(view: HeaderView) -> Text:
     """A lane's header. A map's: its title and its decided / open / blocked counts, then a line per spec with its
     tickets' done / open / blocked counts, or that it has none yet, and its sessions' badges. A standalone spec's: its
     title, whether it is closed, its assignees and its tickets' done / open / blocked counts. The Loose lane's: what it
     holds and its tickets' done / open / blocked counts."""
-    text = session_lines(sessions, starting, claimed)
+    lane = view.lane
+    text = session_lines(view.badges)
     if lane.kind is LaneKind.LOOSE:
         return render_loose_lane(lane, text)
     if not lane.is_map:
@@ -128,13 +119,13 @@ def render_lane_header(lane: Lane, sessions: list[Session] = (), starting: bool 
     progress = lane.progress
     text.append(f"\n{progress.decided} decided · {progress.open} open · {progress.blocked} blocked",
                 style=f"bold {MAP_COLOR}")
-    for spec in lane.specs:
+    for line in view.specs:
+        spec, counts = line.spec, line.counts
         text.append(f"\n▣ {spec.ref} {'open' if spec.is_open else 'closed'}", style="bold")
-        counts = lane.spec_counts.get(spec.number, SpecProgress(0, 0, 0))
-        tickets = f"{counts.done} done · {counts.open} open · {counts.blocked} blocked" \
-            if spec.has_tickets or any(counts) else "no tickets yet"
+        tickets = (f"{counts.done} done · {counts.open} open · {counts.blocked} blocked" if counts is not None
+                   else "no tickets yet")
         text.append(f"  {tickets}", style="grey62")
-        badges = session_lines((spec_sessions or {}).get(spec.number, []), spec.number in spec_starting)
+        badges = session_lines(line.badges)
         badges.rstrip()
         if badges.plain:
             text.append("\n")
@@ -167,26 +158,6 @@ def render_loose_lane(lane: Lane, text: Text) -> Text:
     return text
 
 
-def lane_title(lane: Lane) -> str:
-    """What a lane's cards name it by: its header issue's title, or the Loose lane's own."""
-    return lane.header.title if lane.header else LOOSE_TITLE
-
-
-def matches(ticket: Ticket, needle: str) -> bool:
-    if not needle:
-        return True
-    haystack = " ".join([str(ticket.number), ticket.title, ticket.body, ticket.author, *ticket.labels, *ticket.assignees]).lower()
-    return all(word in haystack for word in needle.lower().split())
-
-
-INCLUDE = "include"  # a selected picker value
-TYPE, MODE, ASSIGNEE, MAP, AUTHOR = "Type", "HITL/AFK", "Assignee", "Map", "Author"  # the picker's sections
-CARD_FILTERS = (TYPE, MODE, ASSIGNEE, AUTHOR)  # narrow a lane's cards; MAP narrows the lanes
-SAVED_KEYS = {TYPE: "types", MODE: "modes", ASSIGNEE: "assignee", MAP: "maps", AUTHOR: "authors"}  # settings.json
-CARD_TYPES = (*WAYFINDER_TYPES, "spec", "impl")
-MODES = ("HITL", "AFK")
-ASSIGNEES, ANYONE = ("me", "unassigned", "anyone"), "anyone"  # one at a time; anyone narrows nothing
-
 
 def clamp_lines(text: Text, width: int, lines: int) -> Text:
     """`text` wrapped to `width`, cut to its first `lines` lines, the last ending in … when anything was cut."""
@@ -202,154 +173,6 @@ def clamp_lines(text: Text, width: int, lines: int) -> Text:
     last.append("…", style="bold")
     return Text("\n").join([*kept[:-1], last])
 
-
-def card_type(ticket: Ticket) -> str | None:
-    """The type a card is filtered by: its wayfinder type, else spec or impl."""
-    return ticket.wayfinder_type or ticket.spec_kind
-
-
-def passes_filters(ticket: Ticket, filters: dict[str, dict[str, str]], known: dict[str, set[str]],
-                   viewer: str | None) -> bool:
-    """A card passes every section with a selection, and a section when it matches any selected value. A selected type,
-    mode or author missing from the board (`known`) is ignored; `me` is the tracker login, nobody while it is unknown."""
-    for section, value in ((TYPE, card_type(ticket)), (MODE, ticket.mode), (AUTHOR, ticket.author)):
-        chosen = known.get(section, set()).intersection(filters.get(section, {}))
-        if chosen and value not in chosen:
-            return False
-    assignee = next(iter(filters.get(ASSIGNEE, {})), ANYONE)
-    if assignee == "unassigned":
-        return not ticket.assignees
-    if assignee == "me":
-        return viewer is not None and viewer.lower() in (a.lower() for a in ticket.assignees)
-    return True
-
-
-def known_values(board: Board) -> dict[str, set[str]]:
-    """The types, modes and authors the lanes' cards carry, a spec lane's header included, which the picker offers."""
-    cards = [ticket for lane in board.lanes for ticket in (*lane.spec_cards(), *lane.columns_tickets())]
-    return {
-        TYPE: {kind for t in cards if (kind := card_type(t))},
-        MODE: {t.mode for t in cards if t.mode},
-        AUTHOR: {t.author for t in cards if t.author},
-    }
-
-
-_MAP_KEY = re.compile(r"^[A-Z][A-Z0-9]*-\d+$")  # a map picked by its tracker key, e.g. Linear's `TM-1`
-
-
-def map_value(ticket: Ticket) -> str:
-    """How the map filter names a map: its tracker key, else its number."""
-    return ticket.key.upper() if ticket.key else str(ticket.number)
-
-
-def map_ids(ticket: Ticket) -> set[str]:
-    """Every map filter value that selects this map: its number, and its tracker key when it has one."""
-    return {str(ticket.number), map_value(ticket)}
-
-
-def load_filters(saved: dict) -> dict[str, dict[str, str]]:
-    """A repo's saved selection; a value that cannot be one (a map that is no number or key, an unknown assignee) is
-    dropped."""
-    filters = {}
-    for section, key in SAVED_KEYS.items():
-        values = [str(v) for v in saved.get(key, [])] if isinstance(saved.get(key), list) else []
-        if section == MAP:
-            values = [v for v in values if v.isdigit() or _MAP_KEY.match(v)]
-        elif section == ASSIGNEE:
-            values = [v for v in values if v in ASSIGNEES and v != ANYONE][:1]
-        filters[section] = dict.fromkeys(values, INCLUDE)
-    return filters
-
-
-def aged_out(ticket: Ticket, days: int | None, now: datetime) -> bool:
-    """A closed ticket closed more than `days` ago, which the Decided age hides; never an open ticket or one without a
-    close date, and nothing while the age is off (None)."""
-    return (days is not None and not ticket.is_open and ticket.closed_at is not None
-            and now - ticket.closed_at > timedelta(days=days))
-
-
-def budget_pace(quota: Quota, budget: float, now: datetime) -> int:
-    """Whole seconds between ticket fetches that spend at most `budget` points an hour at the last fetch's cost, and
-    longer when the points left would run out before they reset at that pace; 0 for a fetch that cost nothing."""
-    if quota.cost <= 0:
-        return 0
-    pace = quota.cost * 3600 / budget
-    if quota.remaining is not None and quota.resets_at is not None:
-        until_reset = (quota.resets_at - now).total_seconds()
-        if until_reset > 0:
-            pace = max(pace, until_reset if quota.remaining <= 0 else quota.cost * until_reset / quota.remaining)
-    return math.ceil(pace)
-
-
-class Pacer:
-    """When the board fetches tickets and herdr sessions, given the clock's `now`.
-
-    Normally both every `interval`; a pace (GitHub's budget, see budget_pace) longer than that stretches the ticket
-    fetches to it, never the session refreshes. A rate limit slows tickets to once a minute and sessions to every 10s;
-    the first good fetch after that restores the interval, once. A rate limit after that recovery keeps
-    the board slow until it restarts.
-    """
-
-    def __init__(self, interval: float, now: float):
-        self.interval = interval
-        self.limited = False  # backed off right now
-        self.recovered = False  # the one recovery is used up
-        self.stuck = False  # slow until restart
-        self.paced = 0.0  # seconds between ticket fetches the budget asks for; under `interval` it changes nothing
-        self.next_tickets = now
-        self.next_sessions = now
-        self.last_tickets = self.last_sessions = now - interval  # when each fetch last started
-
-    def set_interval(self, interval: float) -> None:
-        """A new interval from the settings menu: the next fetches are due that long after the last ones started.
-        A rate-limit back-off stays: tickets keep its minute, sessions its 10s at least."""
-        self.interval = interval
-        self._reschedule_tickets()
-        self.next_sessions = self.last_sessions + self._sessions_every()
-
-    def pace(self, seconds: float) -> None:
-        """A new pace from the latest quota reading: the next ticket fetch is due `tickets_every` after the last one
-        started. A rate-limit back-off stays."""
-        self.paced = float(seconds)  # a float, as `seconds_text` shows it
-        self._reschedule_tickets()
-
-    def _reschedule_tickets(self) -> None:
-        if not self.limited:
-            self.next_tickets = self.last_tickets + self.tickets_every
-
-    @property
-    def tickets_every(self) -> float:
-        """Seconds between ticket fetches outside a back-off."""
-        return max(self.interval, self.paced)
-
-    def _sessions_every(self) -> float:
-        return max(LIMITED_SESSIONS_EVERY, self.interval) if self.limited else self.interval
-
-    def due(self, now: float) -> tuple[bool, bool]:
-        """(tickets, sessions) to fetch now; a ticket fetch refreshes sessions too."""
-        tickets = now >= self.next_tickets
-        return tickets, tickets or now >= self.next_sessions
-
-    def started(self, now: float, tickets: bool) -> None:
-        self.last_sessions = now
-        if tickets:
-            self.last_tickets = now
-            self.next_tickets = now + (LIMITED_TICKETS_EVERY if self.limited else self.tickets_every)
-        self.next_sessions = now + self._sessions_every()
-
-    def fetched(self, now: float, ok: bool, rate_limited: bool) -> None:
-        if rate_limited:
-            self.stuck = self.stuck or self.recovered
-            self.limited = True
-            self.next_tickets = now + LIMITED_TICKETS_EVERY
-        elif ok and self.limited and not self.stuck:
-            self.limited, self.recovered = False, True
-            self.next_tickets = min(self.next_tickets, now + self.tickets_every)
-            self.next_sessions = min(self.next_sessions, now + self.interval)
-
-    def wait(self, now: float) -> int:
-        """Whole seconds until the next ticket fetch."""
-        return max(0, math.ceil(self.next_tickets - now))
 
 
 class Card(Static, can_focus=True):
@@ -394,20 +217,6 @@ class Cell(Vertical):
         super().__init__(*cards, classes="cell")
         self.column = column
 
-
-class StartPlan(NamedTuple):
-    """The ticket s starts for a card, and how the confirm names it (`via` a map)."""
-
-    ticket: Ticket
-    via: str = ""
-
-
-class Workbench(Protocol):
-    """The session side of the board, see start.Workbench. Every call blocks."""
-
-    def sessions(self) -> dict[int, list[Session]]: ...
-    def start(self, ticket: Ticket) -> str: ...
-    def go_to(self, ticket: Ticket, session: Session) -> str: ...
 
 
 class Confirm(ModalScreen[bool]):
@@ -557,16 +366,6 @@ class FilterPicker(ModalScreen[None]):
     def _paint(self) -> None:
         for option in self.query(PickerOption):
             option.set_mode(self._mode(option.section, option.value))
-
-
-class Setting(NamedTuple):
-    """One field of the settings menu: its key in the repo's settings, its label, its current value as text, and
-    `parse`, which turns the typed text into the value or raises ValueError saying what is wrong."""
-
-    key: str
-    label: str
-    value: str
-    parse: Callable[[str], object]
 
 
 class SettingsMenu(ModalScreen[dict | None]):
@@ -833,10 +632,10 @@ class BoardApp(App):
         clock: Callable[[], float] = time.monotonic,
         map_key: str | None = None,
         wall: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+        starting_dir: Path | None = None,
     ):
-        """`query.named_map`, or `map_key` (a tracker key such as `TM-1`), presets the map filter for this run.
-        `interval` is `--interval`, which wins over the repo's saved interval for this run without replacing it.
-        `clock` schedules the fetches; `wall`, the time of day, tells how long until a tracker quota resets."""
+        """The board's state lives in its BoardModel, see there for the arguments; `columns` and the selection are
+        this view's own."""
         super().__init__()
         self.view = columns  # "auto" (one column below NARROW_WIDTH), "one" or "all"
         self.single = False
@@ -844,42 +643,32 @@ class BoardApp(App):
         self.grid: list[tuple[Card, list[list[Card]]]] = []  # per lane: its header and its cells' cards
         self.provider = provider
         self.workbench = workbench
-        self.describe_start = describe_start or (lambda ticket: "")
-        self.starting: set[int] = set()  # started from this board, until herdr lists its agent or the start fails
-        self.sessions: dict[int, list[Session]] = {}
-        self.settings_path = settings_path  # None: settings live only as long as the board
-        self.settings = load_settings(settings_path) if settings_path else {}
-        self.session_error: str | None = None
-        self.repo_key = f"{provider.name}:{provider.repo}"
-        self.board_query = replace(query, limit=board_fetch_limit(self._repo_settings()))
-        self.cut_off: str | None = None  # what the last ticket fetch cut off at the fetch limit
-        self.interval = board_interval(interval, self._repo_settings(), provider.name)
         self.clock = clock
-        self.wall = wall
-        self.pacer = Pacer(self.interval, clock())
-        self.budget = board_budget(self._repo_settings())  # GitHub points an hour, see budget_pace
-        self.decided_age = board_decided_age(self._repo_settings())  # days; None shows every Decided ticket
-        self.quota: Quota | None = None  # the provider's reading after the last good ticket fetch; GitHub only
+        self.model = BoardModel(provider, query, interval=interval, workbench=workbench, describe_start=describe_start,
+                                settings_path=settings_path, clock=clock, map_key=map_key, wall=wall,
+                                starting_dir=starting_dir)
         self.ticker: Timer | None = None
-        self.fetching = False
-        self.queued: bool | None = None  # a refresh asked for mid-fetch: whether it includes tickets
-        self.board = Board()
-        self.viewer: str | None = None  # the tracker login; asked for with each ticket fetch until known
-        self.needle = ""
-        saved = self.settings.get("filters", {}).get(self.repo_key, {})
-        self.filters = load_filters(saved if isinstance(saved, dict) else {})
-        self.saved_maps = dict(self.filters[MAP])  # what the map section saves while the preset stands
-        named = map_key.upper() if map_key else str(query.named_map) if query.named_map is not None else None
-        # `ticketmaster <map>`: the full board, filtered to that map for this run only; never saved
-        self.map_preset = {named: INCLUDE} if named else None
-        if self.map_preset:
-            self.filters[MAP] = dict(self.map_preset)
-        self.known: dict[str, set[str]] = {}  # the filter values on the board, see known_values
-        self.last_error: str | None = None
-        self.notice: ErrorNotice | None = None  # the tracker error standing since the last good fetch
-        self.last_ok: datetime | None = None
-        named = f" + #{query.named_map}" if query.named_map is not None else ""
-        self.sub_title = f"{provider.name}:{provider.repo} · open maps{named}"
+        self.sub_title = self.model.sub_title
+
+    @property
+    def interval(self) -> float:
+        return self.model.interval
+
+    @property
+    def pacer(self):
+        return self.model.pacer
+
+    @property
+    def filters(self) -> dict[str, dict[str, str]]:
+        return self.model.filters
+
+    @property
+    def needle(self) -> str:
+        return self.model.needle
+
+    @property
+    def starting(self) -> set[int]:
+        return self.model.starting
 
     def compose(self) -> ComposeResult:
         yield Static("loading…", id="status")
@@ -895,168 +684,67 @@ class BoardApp(App):
         self._apply_view()
         self.tick()
         self._start_ticker()
-
     def _start_ticker(self) -> None:
         if self.ticker is not None:
             self.ticker.stop()
         self.ticker = self.set_interval(min(self.interval, 1.0), self.tick)  # 1s at most, for the back-off countdown
 
     def tick(self) -> None:
-        """Fetches whatever the pacer says is due."""
-        if self.pacer.limited:
+        """Reads the starting markers, then fetches whatever the pacer says is due."""
+        if self.model.read_markers():
+            self._render_board()
+        elif self.model.limited:
             self._render_status()
-        tickets, sessions = self.pacer.due(self.clock())
-        if sessions:
-            self._fetch_in_background(tickets)
+        self._fetch_in_background(self.model.due())
 
     def action_refresh(self) -> None:
         """Fetches now, except tickets while rate-limited: then only herdr sessions refresh."""
-        if self.pacer.limited:
-            reason = f" ({self.notice.reason})" if self.notice else ""
-            self.notify(f"Rate-limited{reason}: next ticket fetch in {self.pacer.wait(self.clock())}s", severity="warning")
-        elif self.notice:
-            self.notify(self.notice.text, severity=self.notice.severity, timeout=NOTICE_SECONDS)
+        if notice := self.model.refresh_notice():
+            lasting = {} if self.model.limited else {"timeout": NOTICE_SECONDS}
+            self.notify(notice.text, severity=notice.severity, **lasting)
         self._refresh_now()
 
     def _refresh_now(self) -> None:
-        tickets = not self.pacer.limited
-        if self.fetching:
-            self.queued = tickets or bool(self.queued)  # runs once the fetch in flight lands
-        else:
-            self._fetch_in_background(tickets)
+        self._fetch_in_background(self.model.refresh())
 
-    def _fetch_in_background(self, tickets: bool) -> None:
-        if self.fetching:
-            return  # one fetch at a time; the pacer schedules the next when this one started
-        self.fetching = True
-        self.pacer.started(self.clock(), tickets)
-        self.run_worker(lambda: self._fetch(tickets), thread=True, group="fetch")
-
-    def _fetch(self, tickets: bool = True) -> None:
-        sessions, session_error = self.sessions, None
-        if self.workbench is not None:
-            try:
-                sessions = self.workbench.sessions()
-            except BackendError as exc:
-                session_error = f"{exc.source}: {exc}"
-        if not tickets:
-            self.call_from_thread(self._apply, None, None, sessions, session_error, fetched_tickets=False)
+    def _fetch_in_background(self, plan) -> None:
+        if plan is None:
             return
-        query = self.board_query
-        try:
-            if self.viewer is None:
-                self.viewer = self._viewer()
-            board = build_board(self.provider.fetch(query), query.named_map)
-            cut = getattr(self.provider, "cut_off", [])  # what the fetch cut off at the limit, when it says
-            cut_off = f"cut off at {query.limit}: {', '.join(cut)}" if cut else None
-            quota = getattr(self.provider, "quota", None)  # GitHub's, after this fetch
-            self.call_from_thread(self._apply, board, None, sessions, session_error, cut_off=cut_off, quota=quota)
-        except RateLimited as exc:
-            explain = getattr(self.provider, "explain", None)  # GitHub can say which limit it was
-            self.call_from_thread(self._apply, None, explain(exc) if explain else exc, sessions, session_error,
-                                  rate_limited=True)
-        except ProviderError as exc:
-            self.call_from_thread(self._apply, None, exc, sessions, session_error)
-        except BaseException:
-            self.call_from_thread(setattr, self, "fetching", False)
-            raise
 
-    def _viewer(self) -> str | None:
-        try:
-            return self.provider.viewer()
-        except RateLimited:
-            raise
-        except ProviderError:
-            return None  # claimed tickets then start after the confirm, as before the login was known
+        def work() -> None:
+            try:
+                result = self.model.fetch(plan)
+            except BaseException:
+                self.call_from_thread(self.model.fetch_failed)
+                raise
+            self.call_from_thread(self._apply, result)
 
-    def _apply(self, board: Board | None, error: ProviderError | None, sessions: dict[int, list[Session]] | None = None,
-               session_error: str | None = None, fetched_tickets: bool = True, rate_limited: bool = False,
-               cut_off: str | None = None, quota: Quota | None = None) -> None:
-        self.fetching = False
-        if fetched_tickets:
-            self.pacer.fetched(self.clock(), ok=board is not None, rate_limited=rate_limited)
-            self._tracker_error(error)
-            if quota is not None:
-                self.quota = quota
-            self._pace()
-        if self.queued is not None:
-            tickets, self.queued = self.queued and not self.pacer.limited, None
-            self._fetch_in_background(tickets)
-        changed = False
-        if board is not None:
-            changed = board.lanes != self.board.lanes or self.last_ok is None
-            self.board = board
-            self.cut_off = cut_off
-            self.known = known_values(board)
-            self.last_ok = datetime.now()
-        if sessions is not None and sessions != self.sessions:
-            self.starting -= {n for n in self.starting if any(s.status is not None for s in sessions.get(n, []))}
-            self.sessions = sessions
-            changed = True
-        self.session_error = session_error
-        if changed:
+        self.run_worker(work, thread=True, group="fetch")
+
+    def _apply(self, result) -> None:
+        applied = self.model.apply(result)
+        for notice in self.model.drain_notices():
+            self.notify(notice.text, severity=notice.severity, timeout=NOTICE_SECONDS)
+        self._fetch_in_background(applied.next)
+        if applied.changed:
             self._render_board()  # rebuilding resets scroll, so only when tickets changed
         else:
             self._render_status()
 
-    def _pace(self) -> None:
-        """Paces the ticket fetches to the budget at the last quota reading; without one, they keep the interval."""
-        if self.quota is not None:
-            self.pacer.pace(budget_pace(self.quota, self.budget, self.wall()))
-
-    def _tickets(self) -> list[Ticket]:
-        return self.board.tickets()
-
-    def _visible(self, lane: Lane, column: Column) -> list[Ticket]:
-        """The column's cards that pass the filters, less those the Decided age hides."""
-        now = self.wall()
-        return [t for t in lane.columns[column] if self._passes(t) and not aged_out(t, self.decided_age, now)]
-
-    def _chosen(self, section: str) -> list[str]:
-        """The section's selected values that are on the board, in the picker's order. The preset map counts even
-        when no lane is that map, so a map that is not on the board shows an empty board, not every map."""
-        if section == ASSIGNEE:
-            return list(self.filters[ASSIGNEE])
-        selected = self.filters[section]
-        chosen = [value for value, _ in self._picker_values(section) if value in selected]
-        if section == MAP:
-            on_board = {value for lane in self.board.lanes if lane.is_map for value in map_ids(lane.header)}
-            preset = self.map_preset is not None and selected == self.map_preset
-            chosen += [value for value in selected if value not in chosen and (preset or value in on_board)]
-        return chosen
-
-    def _shown_lanes(self) -> list[Lane]:
-        """The lanes the map filter keeps, which are map lanes only; while cards are filtered, only those with a card
-        that passes (a spec lane's header is its spec card), and a named closed map, which has no cards to pass."""
-        maps = set(self._chosen(MAP))
-        lanes = [lane for lane in self.board.lanes if not maps or lane.is_map and maps & map_ids(lane.header)]
-        if self.needle or any(self.filters[section] for section in CARD_FILTERS):
-            lanes = [lane for lane in lanes if lane.collapsed or any(self._passes(spec) for spec in lane.spec_cards())
-                     or any(self._visible(lane, column) for column in COLUMN_ORDER)]
-        return lanes
-
-    def _passes(self, ticket: Ticket) -> bool:
-        return matches(ticket, self.needle) and passes_filters(ticket, self.filters, self.known, self.viewer)
-
-    def _lane(self, header: Ticket) -> Lane | None:
-        return next((lane for lane in self.board.lanes if lane.header and lane.header.number == header.number), None)
+    def _notify(self, notice: Notice | None) -> None:
+        if notice is not None:
+            self.notify(notice.text, severity=notice.severity)
 
     def _render_board(self) -> None:
         container = self.query_one("#lanes", VerticalScroll)
         focused_widget = container.screen.focused  # the board's, also under the filter picker
         focused = focused_widget.key if isinstance(focused_widget, Card) else None
         container.remove_children()
+        snapshot = self.model.snapshot()
         self.grid, lanes = [], []
-        for lane in self._shown_lanes():
-            head = lane.header
-            text = (render_lane_header(lane, self.sessions.get(head.number, []), head.number in self.starting,
-                                       self._claimed(head), self.sessions, self.starting) if head
-                    else render_lane_header(lane))
-            header = Card(head, None, text)
-            cells = [[Card(t, column, render_card(t, column, self.sessions.get(t.number, []), t.number in self.starting,
-                                                  lane_title(lane), self._claimed(t),
-                                                  LANE_GLYPHS[lane.kind]))
-                      for t in self._visible(lane, column)] for column in COLUMN_ORDER]
+        for lane in snapshot.lanes:
+            header = Card(lane.header.ticket, None, render_lane_header(lane.header))
+            cells = [[Card(view.ticket, column, render_card(view)) for view in views] for column, views in lane.cells]
             self.grid.append((header, cells))
             if lane.collapsed:
                 lanes.append(Vertical(header, classes="lane"))
@@ -1065,64 +753,27 @@ class BoardApp(App):
             for cell in row:
                 cell.display = self._shown(cell.column)
             lanes.append(Vertical(header, Horizontal(*row, classes="lane-row"), classes="lane"))
-        if not lanes and self.last_ok:
-            empty = ("No cards match the filters; Esc clears them." if self.board.lanes
-                     else f"No open wayfinder maps or specs in {self.provider.repo}.")
+        if snapshot.empty is not None:
+            empty = snapshot.empty.text + ("; Esc clears them." if snapshot.empty.filtered else "")
             lanes.append(Static(empty, classes="empty"))  # no id: the previous one may still be attached
         container.mount_all(lanes)
         for column in COLUMN_ORDER:
             head = self.query_one(f"#head-{column.name}", Static)
-            head.update(Text(f"{column.value} ({self._visible_count(column)})", style=f"bold {COLUMN_COLORS[column]}"))
+            head.update(Text(f"{column.value} ({snapshot.counts[column]})", style=f"bold {COLUMN_COLORS[column]}"))
         refocus = next((card for card in self._cards() if card.key == focused), None)
         if refocus is not None:
             self.call_after_refresh(refocus.focus, scroll_visible=False)
         self._render_status()
         self._render_tabs()
 
-    def _claimed(self, ticket: Ticket) -> bool:
-        """Open and assigned; only herdr can tell whether its session is here, so without it nothing is said."""
-        return self.workbench is not None and ticket.is_open and bool(ticket.assignees)
-
     def _cards(self) -> list[Card]:
         """Every card in board order: each lane's header, then its cells left to right."""
         return [card for header, cells in self.grid for card in (header, *(c for cards in cells for c in cards))]
 
-    def _tracker_error(self, error: ProviderError | None) -> None:
-        """One notification per error episode: when an error appears, or turns into another; a good fetch ends it."""
-        notice = None if error is None else error_notice(self.provider.name, error)
-        if notice is not None and (self.notice is None or self.notice.episode != notice.episode):
-            self.notify(notice.text, severity=notice.severity, timeout=NOTICE_SECONDS)
-        self.notice = notice
-        self.last_error = None if notice is None or isinstance(error, RateLimited) else notice.status_text
-
     def _render_status(self) -> None:
-        status = Text(self.sub_title, style="bold")
-        if self.last_ok:
-            status.append(" · ")
-            maps = sum(lane.is_map for lane in self.board.lanes)
-            specs = sum(lane.kind is LaneKind.SPEC for lane in self.board.lanes)
-            tickets = self.board.ticket_count()
-            status.append(f"updated {self.last_ok:%H:%M:%S} · {maps} map{'s' * (maps != 1)}"
-                          + (f" · {specs} spec{'s' * (specs != 1)}" if specs else "") + f" · {tickets} tickets")
-            if not self.pacer.limited:
-                status.append(f" · every {seconds_text(self.pacer.tickets_every)}s")
-                if self.quota is not None and self.quota.remaining is not None:
-                    status.append(f" · {self.quota.remaining:,} pts left")
-            if self.cut_off:
-                status.append(f" · {self.cut_off}", style="bold yellow")
-        if self.pacer.limited:
-            slow = "rate-limited again · once a minute until restart" if self.pacer.stuck else "rate-limited"
-            reason = f" · {self.notice.reason}" if self.notice else ""
-            status.append(f" · {slow} · next fetch in {self.pacer.wait(self.clock())}s{reason}", style="bold yellow")
-        if self.needle:
-            status.append(f" · filter: {self.needle}", style="yellow")
-        for section in SAVED_KEYS:
-            if chosen := self._chosen(section):
-                values = [f"#{v}" if v.isdigit() else v for v in chosen] if section == MAP else chosen
-                status.append(f" · {section.lower()}: {', '.join(values)}", style="yellow")
-        for error in (self.last_error, self.session_error):
-            if error:
-                status.append(f"  ⚠ {error}", style="bold red")
+        status = Text()
+        for segment in self.model.status():
+            status.append(segment.text, style=SEGMENT_STYLES[segment.style])
         self.query_one("#status", Static).update(status)
 
     # --- one column at a time (narrow panes, e.g. a herdr side pane) ------------------------------
@@ -1157,7 +808,7 @@ class BoardApp(App):
         self.query_one("#tabs", Static).update(tabs)
 
     def _visible_count(self, column: Column) -> int:
-        return sum(len(self._visible(lane, column)) for lane in self._shown_lanes())
+        return sum(len(self.model.visible(lane, column)) for lane in self.model.shown_lanes())
 
     def action_toggle_view(self) -> None:
         self.view = "all" if self.single else "one"
@@ -1245,13 +896,10 @@ class BoardApp(App):
             return None
         return self.focused
 
-    def _run(self, job: Callable[[], str]) -> None:
+    def _run(self, job: Callable[[], Notice]) -> None:
         def work() -> None:
-            try:
-                message, severity = job(), "information"
-            except BackendError as exc:
-                message, severity = f"{exc.source}: {exc}", "error"
-            self.call_from_thread(self.notify, message, severity=severity)
+            notice = job()
+            self.call_from_thread(self.notify, notice.text, severity=notice.severity)
             self.call_from_thread(self._refresh_now)
 
         self.run_worker(work, thread=True, group="herdr")
@@ -1262,28 +910,11 @@ class BoardApp(App):
         card = self._card()
         if card is None:
             return
-        ticket, sessions = card.ticket, self.sessions.get(card.ticket.number, [])
-        if not sessions and (lane := self._lane(ticket)) is not None:  # a map card: else its spec's sessions
-            sessions = next((found for spec in lane.specs if (found := self.sessions.get(spec.number))), [])
-        if sessions:
-            session = min(sessions, key=lambda s: s.urgency)
-            self._run(lambda: self.workbench.go_to(ticket, session))
-            return
-        plan = self._start_plan(ticket)
-        if isinstance(plan, str):
-            would = f"s refuses: {plan}"
-        elif plan.ticket.spec_kind == "spec":
-            prompt = self.describe_start(plan.ticket).partition("\n")[0] or "/to-tickets"
-            would = f"s starts {prompt}" + ("" if plan.ticket is ticket else f" on its spec {plan.ticket.ref}")
-        elif plan.ticket is not ticket:
-            would = f"s starts {plan.ticket.ref} {plan.ticket.title}, next on the map"
-        elif ticket.is_wayfinder_map:
-            would = "s starts /wayfinder on the map, its frontier is empty"
-        elif ticket.spec_kind == "impl":
-            would = "s starts " + (self.describe_start(ticket).partition("\n")[0] or "/implement")  # the prompt line
+        found = self.model.primary(card.ticket)
+        if isinstance(found, GoTo):
+            self._run(lambda: self.model.go_to(found))
         else:
-            would = "s starts /wayfinder on it"
-        self.notify(f"{ticket.ref} has no session here; {would}", severity="warning")
+            self.notify(self.model.hint_text(found, "s", GO_TO_LIVE), severity="warning")
 
     def action_start(self) -> None:
         """s: start /to-tickets on a map card's ticketless spec or a ticketless standalone spec card, /wayfinder on
@@ -1293,91 +924,46 @@ class BoardApp(App):
         if card is None:
             return
         ticket = card.ticket
-        map_order = getattr(self.provider, "map_order", None)
-        lane = self._lane(ticket)
-        if not (ticket.is_wayfinder_map and ticket.is_open and map_order) or (lane and lane.ticketless_spec):
+        if not self.model.needs_map_order(ticket):
             self._offer_start(ticket, None)
             return
 
         def work() -> None:  # the tracker's own map order (GitHub sub-issue order) picks the frontier ticket
-            try:
-                order = map_order(ticket.number)
-            except ProviderError:
-                order = None  # the board's own order is the fallback
-            self.call_from_thread(self._offer_start, ticket, order)
+            self.call_from_thread(self._offer_start, ticket, self.model.map_order(ticket))
 
         self.run_worker(work, thread=True, group="herdr")
 
     def _offer_start(self, ticket: Ticket, order: list[int] | None) -> None:
-        plan = self._start_plan(ticket, order)
-        if isinstance(plan, str):
-            self.notify(plan, severity="warning")
+        plan = self.model.start_plan(ticket, order)
+        if isinstance(plan, Refusal):
+            self.notify(plan.text + (GO_TO_LIVE if plan.live else ""), severity="warning")
         else:
-            self._confirm_start(plan.ticket, plan.via)
+            self._confirm_start(plan)
 
-    def _start_plan(self, ticket: Ticket, order: list[int] | None = None) -> StartPlan | str:
-        """What s does on a card, or why it refuses. A map whose open spec has no tickets yet breaks the spec into
-        tickets, the map open or closed; else an open map is worked through its first frontier ticket without a live
-        session, else, with an empty frontier, itself."""
-        if (lane := self._lane(ticket)) is not None and (spec := lane.ticketless_spec) is not None:
-            if refusal := spec.start_refusal(self.viewer):
-                return refusal
-            if self._live(spec.number):
-                return f"{spec.ref} has a live session: press Enter to go to it"
-            return StartPlan(spec)
-        if ticket.is_wayfinder_map and ticket.is_open:
-            taken = {n for n in self.sessions if self._live(n)} | self.starting
-            if ready := frontier(ticket, self._tickets(), taken, order):
-                return StartPlan(ready[0], f" (next on map {ticket.ref})")
-            via = f" (map {ticket.ref}'s frontier is empty)"
-        else:
-            via = ""
-        if refusal := ticket.start_refusal(self.viewer):
-            return refusal
-        if self._live(ticket.number):
-            return f"{ticket.ref} has a live session: press Enter to go to it"
-        return StartPlan(ticket, via)
-
-    def _live(self, number: int) -> bool:
-        """An agent works the ticket, or this board is starting one."""
-        return number in self.starting or any(s.status is not None for s in self.sessions.get(number, []))
-
-    def _confirm_start(self, ticket: Ticket, via: str = "") -> None:
+    def _confirm_start(self, plan: StartPlan) -> None:
         """Asks first; herdr then starts Claude in the ticket's own worktree, new, or continued with
         `claude --continue` when it exists without an agent."""
-        name, branch = worktree_name(ticket), branch_name(ticket)
-        worktree = next((s for s in self.sessions.get(ticket.number, [])  # no live session: each is agentless
-                         if Path(s.path).name in (name, f"worktree-{name}") or s.branch == branch), None)
+        ticket = plan.ticket
 
-        def start() -> str:
-            try:
-                return self.workbench.start(ticket)
-            except BackendError:
-                # a lambda: Textual inspects the callback's signature, and set.discard (a builtin) has none
-                self.call_from_thread(lambda: self.starting.discard(ticket.number))
-                raise
+        def start() -> Notice:
+            notice = self.model.start(ticket)
+            if notice.severity == "error":
+                self.call_from_thread(self.model.start_failed, ticket)
+            return notice
 
         def confirmed(yes: bool | None) -> None:
-            if yes:
-                self.starting.add(ticket.number)
-                self._render_board()
-                self._run(start)
+            if not yes:
+                return
+            if refusal := self.model.begin_start(ticket):  # taken while the confirm was open
+                self.notify(refusal.text + (GO_TO_LIVE if refusal.live else ""), severity="warning")
+                return
+            self._render_board()
+            self._run(start)
 
-        if ticket.spec_kind:
-            where = "its worktree with claude --continue" if worktree else "a new worktree"
-            skill = "/implement" if ticket.spec_kind == "impl" else "/to-tickets"
-            question = f"Start {skill} on {ticket.ref} {ticket.title} in {where}?"
-            detail, yes = self.describe_start(ticket), "Start"
-        elif worktree is None:
-            question = f"Start {ticket.ref} {ticket.title}{via} in a new worktree?"
-            detail, yes = self.describe_start(ticket), "Start"
-        else:
-            question = f"Continue {ticket.ref} {ticket.title}{via} in its worktree {Path(worktree.path).name}?"
-            detail, yes = f"claude --continue in {worktree.path}", "Continue"
-        self.push_screen(Confirm(question, detail, yes), confirmed)
+        self.push_screen(Confirm(*self.model.confirm(plan)), confirmed)
 
     def action_help(self) -> None:
-        self.push_screen(HelpScreen(key_help(self), self.board_query))
+        self.push_screen(HelpScreen(key_help(self), self.model.board_query))
 
     def action_filter(self) -> None:
         box = self.query_one("#filter", Input)
@@ -1386,123 +972,39 @@ class BoardApp(App):
         box.cursor_position = len(self.needle)
         box.focus()
 
-    def _picker_values(self, section: str) -> list[tuple[str, str]]:
-        """(value, label) for each of the section's options, from the board's tickets."""
-        if section == ASSIGNEE:
-            return [(value, value) for value in ASSIGNEES]
-        if section == MAP:
-            return [(map_value(lane.header), f"{lane.header.ref} {lane.header.title}") for lane in self.board.lanes
-                    if lane.is_map]
-        known = self.known.get(section, set())
-        if section == AUTHOR:
-            return [(author, author) for author in sorted(known, key=str.lower)]
-        order = CARD_TYPES if section == TYPE else MODES
-        return [(value, value) for value in order if value in known]
-
     def action_pick_filter(self) -> None:
         def changed() -> None:
-            self._save_filters()
+            self._notify(self.model.save_filters())
             self._render_board()
 
-        sections = {section: self._picker_values(section) for section in SAVED_KEYS}
-        self.push_screen(FilterPicker(sections, self.filters, changed, {ASSIGNEE: ANYONE}),
+        self.push_screen(FilterPicker(self.model.picker_sections(), self.model.filters, changed, {ASSIGNEE: ANYONE}),
                          lambda _: self.call_after_refresh(self.action_move, 0, 0))
 
-    def _save_filters(self) -> None:
-        """Saves the picker's selection per repo; a saved value no longer on the board stays saved. While the map
-        preset stands, the map section keeps what was saved before; a map number is saved as a number."""
-        if self.map_preset is None or self.filters[MAP] != self.map_preset:
-            self.saved_maps = dict(self.filters[MAP])
-        selection = {**self.filters, MAP: self.saved_maps}
-        filters = self.settings.setdefault("filters", {})
-        filters[self.repo_key] = {
-            key: [int(v) if v.isdigit() else v for v in sorted(selection[section], key=lambda v: (len(v), v))]
-            if section == MAP else sorted(selection[section]) for section, key in SAVED_KEYS.items()}
-        self._write_settings("filter")
-
-    def _write_settings(self, what: str) -> None:
-        """Writes settings.json; a failure is a warning naming `what` was not saved."""
-        if self.settings_path:
-            try:
-                save_settings(self.settings_path, self.settings)
-            except OSError as exc:
-                self.notify(f"{what} not saved: {exc}", severity="warning")
-
     def action_settings(self) -> None:
-        fields = [Setting("interval", "Refresh interval (seconds)", seconds_text(self.interval), parse_interval),
-                  Setting("fetch_limit", "Fetch limit (open maps, and tickets per map)", str(self.board_query.limit),
-                          parse_fetch_limit),
-                  Setting("decided_age", "Decided age (days; empty shows every Decided ticket)",
-                          "" if self.decided_age is None else str(self.decided_age), parse_decided_age)]
-        if self.provider.name == "github":
-            fields.append(Setting("budget", "GitHub budget (GraphQL points an hour)", seconds_text(self.budget),
-                                  parse_budget))
-        self.push_screen(SettingsMenu(fields), self._apply_settings)
+        self.push_screen(SettingsMenu(self.model.settings_fields()), self._apply_settings)
 
     def _apply_settings(self, values: dict | None) -> None:
-        """Applies the menu's values, the interval and the Decided age at once and the fetch limit from the next
-        fetch, and saves those that differ from the repo's saved ones, also a value that `--interval` already set for
-        this run, but not an unchanged default fetch limit; an empty Decided age removes the saved one. Esc (None)
-        changes nothing."""
+        """Applies and saves the menu's values (see BoardModel.apply_settings); Esc (None) changes nothing."""
         if values is None:
             return
-        interval, limit, budget = values["interval"], values["fetch_limit"], values.get("budget", self.budget)
-        if interval != self.interval or budget != self.budget:
-            if interval != self.interval:
-                self.interval = interval
-                self.pacer.set_interval(interval)
-                self._start_ticker()
-            self.budget = budget
-            self._pace()
-            self._render_status()
-        saved = {"interval": int(interval) if interval.is_integer() else interval}
-        if limit != self.board_query.limit or "fetch_limit" in self._repo_settings():
-            self.board_query = replace(self.board_query, limit=limit)
-            saved["fetch_limit"] = limit
-        if "budget" in values and (budget != DEFAULT_BUDGET or "budget" in self._repo_settings()):
-            saved["budget"] = int(budget) if budget.is_integer() else budget  # an untouched default stays a default
-        age = values["decided_age"]
-        if age != self.decided_age:
-            self.decided_age = age
+        applied = self.model.apply_settings(values)
+        if applied.interval:
+            self._start_ticker()
+        self._render_status()
+        if applied.board:
             self._render_board()
             self.call_after_refresh(self.action_move, 0, 0)
-        stale = age is None and "decided_age" in self._repo_settings()
-        if age is not None:
-            saved["decided_age"] = age
-        if stale or any(self._repo_settings().get(key) != value for key, value in saved.items()):
-            repo = self._repo_settings(create=True)
-            repo.update(saved)
-            if stale:
-                del repo["decided_age"]
-            self._write_settings("settings")
-
-    def _repo_settings(self, create: bool = False) -> dict:
-        """This repo's entry under `repos` in settings.json; `create` makes it, replacing one that is no dict."""
-        repos = self.settings.get("repos")
-        if not isinstance(repos, dict):
-            if not create:
-                return {}
-            repos = self.settings["repos"] = {}
-        saved = repos.get(self.repo_key)
-        if not isinstance(saved, dict):
-            if not create:
-                return {}
-            saved = repos[self.repo_key] = {}
-        return saved
+        self._notify(applied.notice)
 
     def action_clear_filter(self) -> None:
         box = self.query_one("#filter", Input)
         box.remove_class("visible")
-        self.needle = ""
-        if any(self.filters.values()):
-            for selection in self.filters.values():
-                selection.clear()
-            self._save_filters()
+        self._notify(self.model.clear_filters())
         self._render_board()
         self.call_after_refresh(self.action_move, 0, 0)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.needle = event.value.strip()
+        self.model.needle = event.value.strip()
         event.input.remove_class("visible")
         self._render_board()
         self.call_after_refresh(self.action_move, 0, 0)
