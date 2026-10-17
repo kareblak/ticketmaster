@@ -1,14 +1,14 @@
 # ticketmaster
 
 A live, read-only swimlane board of [wayfinder](https://github.com/mattpocock/skills) maps and
-standalone specs for [herdr](https://herdr.dev), packaged as a Claude Code plugin. Run `/ticketmaster` in a
-Claude session inside herdr and the board opens in a pane beside it. Every open map is a lane, and its
-decision tickets sit in Blocked · Frontier · Claimed · Decided; on GitHub, GitLab, Gitea/Forgejo and Linear, so
-is every standalone spec written by `/to-spec`, with its `/to-tickets` tickets, and on GitHub one Loose lane holds the `/to-tickets`
+standalone specs, packaged as a Claude Code plugin. Run `/ticketmaster` in a Claude session and the board
+opens beside it: in a new window of the terminal you are using, or, inside [herdr](https://herdr.dev), in a
+pane next to the session. Herdr is optional. Every open map is a lane, and its decision tickets sit in
+Blocked · Frontier · Claimed · Decided; on GitHub, GitLab, Gitea/Forgejo and Linear, so is every standalone spec written by `/to-spec`, with its `/to-tickets` tickets, and on GitHub one Loose lane holds the `/to-tickets`
 tickets with no spec parent. `s` starts `/wayfinder` for a ticket, `/to-tickets` on a spec or `/implement` on
-its tickets, in its own git worktree, opened as a herdr workspace with Claude running in it as a herdr
-agent, and each card shows what that agent is doing. It refreshes every 5 seconds. The board never writes to the
-tracker or the repo, and never removes a worktree.
+its tickets, in its own git worktree, with Claude running in it: in a new terminal window, or in herdr as an
+agent in a workspace of its own. Each card shows what that session is doing. It refreshes every 5 seconds. The
+board never writes to the tracker or the repo, and never removes a worktree.
 
 ```
 ‹ 1 Blocked 1 ·  2 Frontier 2  · 3 Claimed 1 · 4 Decided 3 ›
@@ -21,9 +21,11 @@ grilling ·  HITL  ◆ Pick a stack
 
 ## Install
 
-Needs [herdr](https://herdr.dev), Python 3.11+ as `python3`, Claude Code, and the CLI for your
+Needs Python 3.11+ as `python3`, Claude Code, macOS or Linux, and the CLI for your
 tracker (`gh`, `glab`, a `tea` login for Gitea/Forgejo, or a Linear API key or `ticketmaster login`, see
-[Providers](#providers)). In Claude Code:
+[Providers](#providers)). [herdr](https://herdr.dev) is optional: without it the board and its sessions open
+in windows of your terminal (see [Sessions in a plain terminal](#sessions-in-a-plain-terminal)). In Claude
+Code:
 
 ```
 /plugin marketplace add kareblak/ticketmaster
@@ -38,8 +40,8 @@ installed per project: the board reads the repo it is started in.
 The command is a wrapper, `bin/ticketmaster`. On its first run it builds a venv from the plugin's own
 source in the plugin's data dir (`~/.claude/plugins/data/ticketmaster-kareblak/venv`) with
 `python3 -m venv` and pip, which takes a minute; later runs reuse it, and a new version rebuilds it.
-The herdr board pane runs the wrapper by its absolute path, since plugin `bin/` is not on the pane's
-PATH. If the build fails, the wrapper says why and exits 3; fix it (usually an older `python3`) and run
+The board's herdr pane or terminal window runs the wrapper by its absolute path, since plugin `bin/` is not
+on its PATH. If the build fails, the wrapper says why and exits 3; fix it (usually an older `python3`) and run
 `/ticketmaster` again.
 
 Update with `/plugin update ticketmaster`; there is no other update path. Uninstall with
@@ -64,45 +66,67 @@ ticketmaster login
 ticketmaster cleanup MAP [--dry-run] [--backend NAME]
 ```
 
-`open` is the default command: it opens the board in a herdr pane right of the
-calling pane (the focused pane when `HERDR_PANE_ID` is stale or another session's), labelled
-`ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there.
-Typed at a shell rather than run by Claude (no `CLAUDECODE` in the env), it runs the board right in
-the current pane, with no split. `open` and `cleanup` run through a session backend, which opens the
-board and starts, finds and cleans up sessions; `herdr` is the only one so far, available inside herdr
-(`HERDR_ENV=1` and `herdr` on PATH). It is `--backend` for this run, else `TICKETMASTER_BACKEND`, else
-`backend = "<name>"` in `.ticketmaster.toml`, else the first available. A named backend that is unknown or
-unavailable exits 2 with the reason (an unknown name lists the known ones), never falling back to
-another; with none available it exits 2 too. A `--backend` given to `open` carries over to the board pane. `login` logs in to Linear with OAuth instead of an API key
+`open` is the default command: it opens the board beside the calling Claude session, through the session
+backend. In herdr it opens in a pane right of the calling pane (the focused pane when `HERDR_PANE_ID` is stale or
+another session's), labelled `ticketmaster`; run again, it restarts there; run in that pane, it runs the board
+right there. In a plain terminal it opens in a new window of your terminal and prints one line, e.g.
+`Board opened in a new Ghostty window (replaced the previous one), for github:kareblak/ticketmaster.`; run again
+from the same Claude session, it stops that session's previous board, so each Claude session keeps one board (see
+[Sessions in a plain terminal](#sessions-in-a-plain-terminal)). When no terminal window can be opened (over SSH,
+without a display, no terminal found, macOS Automation denied, the Bash sandbox) it exits 1 with the reason, a
+`cd '<dir>' && …` line to paste into a terminal and how to set the `terminal` override. Typed at a shell rather
+than run by Claude (no `CLAUDECODE` in the env), it runs the board right in the current pane or terminal, with no
+split or window, in either backend.
+
+`open` and `cleanup` run through a session backend, which opens the board and starts, finds and cleans up
+sessions:
+
+| Backend | Available                                  | Board                        | A card's session                         |
+| ------- | ------------------------------------------ | ---------------------------- | ---------------------------------------- |
+| `herdr` | inside herdr (`HERDR_ENV=1` and `herdr` on PATH) | a pane beside the Claude session | a herdr workspace with Claude as an agent |
+| `plain` | always                                     | a new terminal window        | a new terminal window running `claude`   |
+
+The backend is `--backend` for this run, else `TICKETMASTER_BACKEND`, else `backend = "<name>"` in
+`.ticketmaster.toml`, else detected: `herdr` inside herdr, `plain` everywhere else. A named backend that is unknown
+or unavailable exits 2 with the reason (`backend herdr unavailable: HERDR_ENV is not 1`, or `herdr not on PATH`;
+an unknown name lists the known ones), never falling back to another. A `--backend` given to `open` carries over to
+the board pane or window. `login` logs in to Linear with OAuth instead of an API key
 (see [Providers](#providers)); it runs anywhere.
 
 `cleanup MAP --dry-run` lists what a map, open or closed, leaves behind: the worktrees of the map and its
-decision, spec and implementation tickets (herdr's `~/.herdr/worktrees/<repo>/` and Claude's
-`.claude/worktrees/` alike) with their branches, herdr workspaces and agents, a ticket branch left without a
-worktree, and an agent titled with one of the tickets that runs elsewhere. Each is **removable** when its
+decision, spec and implementation tickets (herdr's `~/.herdr/worktrees/<repo>/`, Claude's `.claude/worktrees/`
+and any other place `git worktree list` names alike) with their branches and what the session backend has in them
+(herdr workspaces and agents, or the `claude agents` sessions running there), a ticket branch left without a
+worktree, and, in herdr, an agent titled with one of the tickets that runs elsewhere. Each is **removable** when its
 ticket is closed, or a PR that closes it is merged (GitHub), and it has no uncommitted changes; otherwise it is
-**kept**, with the reasons: open ticket, unmerged PR, uncommitted changes. Merged comes from the tracker, never
+**kept**, with the reasons: open ticket, unmerged PR, uncommitted changes, and in a plain terminal `live session`
+for a worktree a Claude session runs in, or `sessions unreadable` for every worktree when `claude agents --json`
+fails (branch-only entries are judged as usual). Merged comes from the tracker, never
 from unpushed commits, which a squash merge with its remote branch deleted leaves behind. The worktree the
-command runs in (its directory, or its herdr pane's workspace or agent) is judged like the others and marked to
-go last. With `--dry-run` it changes nothing. It runs through the session backend, as `open` does.
+command runs in (its directory, its herdr pane's workspace or agent, or its own Claude session) is judged like the
+others and marked to go last. With `--dry-run` it changes nothing. It runs through the session backend, as `open`
+does, and both backends judge worktrees by the same rules, whichever backend made them.
 
 `cleanup MAP` without `--dry-run` removes what the dry run marks removable, on a closed map only: an open map
 is refused with a non-zero exit and nothing changed, since a human closes the map in the tracker. For each
-removable entry it closes the herdr workspace open on the worktree and any agent of it in another workspace,
+removable entry, in herdr it first closes the herdr workspace open on the worktree and any agent of it in another
+workspace (a plain terminal has nothing to close, since a live session keeps its worktree), then
 removes the worktree (`git worktree remove`, which refuses one changed since the look, and then keeps the
 branch too), and deletes the branch with `git branch -d`, which keeps a branch git calls unmerged into the
 checkout it runs from, such as one whose PR was squash-merged. Nothing is forced. Kept entries are left alone, and the summary lists what was
 removed and what was kept, with the reasons. It exits non-zero when git or herdr refused a step.
 
 Run from inside one of the map's worktrees, as a `tm-<n>` session's last step, cleanup removes every other entry
-first, then its own worktree and branch, prints the whole summary, and only then closes its own herdr workspace
-(or pane), which ends the session. If its own worktree is kept (uncommitted changes, an open ticket, an unmerged
-PR) or git refuses to remove it, the summary says why and the workspace stays open.
+first, then its own worktree and branch, and prints the whole summary. In herdr it only then closes its own herdr
+workspace (or pane), which ends the session. In a plain terminal it closes nothing: the summary says `cleanup ran
+in it`, and the session is left in a removed directory, for you to close its window. If its own worktree is kept
+(uncommitted changes, an open ticket, an unmerged PR) or git refuses to remove it, the summary says why and the
+workspace or window stays as it is.
 
 End to end, a map's work finishes in four steps. The tickets' PRs merge. A human closes the map in the tracker.
 The session that finished the map's last work runs `ticketmaster cleanup MAP --dry-run` and relays the list, then
 runs `ticketmaster cleanup MAP` as its final step, since the real run can end the session. Afterwards the map's
-merged worktrees, their branches, and their herdr workspaces and agents are gone, the session's own worktree last;
+merged worktrees, their branches, and in herdr their workspaces and agents are gone, the session's own worktree last;
 only kept entries remain, each with its reason. While the map is still open, the dry run's first line says so
 and the session goes no further: it says cleanup waits for the map to be closed, and stops.
 
@@ -120,14 +144,14 @@ The board refreshes every 5 s, every 30 s on Linear; `--interval` sets another f
 [settings menu](#settings) (`c`) saves one per repo. On GitHub, ticket fetches slow down further to stay
 within a [GraphQL budget](#providers).
 
-The board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
+A herdr board pane takes about a third of the width, so it shows one column at a time: `←`/`→`
 switch columns, `1`–`4` jump to one, `v` shows all side by side (`--columns` sets the start).
 
 ## Keys
 
 | Key            | Column            | Effect                                                              |
 | -------------- | ----------------- | ------------------------------------------------------------------- |
-| `Enter` / double-click | any       | go to the card's most urgent session, else its worktree with a shell; with neither, the status line says what `s` would do there or why it refuses. It never starts or resumes Claude |
+| `Enter` / double-click | any       | go to the card's most urgent session (in a plain terminal, say where it runs), else its worktree with a shell; with neither, the status line says what `s` would do there or why it refuses. It never starts or resumes Claude |
 | `s`            | all but Decided   | start `/wayfinder` for the ticket, `/implement` on an `impl` card, or `/to-tickets` on a map card whose spec has no tickets yet or on a standalone spec card without tickets, in its own `issue-<n>` worktree, or continue Claude in it when it has no agent (asks first); refused when closed, blocked, assigned to someone else or live (press `Enter`) |
 | `o`            | any               | open the issue in the browser                                       |
 | `/` `Esc` `r` `q` |                | free-text filter, clear every filter, refresh now, quit             |
@@ -207,6 +231,73 @@ resumed. A map card goes only to the map's own session or worktree, never to one
 
 The board only reads; `cleanup MAP` without `--dry-run` is the one command that changes anything.
 Wayfinder claims its tickets by assigning them, so the card moves to Claimed on the next refresh.
+
+## Sessions in a plain terminal
+
+Outside herdr (or with `--backend plain`), the `plain` backend uses windows of your own terminal. Cards, prompts,
+skills and refusals are the same as in [Sessions in herdr](#sessions-in-herdr); where the sessions run, how their
+status is read and what cleanup closes differ.
+
+**Windows.** Run by Claude, whose Bash tool has no terminal, `open` always opens the board in a new window; typed
+at a shell, the board runs in place. Each Claude session keeps one board: a pidfile under the repo's git common
+dir, keyed by `CLAUDE_CODE_SESSION_ID` (per repo when that is unset), so running `/ticketmaster` again from the
+same session stops its old board once the new window opens, while another Claude session's board stays. `s` opens
+each card's session in a new window, in the background where the terminal allows it, so the board keeps the focus
+and stays up. A window always opens as a new window, never a tab, and its environment drops `CLAUDECODE`,
+`CLAUDE_CODE_*` and `HERDR_*`, so Claude there does not think it is nested.
+
+**Worktrees.** A fresh card gets a worktree at `<repo>/.claude/worktrees/<name>` (`issue-<n>`, `tm-<n>` on
+Linear) on a branch of the same name (on Linear, the issue's branch name), cut from the repo's HEAD, and its window runs
+`claude -n "#<n> <title>" "<prompt>"` there. A card that already has a worktree, made by herdr, by this backend or
+by `claude -w`, gets `claude -n "#<n> <title>" --continue` in it instead, never a second copy. When git does not
+already ignore `.claude/worktrees/`, it is added once to the repo's `.git/info/exclude`, never committed, so the
+worktrees stay out of `git status`. A leftover branch without a worktree is refused: `branch X exists without a
+worktree; check it out in one or delete it, then s again`.
+
+**Status.** Session status comes from `claude agents --json`, matched to the repo's ticket worktrees by each
+session's working directory, so a `claude` you started by hand in a card's worktree shows too. A card shows
+`● working`, `⚠ needs you` (with what the session waits for) or `◌ idle`; a finished turn is `idle`, never
+`✓ done`. A status the CLI does not name is `? unknown`, and counts as live. A worktree with no session shows
+`○ no agent`, and a claimed ticket without a worktree here `◇ claimed, no session here`. When `claude agents`
+fails (missing, non-zero exit, unparseable output), the board keeps the last good badges and the status line shows
+`⚠ claude agents: <error>` until the next good read; before any good read this run, every worktree shows
+`· status unavailable`. `s` reads `claude agents` again, and refuses with `can't check for a live session: <error>`
+whenever that read fails.
+
+**Starting and going to a card.** `s` reads the sessions again just before it launches, and refuses with
+`live session: press Enter` when one runs in the worktree. A second `s` on the card within 30 s of a start is
+refused while its session comes up. When no window can be opened, the status line shows the
+`cd '<worktree>' && claude …` line to paste into a terminal, and the card is not marked as starting. `Enter` on a
+card with a live session opens nothing, since the board cannot raise another terminal's window: the status line
+says `running in <path>` for its most urgent session. On a worktree with no session, `Enter` opens a new window
+with a shell there. `Enter` never starts or resumes Claude.
+
+**Cleanup.** `ticketmaster cleanup MAP` judges worktrees as in herdr and removes git worktrees and branches only,
+closing no window; a worktree kept as `live session` frees up once you close the window running Claude there and
+run cleanup again (see [Usage](#usage)).
+
+**Which terminal.** The board's window, and every card's, opens in the terminal found first:
+
+1. the override, `TICKETMASTER_TERMINAL`, else `terminal` in `.ticketmaster.toml`: an argv template with `{dir}`
+   (the directory) and `{cmd}` (the command), e.g. `TICKETMASTER_TERMINAL='kitty --directory {dir} {cmd}'`;
+2. none over SSH, or on Linux without `DISPLAY` or `WAYLAND_DISPLAY`;
+3. the terminal a terminal's own env variable names (kitty, Alacritty, WezTerm, Ghostty, Konsole, GNOME Terminal,
+   iTerm2), then a known `TERM_PROGRAM`;
+4. on macOS, the app `__CFBundleIdentifier` names, then the frontmost app (through `lsappinfo`, which asks for no
+   consent), when it is Terminal.app, iTerm2, Ghostty, kitty, WezTerm or Alacritty; Claude's Bash tool hides the
+   env markers of Terminal.app and iTerm2, so this is how those are found;
+5. on Linux, `xdg-terminal-exec`, then `$TERMINAL`, then `x-terminal-emulator`, then Ghostty, WezTerm, kitty,
+   Alacritty, GNOME Terminal or Konsole on PATH;
+6. Terminal.app on macOS.
+
+```toml
+backend = "plain"                              # optional; herdr or plain, for this repo
+terminal = "wezterm start --cwd {dir} -- {cmd}"  # optional; the terminal to open windows in
+```
+
+On macOS, Terminal.app, iTerm2 and Ghostty open windows through AppleScript, so the first window asks for macOS
+Automation consent. Denied (`-1743`), or blocked by the Bash sandbox (`-600`; set `sandbox.allowAppleEvents`, or
+add `"ticketmaster *"` to `sandbox.excludedCommands`), the failure says so with the line to paste instead.
 
 ## Filters
 
@@ -441,7 +532,7 @@ token, so a GitHub board paces itself to a budget: 1,000 points an hour by defau
 [settings menu](#settings). Ticket fetches come every `--interval` while that is cheap enough, or every
 `last fetch's cost × 3600 / budget` seconds when that is longer, and longer still when the points left
 would run out before the quota resets at that pace. The status line shows the pace and the points left,
-e.g. `every 22s · 3,412 pts left`. Herdr session refreshes keep the refresh interval, and `r` fetches at
+e.g. `every 22s · 3,412 pts left`. Session refreshes keep the refresh interval, and `r` fetches at
 once, with the next scheduled fetch one paced interval after it. The rate-limit back-off below overrides
 the pace while it lasts.
 
@@ -452,7 +543,7 @@ standalone specs' sub-issues; each stays under half of Linear's 10,000-point
 complexity cap per query.
 
 When the tracker rate-limits the board (GitHub's primary or secondary limit, an HTTP 429 from
-GitLab or Gitea/Forgejo, or Linear's HTTP 400 `RATELIMITED`), ticket fetches drop to once a minute and herdr session states to every
+GitLab or Gitea/Forgejo, or Linear's HTTP 400 `RATELIMITED`), ticket fetches drop to once a minute and session states to every
 10s; the status line shows `rate-limited · next fetch in 42s · secondary limit`, and `r` refreshes
 only the sessions. The first good fetch restores the refresh interval, once: a second rate limit keeps the
 board at once a minute until you restart it.

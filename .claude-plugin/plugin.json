@@ -1,7 +1,7 @@
 {
   "name": "ticketmaster",
   "version": "0.3.6",
-  "description": "A live, read-only herdr board of wayfinder maps and tickets (GitHub, GitLab, Gitea/Forgejo, Linear) that jumps to and starts /wayfinder sessions in their own worktrees.",
+  "description": "A live, read-only board of wayfinder maps and tickets (GitHub, GitLab, Gitea/Forgejo, Linear) that jumps to and starts /wayfinder sessions in their own worktrees, in a terminal window or in herdr.",
   "author": {
     "name": "Kåre Blakstad",
     "url": "https://github.com/kareblak"

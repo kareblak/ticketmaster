@@ -9,7 +9,7 @@
     {
       "name": "ticketmaster",
       "source": "./",
-      "description": "A live, read-only herdr board of wayfinder maps and tickets that jumps to and starts /wayfinder sessions.",
+      "description": "A live, read-only board of wayfinder maps and tickets that jumps to and starts /wayfinder sessions, in a terminal window or in herdr.",
       "category": "productivity",
       "keywords": ["herdr", "wayfinder", "kanban", "issues", "worktrees"]
     }
