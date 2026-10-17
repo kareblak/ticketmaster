@@ -400,7 +400,7 @@ def test_the_starting_marker_is_seen_by_another_model_and_expires_after_30_secon
     assert (markers / "1").exists() and 1 not in two.starting
     wall.now += timedelta(seconds=1)
     assert two.read_markers() and 1 in two.starting
-    assert two.start_plan(TICKETS[1]) == Refusal("#1 has a live session", live=True)
+    assert two.start_plan(TICKETS[1]) == Refusal("#1 is being started from another board")
     assert "starting" in [b.kind for b in two.snapshot().lanes[0].cells[1][1][0].badges]
     wall.now += timedelta(seconds=29)
     assert not two.read_markers() and 1 in two.starting  # 30 s old: still starting
@@ -420,3 +420,24 @@ def test_a_failed_start_or_a_live_agent_removes_the_marker(tmp_path):
     bench.current = {1: [Session(1, "/w/issue-1", status="working")]}
     model.apply(model.fetch(model.refresh()))
     assert not (markers / "1").exists() and 1 not in model.starting
+
+
+def test_a_start_confirmed_on_two_boards_at_once_begins_on_one(tmp_path):
+    wall, markers = Wall(), tmp_path / "starting"
+    one = a_model(bench=FakeBench(), wall=wall, starting_dir=markers)
+    two = a_model(bench=FakeBench(), wall=wall, starting_dir=markers)
+    assert isinstance(one.start_plan(TICKETS[1]), StartPlan) and isinstance(two.start_plan(TICKETS[1]), StartPlan)
+    assert one.begin_start(TICKETS[1]) is None
+    assert two.begin_start(TICKETS[1]) == Refusal("#1 is being started from another board")
+    assert one.begin_start(TICKETS[1]) == Refusal("#1 has a live session", live=True)
+    wall.now += timedelta(seconds=31)
+    assert two.begin_start(TICKETS[1]) is None  # a stale marker is replaced
+
+
+def test_a_settings_save_writes_only_what_it_changed(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"repos": {"fake:o/r": {"interval": 60, "decided_age": 7}}}))
+    one, two = a_model(settings_path=path), a_model(settings_path=path)
+    two.apply_settings({"interval": 60.0, "fetch_limit": 300, "decided_age": 3})
+    one.apply_settings({"interval": 20.0, "fetch_limit": 300, "decided_age": 7})
+    assert json.loads(path.read_text())["repos"]["fake:o/r"] == {"interval": 20, "decided_age": 3}

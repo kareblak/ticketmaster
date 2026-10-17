@@ -644,8 +644,9 @@ class BoardApp(App):
         self.provider = provider
         self.workbench = workbench
         self.clock = clock
-        self.model = BoardModel(provider, query, interval, workbench, describe_start, settings_path, clock, map_key,
-                                wall, starting_dir)
+        self.model = BoardModel(provider, query, interval=interval, workbench=workbench, describe_start=describe_start,
+                                settings_path=settings_path, clock=clock, map_key=map_key, wall=wall,
+                                starting_dir=starting_dir)
         self.ticker: Timer | None = None
         self.sub_title = self.model.sub_title
 
@@ -951,10 +952,13 @@ class BoardApp(App):
             return notice
 
         def confirmed(yes: bool | None) -> None:
-            if yes:
-                self.model.begin_start(ticket)
-                self._render_board()
-                self._run(start)
+            if not yes:
+                return
+            if refusal := self.model.begin_start(ticket):  # taken while the confirm was open
+                self.notify(refusal.text + (GO_TO_LIVE if refusal.live else ""), severity="warning")
+                return
+            self._render_board()
+            self._run(start)
 
         self.push_screen(Confirm(*self.model.confirm(plan)), confirmed)
 

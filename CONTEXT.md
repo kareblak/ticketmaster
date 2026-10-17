@@ -49,8 +49,6 @@ What `s` starts a session on: wayfinder work (a map, a ticket on one, a map spec
 work (a standalone spec and the tickets in its spec lane), or a loose ticket. Anything else is refused.
 
 **Starting**:
-A ticket whose session a board has begun to start and whose agent herdr does not list yet. The start writes a marker,
-`<git common dir>/ticketmaster/starting/<n>` holding its time; every board of the repo, in any Claude session, reads
-the markers each second, shows the card `▶ starting…` and refuses a second start, and ignores a marker older than
-30 s. The marker goes when the agent shows up or the start fails.
+The state of a ticket a board has begun a session for, until herdr lists its agent. Every board of the repo, in any
+Claude session, sees it as starting and refuses a second start on it.
 _Avoid_: launching, pending

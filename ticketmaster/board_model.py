@@ -337,7 +337,7 @@ def card_view(ticket: Ticket, column: Column, sessions: list[Session] = (), star
     if column is Column.DECIDED:
         return CardView(ticket, column, lane_kind=lane_kind)
     chips = []
-    if kind := ticket.wayfinder_type or ticket.spec_kind:
+    if kind := card_type(ticket):
         chips.append(Chip("type", kind))
         if ticket.wayfinder_type and ticket.mode:
             chips.append(Chip("mode", ticket.mode))
@@ -646,13 +646,25 @@ class BoardModel:
         self.marked = marked
         return self.starting != before
 
-    def _mark(self, number: int) -> None:
-        if self.starting_dir is not None:
+    def _mark(self, number: int) -> bool:
+        """Writes the ticket's marker, created exclusively so two boards confirming at once cannot both start it;
+        False when a fresh marker is already there. A stale one is replaced."""
+        if self.starting_dir is None:
+            return True
+        marker = self.starting_dir / str(number)
+        try:
+            self.starting_dir.mkdir(parents=True, exist_ok=True)
             try:
-                self.starting_dir.mkdir(parents=True, exist_ok=True)
-                (self.starting_dir / str(number)).write_text(f"{self.wall().timestamp()}\n")
-            except OSError:
-                pass  # this board still knows; other views find out from herdr
+                with marker.open("x") as out:
+                    out.write(f"{self.wall().timestamp()}\n")
+            except FileExistsError:
+                self.read_markers()
+                if number in self.marked:
+                    return False
+                marker.write_text(f"{self.wall().timestamp()}\n")
+        except OSError:
+            pass  # this board still knows; other views find out from herdr
+        return True
 
     def _unmark(self, number: int) -> None:
         self.marked.discard(number)
@@ -792,10 +804,11 @@ class BoardModel:
         if age is not None:
             saved["decided_age"] = age
         notice = None
-        if stale or any(self._repo_settings().get(key) != value for key, value in saved.items()):
-            def change(settings: dict) -> None:
+        changed = {key: value for key, value in saved.items() if self._repo_settings().get(key) != value}
+        if stale or changed:
+            def change(settings: dict) -> None:  # only what changed, so a key another board saved stays
                 repo = self._repo_settings(create=True, settings=settings)
-                repo.update(saved)
+                repo.update(changed)
                 if stale:
                     repo.pop("decided_age", None)
 
@@ -902,8 +915,8 @@ class BoardModel:
         if (lane := self.lane(ticket)) is not None and (spec := lane.ticketless_spec) is not None:
             if refusal := spec.start_refusal(self.viewer):
                 return Refusal(refusal)
-            if self.live(spec.number):
-                return Refusal(f"{spec.ref} has a live session", live=True)
+            if refusal := self._busy(spec):
+                return refusal
             return StartPlan(spec)
         if ticket.is_wayfinder_map and ticket.is_open:
             taken = {n for n in self.sessions if self.live(n)} | self.starting
@@ -914,9 +927,20 @@ class BoardModel:
             via = ""
         if refusal := ticket.start_refusal(self.viewer):
             return Refusal(refusal)
-        if self.live(ticket.number):
-            return Refusal(f"{ticket.ref} has a live session", live=True)
+        if refusal := self._busy(ticket):
+            return refusal
         return StartPlan(ticket, via)
+
+    def _busy(self, ticket: Ticket) -> Refusal | None:
+        """Why a ticket with a session, or one being started, starts nothing: another board's start has no session
+        to go to yet."""
+        number = ticket.number
+        if number in self.marked and number not in self.own_starting and not any(
+                s.status is not None for s in self.sessions.get(number, [])):
+            return Refusal(f"{ticket.ref} is being started from another board")
+        if self.live(number):
+            return Refusal(f"{ticket.ref} has a live session", live=True)
+        return None
 
     def live(self, number: int) -> bool:
         """An agent works the ticket, or a view is starting one."""
@@ -941,10 +965,16 @@ class BoardModel:
         return ConfirmText(f"Continue {ticket.ref} {ticket.title}{via} in its worktree {Path(worktree.path).name}?",
                            f"claude --continue in {worktree.path}", "Continue")
 
-    def begin_start(self, ticket: Ticket) -> None:
-        """A confirmed start: the ticket is starting here, and for every view of the repo through its marker."""
+    def begin_start(self, ticket: Ticket) -> Refusal | None:
+        """A confirmed start: the ticket is starting here, and for every view of the repo through its marker; or
+        why not, when a session or another board's start took it while the confirm was open."""
+        self.read_markers()
+        if refusal := self._busy(ticket):
+            return refusal
+        if not self._mark(ticket.number):
+            return self._busy(ticket)
         self.own_starting.add(ticket.number)
-        self._mark(ticket.number)
+        return None
 
     def start(self, ticket: Ticket) -> Notice:
         """Starts the session, off the owner thread; an error notice means it failed (see start_failed)."""

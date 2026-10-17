@@ -239,10 +239,9 @@ per user and repo, under `repos` in the same `settings.json`:
 ```
 
 `Esc` closes the menu without changing anything. A field that is not valid stays open with a message
-saying why, and a failed save shows a warning while the new value still applies to this run.
-A save
-re-reads `settings.json` and writes back only what it changed, so two boards open on the same machine keep each
-other's saved filters and settings; a running board picks another's change up when it next starts.
+saying why, and a failed save shows a warning while the new value still applies to this run. A save re-reads
+`settings.json` and writes back only what it changed, so two boards open on the same machine keep each other's
+saved filters and settings; a running board picks another's change up when it next starts.
 
 | Setting          | Values                       | Effect                                                    |
 | ---------------- | ---------------------------- | --------------------------------------------------------- |
