@@ -174,13 +174,14 @@ def test_iterm_creates_a_window_running_the_line_through_sh():
     assert run_args == [shlex.join(["/bin/sh", "-c", LINE])]
 
 
-def test_ghostty_opens_a_window_with_a_surface_configuration():
+def test_ghostty_opens_a_window_with_a_surface_configuration_running_the_line_through_sh():
+    """Ghostty runs `command` as `exec -l <command>`, so a bare `cd … && …` line would exec `cd`."""
     _, call = opened({"GHOSTTY_RESOURCES_DIR": "/x"})
     lines, run_args = script(call.argv)
     assert lines == ["on run argv", 'tell application "Ghostty"', "set cfg to new surface configuration",
                      "set initial working directory of cfg to item 1 of argv", "set command of cfg to item 2 of argv",
                      "new window with configuration cfg", "activate", "end tell", "end run"]
-    assert run_args == [DIR, LINE]
+    assert run_args == [DIR, shlex.join(["/bin/sh", "-c", LINE])]
 
 
 def test_ghostty_before_1_3_falls_back_to_a_new_instance():

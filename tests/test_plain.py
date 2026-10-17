@@ -1,3 +1,4 @@
+import shlex
 import signal
 from pathlib import Path
 
@@ -87,8 +88,8 @@ def test_from_claude_the_board_opens_in_a_new_window_running_the_wrapper_with_it
     assert report == "Board opened in a new Ghostty window"
     launch = runner.last("osascript")
     assert "activate" in launch.argv  # the board's own window comes forward
-    assert launch.argv[-1] == (f"cd {world.repo} && exec /usr/bin/env TICKETMASTER_SLOT=s-1 CLAUDE_PLUGIN_DATA=/data/tm "
-                               f"{WRAPPER} open 42 --backend plain")
+    assert launch.argv[-1] == shlex.join(["/bin/sh", "-c", f"cd {world.repo} && exec /usr/bin/env TICKETMASTER_SLOT=s-1 "
+                                          f"CLAUDE_PLUGIN_DATA=/data/tm {WRAPPER} open 42 --backend plain"])
     assert "CLAUDECODE" not in launch.env and "CLAUDE_CODE_SESSION_ID" not in launch.env
 
 

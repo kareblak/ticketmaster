@@ -197,7 +197,7 @@ class Launcher:
                     'tell application "Ghostty"', "set cfg to new surface configuration",
                     "set initial working directory of cfg to item 1 of argv", "set command of cfg to item 2 of argv",
                     "new window with configuration cfg", *activate, "end tell",
-                ], directory, line))
+                ], directory, shlex.join(["/bin/sh", "-c", line])))  # Ghostty runs it as `exec -l <command>`
             except LaunchFailed as exc:
                 if exc.final:
                     raise
