@@ -21,6 +21,15 @@ class BackendError(RuntimeError):
             self.source = source
 
 
+class SessionsUnreadable(BackendError):
+    """The backend could not read its sessions. `sessions` is what the board shows meanwhile, or None to keep what it
+    shows."""
+
+    def __init__(self, message: str, source: str | None = None, sessions: dict[int, list[Session]] | None = None):
+        super().__init__(message, source)
+        self.sessions = sessions
+
+
 @dataclass(frozen=True)
 class Occupant:
     """Something a backend has in a worktree, as cleanup names and judges it."""

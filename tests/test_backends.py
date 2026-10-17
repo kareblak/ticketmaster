@@ -44,8 +44,8 @@ def test_an_unknown_backend_lists_the_known_ones(two):
         backends.choose(None, {"TICKETMASTER_BACKEND": "tmux"}, {})
 
 
-def test_herdr_is_the_only_backend_and_says_why_it_is_unavailable(monkeypatch):
-    assert [b.NAME for b in backends.BACKENDS] == ["herdr"]
+def test_herdr_comes_first_and_says_why_it_is_unavailable(monkeypatch):
+    assert [b.NAME for b in backends.BACKENDS] == ["herdr", "plain"]
     monkeypatch.setattr(herdr.shutil, "which", lambda name: None)
     assert herdr.unavailable({}) == "HERDR_ENV is not 1"
     assert herdr.unavailable({"HERDR_ENV": "1"}) == "herdr not on PATH"
@@ -74,7 +74,7 @@ def test_forcing_herdr_without_herdr_on_path_exits_2_with_the_reason(outside_her
 def test_an_unknown_backend_exits_2_listing_the_known_ones(outside_herdr, monkeypatch, capsys):
     monkeypatch.setenv("TICKETMASTER_BACKEND", "tmux")
     assert cli.main(["open"]) == 2
-    assert capsys.readouterr().err == "ticketmaster: unknown backend 'tmux'; known backends: herdr\n"
+    assert capsys.readouterr().err == "ticketmaster: unknown backend 'tmux'; known backends: herdr, plain\n"
 
 
 def test_a_forced_backend_reaches_the_open_rerun_in_the_board_pane(monkeypatch):

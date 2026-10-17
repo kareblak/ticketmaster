@@ -27,7 +27,7 @@ from .config import (DEFAULT_BUDGET, board_budget, board_decided_age, board_fetc
                      parse_budget, parse_decided_age, parse_fetch_limit, parse_interval, save_settings, seconds_text)
 from .model import (COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, LaneKind, SpecProgress, Ticket, build_board,
                     frontier)
-from .backends import BackendError
+from .backends import BackendError, SessionsUnreadable
 from .providers import ErrorNotice, Provider, ProviderError, Query, Quota, RateLimited, error_notice
 from .session import Session
 from .start import branch_name, worktree_name
@@ -45,12 +45,13 @@ LOOSE_COLOR = "blue"  # the Loose lane
 LANE_GLYPHS = {LaneKind.MAP: "◆", LaneKind.SPEC: "▣", LaneKind.LOOSE: "◇"}
 LOOSE_TITLE = "Loose tickets"
 NO_ISSUE = "The Loose lane has no issue; select one of its tickets"
-STATUS_STYLES = {  # herdr agent states
+STATUS_STYLES = {  # session states
     "working": ("● working", "bold yellow"),
     "blocked": ("⚠ needs you", "bold red"),
     "idle": ("◌ idle", "cyan"),
     "done": ("✓ done", "green"),
     "unknown": ("? unknown", "grey62"),
+    "unavailable": ("· status unavailable", "grey50"),  # the backend's status source has not answered yet
     None: ("○ no agent", "grey50"),
 }
 MODE_STYLES = {"HITL": "black on yellow", "AFK": "black on cyan"}  # who a wayfinder ticket needs at the keyboard
@@ -67,6 +68,8 @@ def session_lines(sessions: list[Session], starting: bool, claimed: bool = False
     for session in sessions:
         label, style = STATUS_STYLES.get(session.status, STATUS_STYLES["unknown"])
         text.append(f"{label} ", style=style)
+        if session.reason:
+            text.append(f"({session.reason}) ", style=style)
         text.append(f"{Path(session.path).name}\n", style="dim")
     if starting and not sessions:
         text.append("▶ starting…\n", style="bold green")
@@ -937,6 +940,9 @@ class BoardApp(App):
         if self.workbench is not None:
             try:
                 sessions = self.workbench.sessions()
+            except SessionsUnreadable as exc:  # shows what the backend still can, else keeps the last good list
+                sessions = exc.sessions if exc.sessions is not None else sessions
+                session_error = f"{exc.source}: {exc}"
             except BackendError as exc:
                 session_error = f"{exc.source}: {exc}"
         if not tickets:
