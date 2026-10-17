@@ -3,7 +3,12 @@ session status comes from `claude agents --json`, matched to the repo's ticket w
 
 Typed at a shell, the board runs in place. Run by Claude, whose Bash tool has no TTY, it opens in a new window: one
 board per Claude session (`CLAUDE_CODE_SESSION_ID`, else per repo), kept in a pidfile under the git common dir, so
-a re-run replaces the old board. Starting a card, going to it and cleanup land later.
+a re-run replaces the old board.
+
+`s` opens Claude in a new window, in the background, in the card's worktree: a new one under the repo's
+`.claude/worktrees/`, or any maker's existing one, continued. Enter never opens Claude: a live session is reported,
+since the board cannot raise another terminal's window, and a worktree without one gets a shell window. Cleanup
+lands later.
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ from pathlib import Path
 from ...git import checkout_of, parse_worktrees, ticket_number
 from ...session import Session
 from ..base import BackendError, CleanupView, Released, SessionsUnreadable
-from .terminal import OVERRIDE_HINT, LaunchFailed, Launcher, Runner, exited, paste_line
+from .terminal import OVERRIDE_HINT, LaunchFailed, Launcher, Runner, Terminal, exited, paste_line
 
 NAME = "plain"
 SOURCE = "claude agents"  # where session status comes from, and errors about it on the status line
@@ -37,6 +42,8 @@ DATA_ENV = "CLAUDE_PLUGIN_DATA"  # the wrapper's venv lives here; exported with 
 # `claude agents --json` statuses, as the board names them; anything else is `unknown`, never `done`.
 STATUSES = {"busy": "working", "waiting": "blocked", "idle": "idle"}
 LATER = "lands in a later ticket"
+WORKTREES = Path(".claude") / "worktrees"  # a card's new worktree, under the repo; kept out of git status
+STARTING_SECONDS = 30  # how long a window this board opened counts as a session starting
 
 
 def default_runner(argv: list[str], *, cwd: str | None = None, env: Mapping[str, str] | None = None,
@@ -70,6 +77,7 @@ class PlainBackend:
     name: str = NAME
     where: str = "in a new terminal window"
     ever_read: bool = False  # `claude agents` has answered this run
+    launched: dict[str, float] = field(default_factory=dict)  # worktree name: when this board opened Claude there
 
     # --- the board ---------------------------------------------------------------------------------------------
 
@@ -107,14 +115,19 @@ class PlainBackend:
             program = [sys.executable, "-m", "ticketmaster"]
         return ["/usr/bin/env", *settings, *program, "open", *args]
 
-    def pidfile(self, cwd: Path, slot: str) -> Path | None:
+    def common_dir(self, cwd: Path) -> Path | None:
+        """The repo's git common dir, shared by all its worktrees; None when git cannot tell."""
         try:
             done = self.runner(["git", "rev-parse", "--git-common-dir"], cwd=str(cwd), timeout=10)
         except (OSError, subprocess.TimeoutExpired):
             return None
         if done.returncode != 0 or not done.stdout.strip():
             return None
-        return (cwd / done.stdout.strip()) / "ticketmaster" / f"board-{slot}.pid"
+        return Path(os.path.normpath(cwd / done.stdout.strip()))
+
+    def pidfile(self, cwd: Path, slot: str) -> Path | None:
+        common = self.common_dir(cwd)
+        return None if common is None else common / "ticketmaster" / f"board-{slot}.pid"
 
     def record(self, cwd: Path, slot: str) -> None:
         if (path := self.pidfile(cwd, slot)) is None:
@@ -211,14 +224,89 @@ class PlainBackend:
             raise BackendError("unparseable output", SOURCE)
         return listed
 
-    # --- later tickets -----------------------------------------------------------------------------------------
+    # --- starting and going to a card ---------------------------------------------------------------------------
 
     def start_in_worktree(self, cwd: Path, name: str, branch: str, label: str, claude_args: list[str],
                           continue_args: list[str]) -> str:
-        raise BackendError(f"starting a card {LATER}", NAME)
+        """Claude in a new window, in the background, in the ticket's own worktree, never a `-2` copy: an existing
+        one of any maker (by its name or branch) continues with `continue_args`, else one is cut from HEAD on
+        `branch` under `.claude/worktrees/` and gets `claude_args`. Refused when a session is in the worktree (read
+        again just now), when this board opened one there in the last STARTING_SECONDS, when sessions cannot be
+        read, or when `branch` is left over without a worktree. A window that cannot open leaves the line to paste.
+        Returns where it went, for the status line."""
+        if not (checkouts := self.worktrees(cwd)):
+            raise BackendError(f"git can't list the worktrees of {cwd}", NAME)
+        existing = next((w for w in checkouts if w["is_linked_worktree"] and (
+            Path(w["path"]).name in (name, f"worktree-{name}") or w.get("branch") == branch)), None)
+        try:
+            agents = self.agents()
+        except BackendError as exc:
+            raise BackendError(f"can't check for a live session: {exc}", SOURCE) from None
+        if existing is not None and any(checkout_of(a.get("cwd"), checkouts) is existing for a in agents):
+            raise BackendError("live session: press Enter", NAME)
+        if (opened := self.launched.get(name)) is not None and self.clock() - opened < STARTING_SECONDS:
+            raise BackendError(f"a session is starting in {name}: wait for it, then press Enter", NAME)
+        if existing is not None:
+            path, args, what = existing["path"], continue_args, f"worktree {Path(existing['path']).name} with claude --continue"
+        else:
+            path, args, what = self.add_worktree(cwd, Path(checkouts[0]["path"]), name, branch), claude_args, \
+                f"new worktree {name}"
+        terminal = self.open_window(path, [self.which("claude") or "claude", *args])
+        self.launched[name] = self.clock()
+        return f"{what} in a new {terminal.name} window"
+
+    def add_worktree(self, cwd: Path, repo: Path, name: str, branch: str) -> str:
+        """A new worktree at `<repo>/.claude/worktrees/<name>` (`repo`: the main checkout) on a new `branch` from
+        HEAD, with the worktrees kept out of git status first; its path. A leftover `branch` is not taken over."""
+        if (common := self.common_dir(cwd)) is None:
+            raise BackendError(f"{cwd} is not in a git repo", NAME)
+        if self.git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
+            raise BackendError(f"branch {branch} exists without a worktree; check it out in one or delete it, then s again",
+                               NAME)
+        self.exclude_worktrees(repo, common)
+        path = str(repo / WORKTREES / name)
+        done = self.git(repo, "worktree", "add", "-b", branch, path, "HEAD")
+        if done.returncode != 0:
+            raise BackendError(exited("git worktree add", done), NAME)
+        return path
+
+    def exclude_worktrees(self, repo: Path, common: Path) -> None:
+        """Appends `.claude/worktrees/` to the repo's `.git/info/exclude` unless git already ignores it; never
+        committed."""
+        if self.git(repo, "check-ignore", "-q", f"{WORKTREES}/").returncode != 1:
+            return  # ignored already, or git cannot tell
+        exclude = common / "info" / "exclude"
+        try:
+            text = exclude.read_text() if exclude.exists() else ""
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text(text + ("" if not text or text.endswith("\n") else "\n") + f"{WORKTREES}/\n")
+        except OSError as exc:
+            raise BackendError(f"couldn't write {exclude}: {exc.strerror or exc}", NAME) from None
+
+    def git(self, repo: Path, *args: str) -> subprocess.CompletedProcess:
+        try:
+            return self.runner(["git", *args], cwd=str(repo), timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise BackendError(f"git {args[0]}: {getattr(exc, 'strerror', None) or exc}", NAME) from None
 
     def go_to(self, cwd: Path, session: Session, label: str) -> str:
-        raise BackendError(f"going to a card {LATER}", NAME)
+        """A live session is reported with its worktree, since the board cannot raise another terminal's window; a
+        worktree without one gets a shell window. Going there never starts or resumes Claude."""
+        if session.status == "unavailable":
+            return f"can't tell whether a session runs in {session.path}"
+        if session.status is not None:
+            return f"running in {session.path}"
+        terminal = self.open_window(session.path, [self.env.get("SHELL") or "/bin/sh"])
+        return f"opened {Path(session.path).name} with a shell in a new {terminal.name} window"
+
+    def open_window(self, path: str, command: list[str]) -> Terminal:
+        """A card's window, in the background: only the board's own window comes forward."""
+        try:
+            return self.launcher().open(path, command, front=False)
+        except LaunchFailed as exc:
+            raise BackendError(f"{exc}; run it yourself: {exc.paste}", NAME) from None
+
+    # --- later tickets -----------------------------------------------------------------------------------------
 
     def cleanup_view(self, cwd: Path) -> CleanupView:
         raise BackendError(f"cleanup {LATER}", NAME)
