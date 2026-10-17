@@ -13,14 +13,14 @@ import os
 from collections.abc import Mapping
 from pathlib import Path
 
-from . import herdr
-from .base import Backend, BackendError, CleanupView, Occupant, Released
+from . import herdr, plain
+from .base import Backend, BackendError, CleanupView, Occupant, Released, SessionsUnreadable
 
-__all__ = ["BACKENDS", "Backend", "BackendError", "ChoiceError", "CleanupView", "Occupant", "Released", "choose",
-           "resolve"]
+__all__ = ["BACKENDS", "Backend", "BackendError", "ChoiceError", "CleanupView", "Occupant", "Released",
+           "SessionsUnreadable", "choose", "resolve"]
 
 ENV = "TICKETMASTER_BACKEND"
-BACKENDS = (herdr,)
+BACKENDS = (herdr, plain)
 
 
 class ChoiceError(ValueError):

@@ -49,6 +49,20 @@ class FailingBackend(FakeBackend):
         raise BackendError("agent_start_failed", source="fake")
 
 
+class FlakySessions(FakeBackend):
+    """Answers `sessions` from a queue: a dict, or an exception to raise."""
+
+    def __init__(self, *answers):
+        super().__init__()
+        self.answers = list(answers)
+
+    def sessions(self, cwd):
+        answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
 def workbench(backend, cwd=Path("/code/repo")):
     from ticketmaster.start import Workbench
 

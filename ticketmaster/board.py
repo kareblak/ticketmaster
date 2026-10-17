@@ -35,12 +35,13 @@ MAP_COLOR = "cyan"
 SPEC_COLOR = "magenta"  # a standalone spec's lane
 LOOSE_COLOR = "blue"  # the Loose lane
 LANE_GLYPHS = {LaneKind.MAP: "◆", LaneKind.SPEC: "▣", LaneKind.LOOSE: "◇"}
-STATUS_STYLES = {  # herdr agent states
+STATUS_STYLES = {  # session states
     "working": ("● working", "bold yellow"),
     "blocked": ("⚠ needs you", "bold red"),
     "idle": ("◌ idle", "cyan"),
     "done": ("✓ done", "green"),
     "unknown": ("? unknown", "grey62"),
+    "unavailable": ("· status unavailable", "grey50"),  # the backend's status source has not answered yet
     None: ("○ no agent", "grey50"),
 }
 MODE_STYLES = {"HITL": "black on yellow", "AFK": "black on cyan"}  # who a wayfinder ticket needs at the keyboard
@@ -58,6 +59,8 @@ def session_lines(badges: tuple[Badge, ...]) -> Text:
         if badge.kind == "session":
             label, style = STATUS_STYLES.get(badge.status, STATUS_STYLES["unknown"])
             text.append(f"{label} ", style=style)
+            if badge.reason:
+                text.append(f"({badge.reason}) ", style=style)
             text.append(f"{badge.worktree}\n", style="dim")
         elif badge.kind == "starting":
             text.append("▶ starting…\n", style="bold green")

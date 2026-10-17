@@ -18,7 +18,7 @@ from typing import NamedTuple, Protocol
 
 from .config import (DEFAULT_BUDGET, board_budget, board_decided_age, board_fetch_limit, board_interval, load_settings,
                      parse_budget, parse_decided_age, parse_fetch_limit, parse_interval, seconds_text, update_settings)
-from .backends import BackendError
+from .backends import BackendError, SessionsUnreadable
 from .session import Session
 from .model import (COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, LaneKind, SpecProgress, Ticket, build_board,
                     frontier)
@@ -221,12 +221,14 @@ class Notice(NamedTuple):
 
 @dataclass(frozen=True)
 class Badge:
-    """What a card says about its sessions: one per `session` (its agent `status`, None without one, and its
-    `worktree`), or that the board is `starting` one, or that the ticket is `claimed` with no session here."""
+    """What a card says about its sessions: one per `session` (its agent `status`, None without one, its
+    `worktree`, and why it is blocked), or that the board is `starting` one, or that the ticket is `claimed` with no
+    session here."""
 
     kind: str
     status: str | None = None
     worktree: str = ""
+    reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -323,7 +325,7 @@ class Snapshot:
 
 def session_badges(sessions: list[Session], starting: bool, claimed: bool = False) -> tuple[Badge, ...]:
     """A badge per session; for a claimed ticket without one, that the claim's session is not in this herdr."""
-    badges = [Badge("session", session.status, Path(session.path).name) for session in sessions]
+    badges = [Badge("session", session.status, Path(session.path).name, session.reason) for session in sessions]
     if starting and not sessions:
         badges.append(Badge("starting"))
     elif claimed and not sessions:
@@ -538,6 +540,10 @@ class BoardModel:
         if self.workbench is not None:
             try:
                 result.sessions = self.workbench.sessions()
+            except SessionsUnreadable as exc:  # shows what the backend still can, else keeps the last good list
+                if exc.sessions is not None:
+                    result.sessions = exc.sessions
+                result.session_error = f"{exc.source}: {exc}"
             except BackendError as exc:
                 result.session_error = f"{exc.source}: {exc}"
         if not plan.tickets:
