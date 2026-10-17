@@ -5,10 +5,14 @@ from pathlib import Path
 import pytest
 
 from fake_plain import FakeRunner, agents, fail, ok
+from fakes import FakeProvider, a_map, impl_of, spec_of
 from ticketmaster import backends, cli, config
+from ticketmaster.board_model import BoardModel
 from ticketmaster.backends import BackendError, SessionsUnreadable, plain
 from ticketmaster.backends.plain import PlainBackend
+from ticketmaster.providers import Query
 from ticketmaster.session import Session
+from ticketmaster.start import Workbench
 
 CLAUDE = "/usr/local/bin/claude"
 WRAPPER = "/plugins/tm/bin/ticketmaster"
@@ -250,13 +254,247 @@ def test_after_a_good_read_a_failure_keeps_the_last_good_list():
     assert caught.value.sessions is None
 
 
+# --- start_in_worktree ------------------------------------------------------------------------------------------
+
+LABEL = "#12 Fix it"
+NEW = ["-n", LABEL, "/mattpocock-skills:implement https://x/issues/12"]
+CONTINUE = ["-n", LABEL, "--continue"]
+
+
+class Repo:
+    """A repo on disk for the plain backend's git: worktrees and branches answered from tables."""
+
+    def __init__(self, tmp_path, worktrees=(), branches=(), ignored=False, agents_answer=None, env=None):
+        self.root = tmp_path / "shiplog"
+        (self.root / ".git" / "info").mkdir(parents=True)
+        (self.root / ".git" / "info" / "exclude").write_text("# git ls-files --others --exclude-from=.git/info/exclude\n")
+        porcelain = f"worktree {self.root}\nHEAD a\nbranch refs/heads/main\n\n" + "".join(
+            f"worktree {path}\nHEAD b\nbranch refs/heads/{branch}\n\n" for path, branch in worktrees)
+        self.runner = FakeRunner({
+            GIT: ok(porcelain),
+            LIST: agents_answer or agents(),
+            ("git", "rev-parse", "--git-common-dir"): ok(".git\n"),
+            ("git", "rev-parse", "--verify", "--quiet"): lambda argv: ok() if argv[-1].removeprefix("refs/heads/") in branches else fail(1),
+            ("git", "check-ignore"): ok() if ignored else fail(1),
+            FRONT: ok("[ NULL ]\n"),
+        })
+        self.now = 100.0
+        self.backend = PlainBackend(runner=self.runner, env=env or {"TERM_PROGRAM": "ghostty"}, clock=lambda: self.now,
+                                    system="Darwin", which=lambda n: CLAUDE if n == "claude" else None,
+                                    kill=lambda pid, sig: pytest.fail("the board stops nothing on s"))
+
+    def start(self, name="issue-12", branch="issue-12"):
+        return self.backend.start_in_worktree(self.root, name, branch, LABEL, NEW, CONTINUE)
+
+    def exclude(self):
+        return (self.root / ".git" / "info" / "exclude").read_text()
+
+
+def window_line(runner):
+    """What the card's window runs, from Ghostty's AppleScript recipe."""
+    return shlex.split(runner.last("osascript").argv[-1])[-1]
+
+
+def test_a_fresh_card_gets_a_worktree_on_its_branch_from_head_and_claude_with_its_prompt(tmp_path):
+    repo = Repo(tmp_path)
+    assert repo.start(branch="kare/issue-12-fix") == "new worktree issue-12 in a new Ghostty window"
+    path = f"{repo.root}/.claude/worktrees/issue-12"
+    add = next(c for c in repo.runner.calls if c.argv[:3] == ["git", "worktree", "add"])
+    assert (add.argv, add.cwd) == (["git", "worktree", "add", "-b", "kare/issue-12-fix", path, "HEAD"], str(repo.root))
+    assert window_line(repo.runner) == f"cd {path} && exec {shlex.join([CLAUDE, *NEW])}"
+    assert "activate" not in repo.runner.last("osascript").argv  # card windows open in the background
+
+
+def test_a_board_in_a_linked_worktree_puts_new_ones_under_the_main_checkout(tmp_path):
+    repo = Repo(tmp_path, worktrees=[(str(tmp_path / "shiplog" / ".claude" / "worktrees" / "issue-9"), "issue-9")])
+    repo.runner.answers[("git", "rev-parse", "--git-common-dir")] = ok(f"{repo.root}/.git\n")
+    repo.backend.start_in_worktree(repo.root / ".claude" / "worktrees" / "issue-9", "issue-12", "issue-12", LABEL,
+                                   NEW, CONTINUE)
+    add = next(c for c in repo.runner.calls if c.argv[:3] == ["git", "worktree", "add"])
+    assert add.argv[5] == f"{repo.root}/.claude/worktrees/issue-12" and add.cwd == str(repo.root)
+    assert repo.exclude().endswith(".claude/worktrees/\n")
+
+
+def test_without_git_s_worktree_list_nothing_is_started(tmp_path):
+    repo = Repo(tmp_path)
+    repo.runner.answers[GIT] = fail(128, "fatal: not a git repository")
+    with pytest.raises(BackendError, match="git can't list the worktrees of"):
+        repo.start()
+    assert "osascript" not in [argv[0] for argv in repo.runner.argvs()]
+
+
+def test_worktrees_are_kept_out_of_git_status_through_info_exclude_once(tmp_path):
+    repo = Repo(tmp_path)
+    repo.runner.answers[("git", "check-ignore")] = lambda argv: ok() if ".claude/worktrees/" in repo.exclude() else fail(1)
+    repo.start()
+    repo.now += 60
+    repo.start(name="issue-13", branch="issue-13")
+    assert repo.exclude().splitlines() == ["# git ls-files --others --exclude-from=.git/info/exclude",
+                                           ".claude/worktrees/"]
+
+
+def test_a_repo_that_already_ignores_the_worktrees_is_left_alone(tmp_path):
+    repo = Repo(tmp_path, ignored=True)
+    before = repo.exclude()
+    repo.start()
+    assert repo.exclude() == before
+
+
+@pytest.mark.parametrize("made_by, branch", [
+    ("{root}/.claude/worktrees/issue-12", "issue-12"),  # plain
+    ("{home}/.herdr/worktrees/shiplog/issue-12", "issue-12"),  # herdr
+    ("{root}/.claude/worktrees/worktree-issue-12", "worktree-issue-12"),  # claude -w
+    ("{home}/elsewhere", "kare/issue-12-fix"),  # by its branch
+])
+def test_an_existing_worktree_of_any_maker_continues_and_none_is_added(tmp_path, made_by, branch):
+    path = made_by.format(root=tmp_path / "shiplog", home=tmp_path)
+    repo = Repo(tmp_path, worktrees=[(path, branch)], branches=[branch])
+    report = repo.start(branch="kare/issue-12-fix")
+    assert report == f"worktree {Path(path).name} with claude --continue in a new Ghostty window"
+    assert window_line(repo.runner) == f"cd {path} && exec {shlex.join([CLAUDE, *CONTINUE])}"
+    assert not any(c.argv[:3] == ["git", "worktree", "add"] for c in repo.runner.calls)
+
+
+def test_a_leftover_branch_without_a_worktree_is_refused_as_in_herdr(tmp_path):
+    repo = Repo(tmp_path, branches=["issue-12"])
+    with pytest.raises(BackendError) as caught:
+        repo.start()
+    assert (caught.value.source, str(caught.value)) == (
+        "plain", "branch issue-12 exists without a worktree; check it out in one or delete it, then s again")
+    assert not any(c.argv[:3] == ["git", "worktree", "add"] or c.argv[0] == "osascript" for c in repo.runner.calls)
+
+
+@pytest.mark.parametrize("status", ["busy", "waiting", "idle", "shell", None])
+def test_a_session_in_the_worktree_read_just_now_refuses_including_an_unknown_one(tmp_path, status):
+    path = str(tmp_path / "shiplog" / ".claude" / "worktrees" / "issue-12")
+    repo = Repo(tmp_path, worktrees=[(path, "issue-12")],
+                agents_answer=agents({"cwd": f"{path}/src", "pid": 7, "status": status}))
+    with pytest.raises(BackendError, match="^live session: press Enter$"):
+        repo.start()
+    assert "osascript" not in [argv[0] for argv in repo.runner.argvs()]
+
+
+def test_a_session_elsewhere_does_not_refuse(tmp_path):
+    path = str(tmp_path / "shiplog" / ".claude" / "worktrees" / "issue-12")
+    repo = Repo(tmp_path, worktrees=[(path, "issue-12")],
+                agents_answer=agents({"cwd": str(tmp_path / "shiplog"), "pid": 7, "status": "busy"}))
+    assert repo.start().endswith("with claude --continue in a new Ghostty window")
+
+
+def test_a_second_start_within_30_seconds_of_opening_a_window_is_refused(tmp_path):
+    repo = Repo(tmp_path)
+    repo.start()
+    path = str(repo.root / ".claude" / "worktrees" / "issue-12")
+    repo.runner.answers[GIT].stdout += f"worktree {path}\nHEAD b\nbranch refs/heads/issue-12\n\n"
+    repo.now += 29
+    with pytest.raises(BackendError, match="a session is starting in issue-12: wait for it, then press Enter"):
+        repo.start()
+    repo.now += 1  # Claude never showed up: the window was closed or failed
+    assert repo.start() == "worktree issue-12 with claude --continue in a new Ghostty window"
+
+
+@pytest.mark.parametrize("answer, error", [(fail(1), "exited 1"), (ok("{"), "unparseable output")])
+def test_unreadable_sessions_refuse_with_why(tmp_path, answer, error):
+    repo = Repo(tmp_path, agents_answer=answer)
+    with pytest.raises(BackendError) as caught:
+        repo.start()
+    assert (caught.value.source, str(caught.value)) == ("claude agents", f"can't check for a live session: {error}")
+    assert not any(c.argv[:3] == ["git", "worktree", "add"] for c in repo.runner.calls)
+
+
+QUOTED = ["-n", "#12 Don't \"quote\" $HOME `me`", "/implement https://x/issues/12 'and' \\ \"more\""]
+
+
+@pytest.mark.parametrize("env, recipe", [
+    ({"TERM_PROGRAM": "ghostty"}, 'tell application "Ghostty"'),
+    ({"TERM_PROGRAM": "iTerm.app"}, 'tell application "iTerm"'),
+    ({"TERM_PROGRAM": "Apple_Terminal"}, 'tell application "Terminal"'),
+])
+def test_claude_args_reach_the_window_intact_through_shlex_and_applescript(tmp_path, env, recipe):
+    repo = Repo(tmp_path, env=env)
+    repo.backend.start_in_worktree(repo.root, "issue-12", "issue-12", LABEL, QUOTED, CONTINUE)
+    launch = repo.runner.last("osascript")
+    assert recipe in launch.argv and "on run argv" in launch.argv  # the line is an argument, never AppleScript source
+    line = launch.argv[-1] if recipe.endswith('"Terminal"') else shlex.split(launch.argv[-1])[-1]  # sh -c's line
+    words = shlex.split(line)
+    assert words[:3] == ["cd", f"{repo.root}/.claude/worktrees/issue-12", "&&"]
+    assert words[3:] == ["exec", CLAUDE, *QUOTED]
+
+
+def test_the_board_window_detects_its_terminal_from_its_own_env(tmp_path):
+    # The board a window runs has that terminal's env, not Claude's: no CLAUDECODE, its own TERM_PROGRAM.
+    repo = Repo(tmp_path, env={"TICKETMASTER_SLOT": "s-1", "TERM_PROGRAM": "iTerm.app"})
+    assert repo.start() == "new worktree issue-12 in a new iTerm2 window"
+    assert 'tell application "iTerm"' in repo.runner.last("osascript").argv
+
+
+def test_a_window_that_cannot_open_leaves_the_paste_able_line(tmp_path):
+    repo = Repo(tmp_path, env={"TERM_PROGRAM": "ghostty", "SSH_TTY": "/dev/ttys2"})
+    with pytest.raises(BackendError) as caught:
+        repo.start()
+    path = f"{repo.root}/.claude/worktrees/issue-12"
+    assert (caught.value.source, str(caught.value)) == (
+        "plain", f"couldn't open a terminal window (over SSH); run it yourself: cd {path} && {shlex.join([CLAUDE, *NEW])}")
+    repo.runner.answers[GIT].stdout += f"worktree {path}\nHEAD b\nbranch refs/heads/issue-12\n\n"
+    repo.backend.env = {"TERM_PROGRAM": "ghostty"}
+    assert repo.start().startswith("worktree issue-12 with claude --continue")  # the failed launch is not starting
+
+
+def test_a_failed_launch_shows_the_paste_able_line_on_the_status_line_and_no_starting_badge(tmp_path):
+    repo = Repo(tmp_path, env={"TERM_PROGRAM": "ghostty", "SSH_CONNECTION": "1 2 3 4"})
+    spec = spec_of(9, 20)
+    ticket = impl_of(spec, 12, "Fix it")
+    model = BoardModel(FakeProvider([a_map(9), spec, ticket]), Query(), interval=60,
+                       workbench=Workbench(repo.root, repo.backend), starting_dir=tmp_path / "starting")
+    model.apply(model.fetch(model.due()))
+    assert model.begin_start(ticket) is None
+    notice = model.start(ticket)
+    assert notice.severity == "error"
+    assert notice.text.startswith("plain: couldn't open a terminal window (over SSH); run it yourself: cd ")
+    assert notice.text.endswith(shlex.join([CLAUDE, "-n", "#12 Fix it", "/mattpocock-skills:implement u12"]))
+    model.start_failed(ticket)  # what a view does with an error notice
+    badges = [b.kind for lane in model.snapshot().lanes for _, views in lane.cells for v in views
+              if v.ticket.number == 12 for b in v.badges]
+    assert "starting" not in badges and not (tmp_path / "starting" / "12").exists()
+
+
+# --- go_to --------------------------------------------------------------------------------------------------------
+
+def test_go_to_a_live_session_reports_where_it_runs_and_opens_nothing(tmp_path):
+    repo = Repo(tmp_path)
+    session = Session(12, "/w/issue-12", "issue-12", "blocked", 7, "permission prompt")
+    assert repo.backend.go_to(repo.root, session, LABEL) == "running in /w/issue-12"
+    assert repo.runner.calls == []
+
+
+def test_go_to_a_worktree_without_a_session_opens_a_shell_window_there_never_claude(tmp_path):
+    repo = Repo(tmp_path, env={"TERM_PROGRAM": "ghostty", "SHELL": "/bin/zsh"})
+    assert repo.backend.go_to(repo.root, Session(12, "/w/issue-12", "issue-12"), LABEL) == (
+        "opened issue-12 with a shell in a new Ghostty window")
+    assert window_line(repo.runner) == "cd /w/issue-12 && exec /bin/zsh"
+    assert CLAUDE not in [argv[0] for argv in repo.runner.argvs()]
+
+
+def test_go_to_a_shell_window_that_cannot_open_leaves_the_paste_able_line(tmp_path):
+    repo = Repo(tmp_path, env={"SSH_TTY": "/dev/ttys2"})
+    with pytest.raises(BackendError, match=r"\(over SSH\); run it yourself: cd /w/issue-12 && /bin/sh$"):
+        repo.backend.go_to(repo.root, Session(12, "/w/issue-12", "issue-12"), LABEL)
+
+
+def test_go_to_while_sessions_were_never_read_says_so_and_opens_nothing(tmp_path):
+    repo = Repo(tmp_path)
+    session = Session(12, "/w/issue-12", "issue-12", "unavailable")
+    assert repo.backend.go_to(repo.root, session, LABEL) == "can't tell whether a session runs in /w/issue-12"
+    assert repo.runner.calls == []
+
+
+# --- later tickets ------------------------------------------------------------------------------------------------
+
 @pytest.mark.parametrize("call", [
-    lambda b: b.start_in_worktree(Path(REPO), "issue-1", "issue-1", "l", [], []),
-    lambda b: b.go_to(Path(REPO), Session(1, "/p"), "l"),
     lambda b: b.cleanup_view(Path(REPO)),
     lambda b: b.release(Path(REPO), "/p"),
 ])
-def test_start_go_to_and_cleanup_are_refused_with_a_reason_until_they_land(call):
+def test_cleanup_is_refused_with_a_reason_until_it_lands(call):
     with pytest.raises(BackendError, match="lands in a later ticket") as caught:
         call(PlainBackend(runner=FakeRunner(), env={}))
     assert caught.value.source == "plain"
