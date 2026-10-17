@@ -218,10 +218,16 @@ def git(cwd: Path, *args: str) -> tuple[bool, str]:
     return result.returncode == 0, complaint[0] if complaint else ""
 
 
+def common_dir(cwd: Path) -> Path | None:
+    """The repo's git common dir, shared by its main checkout and every worktree; None outside a repo."""
+    ok, common = git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    return Path(common) if ok and common else None
+
+
 def main_checkout(cwd: Path) -> Path:
     """The repo's main checkout, where git runs while worktrees go, the one cleanup runs in among them."""
-    ok, common = git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    return Path(common).parent if ok and common else cwd
+    common = common_dir(cwd)
+    return common.parent if common else cwd
 
 
 def remove(cwd: Path, found: list[Leftover], bench: Herdr, home: Path | None = None,
