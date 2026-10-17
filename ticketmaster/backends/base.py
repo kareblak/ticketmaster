@@ -34,8 +34,8 @@ class SessionsUnreadable(BackendError):
 class Occupant:
     """Something a backend has in a worktree, as cleanup names and judges it."""
 
-    kind: str  # what the summary groups it under: "workspace", "agent"
-    name: str  # a workspace's id, an agent's state
+    kind: str  # what the summary groups it under: "workspace", "agent", "session"
+    name: str  # a workspace's id, an agent's or session's state
     own: bool = False  # cleanup runs in it, so its worktree goes last
     blocks: str | None = None  # why its worktree is kept while it is there, e.g. "live session"
     ticket: int | None = None  # the ticket it names itself after, wherever it runs

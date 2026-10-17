@@ -8,7 +8,7 @@ a re-run replaces the old board.
 `s` opens Claude in a new window, in the background, in the card's worktree: a new one under the repo's
 `.claude/worktrees/`, or any maker's existing one, continued. Enter never opens Claude: a live session is reported,
 since the board cannot raise another terminal's window, and a worktree without one gets a shell window. Cleanup
-lands later.
+removes git worktrees and branches only: a live Claude session in a worktree keeps it, and nothing is closed.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from pathlib import Path
 
 from ...git import checkout_of, parse_worktrees, ticket_number
 from ...session import Session
-from ..base import BackendError, CleanupView, Released, SessionsUnreadable
+from ..base import BackendError, CleanupView, Occupant, Released, SessionsUnreadable
 from .terminal import OVERRIDE_HINT, LaunchFailed, Launcher, Runner, Terminal, exited, paste_line
 
 NAME = "plain"
@@ -41,7 +41,6 @@ WRAPPER_ENV = "TICKETMASTER_WRAPPER"  # the plugin's bin/ticketmaster, exported 
 DATA_ENV = "CLAUDE_PLUGIN_DATA"  # the wrapper's venv lives here; exported with WRAPPER_ENV
 # `claude agents --json` statuses, as the board names them; anything else is `unknown`, never `done`.
 STATUSES = {"busy": "working", "waiting": "blocked", "idle": "idle"}
-LATER = "lands in a later ticket"
 WORKTREES = Path(".claude") / "worktrees"  # a card's new worktree, under the repo; kept out of git status
 STARTING_SECONDS = 30  # how long a window this board opened counts as a session starting
 
@@ -188,7 +187,7 @@ class PlainBackend:
             if checkout is None or not checkout["is_linked_worktree"] or (n := ticket_number(checkout)) is None:
                 continue
             busy.add(checkout["path"])
-            status = STATUSES.get(agent.get("status"), "unknown")
+            status = status_of(agent)
             reason = agent.get("waitingFor") if status == "blocked" else None
             found.setdefault(n, []).append(Session(n, checkout["path"], checkout.get("branch"), status,
                                                    agent.get("pid") or agent.get("id"), reason))
@@ -306,13 +305,41 @@ class PlainBackend:
         except LaunchFailed as exc:
             raise BackendError(f"{exc}; run it yourself: {exc.paste}", NAME) from None
 
-    # --- later tickets -----------------------------------------------------------------------------------------
+    # --- cleanup ----------------------------------------------------------------------------------------------
 
     def cleanup_view(self, cwd: Path) -> CleanupView:
-        raise BackendError(f"cleanup {LATER}", NAME)
+        """Per linked worktree, its `claude agents` sessions by status. One with a process (a pid) is live and keeps
+        the worktree, unless it is this Claude session (CLAUDE_CODE_SESSION_ID): cleanup's own, whose worktree goes
+        last. When `claude agents` fails, or git cannot list the worktrees to match sessions to, every worktree is
+        kept as unreadable."""
+        unreadable = CleanupView({}, unreadable="sessions unreadable")
+        if not (checkouts := self.worktrees(cwd)):
+            return unreadable
+        try:
+            agents = self.agents()
+        except BackendError:
+            return unreadable
+        own = self.env.get(SESSION_ENV)
+        occupants: dict[str, list[Occupant]] = {}
+        for agent in agents:
+            checkout = checkout_of(agent.get("cwd"), checkouts)
+            if checkout is None or not checkout["is_linked_worktree"]:
+                continue
+            mine = bool(own) and agent.get("sessionId") == own
+            live = agent.get("pid") is not None and not mine
+            occupants.setdefault(checkout["path"], []).append(Occupant(
+                "session", status_of(agent), own=mine,
+                blocks="live session" if live else None))
+        return CleanupView({path: tuple(found) for path, found in occupants.items()})
 
     def release(self, cwd: Path, path: str) -> Released:
-        raise BackendError(f"cleanup {LATER}", NAME)
+        """Nothing to close: a session in the worktree kept it, and the windows this backend opens are the user's."""
+        return Released()
+
+
+def status_of(agent: dict) -> str:
+    """An agent's `claude agents` status as the board names it; anything else is `unknown`, never `done`."""
+    return STATUSES.get(agent.get("status"), "unknown")
 
 
 def ticket_worktrees(checkouts: list[dict]) -> list[tuple[int, dict]]:
