@@ -5,9 +5,11 @@ import pytest
 
 from fake_backend import FakeBackend
 from fake_herdr import FakeHerdr
+from fake_plain import agents, fail
 from ticketmaster import cleanup, cli, config
 from ticketmaster import git as gitrepo
-from ticketmaster.backends import herdr
+from ticketmaster.backends import herdr, plain
+from ticketmaster.backends.plain import PlainBackend, default_runner
 from ticketmaster.backends.herdr import Herdr, HerdrBackend
 from ticketmaster.backends import Occupant, Released
 from ticketmaster.cleanup import Leftover
@@ -641,3 +643,113 @@ def test_herdr_and_git_spelling_one_worktree_differently_still_meet(tmp_path, mo
     entry = by_place(cleanup.leftovers(REPO, MAP, TICKETS, backend, uncommitted=lambda path: False))[str(actual)]
     assert (held(entry, "workspace"), held(entry, "agent"), entry.current) == (("w2",), ("idle",), True)
     assert backend.release(REPO, str(actual)).later == ("workspace w2",)
+
+
+# --- the plain backend, on a real git repo ------------------------------------------------------------------------
+
+
+@pytest.fixture
+def plain_repo(tmp_path, monkeypatch):
+    """main, with a herdr-made worktree issue-40 under a herdr home and a `claude -w` worktree issue-51 under
+    `.claude/worktrees/` on `worktree-issue-51`, both merged into main."""
+    monkeypatch.setattr(gitrepo, "local_branches", REAL_LOCAL_BRANCHES)
+    monkeypatch.setattr(gitrepo, "worktrees", REAL_WORKTREES)
+    root = tmp_path / "shiplog"
+    root.mkdir()
+    git("init", "-q", "-b", "main", cwd=root)
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "start", cwd=root)
+    git("worktree", "add", "-q", "-b", "issue-40", str(tmp_path / "herdr" / "shiplog" / "issue-40"), cwd=root)
+    git("worktree", "add", "-q", "-b", "worktree-issue-51", str(root / ".claude" / "worktrees" / "issue-51"), cwd=root)
+    return root
+
+
+def plain_backend(answer, session=None):
+    """A plain backend running real git, with `claude agents --json` answering `answer`."""
+    def runner(argv, **kw):
+        if argv[1:] == ["agents", "--json"]:
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        return default_runner(argv, **kw)
+
+    return PlainBackend(runner=runner, env={"CLAUDE_CODE_SESSION_ID": session} if session else {},
+                        which=lambda name: "/bin/claude" if name == "claude" else None)
+
+
+def plain_paths(repo):
+    return repo.parent / "herdr" / "shiplog" / "issue-40", repo / ".claude" / "worktrees" / "issue-51"
+
+
+def plain_clean(repo, answer, cwd=None, session=None, dry_run=False):
+    backend = plain_backend(answer, session)
+    run = cleanup.dry_run if dry_run else cleanup.clean
+    return run(cwd or repo, FakeProvider(TICKETS), 40, backend, uncommitted=lambda path: False)
+
+
+def test_plain_cleanup_removes_a_herdr_made_and_a_claude_w_worktree_with_their_branches(plain_repo):
+    herdr_made, claude_w = plain_paths(plain_repo)
+    cleaned = plain_clean(plain_repo, agents())
+    assert cleaned.ok and cleaned.last == ()
+    assert not herdr_made.exists() and not claude_w.exists()
+    assert {"issue-40", "worktree-issue-51"}.isdisjoint(REAL_LOCAL_BRANCHES(plain_repo))
+    assert cleaned.summary.splitlines()[-1] == "2 removed, 0 kept"
+
+
+def test_plain_dry_run_only_lists(plain_repo):
+    herdr_made, claude_w = plain_paths(plain_repo)
+    text = plain_clean(plain_repo, agents(), dry_run=True)
+    assert text.splitlines()[-1] == "2 removable, 0 kept"
+    assert herdr_made.exists() and claude_w.exists()
+
+
+def test_plain_cleanup_keeps_a_worktree_with_a_live_session(plain_repo):
+    herdr_made, claude_w = plain_paths(plain_repo)
+    cleaned = plain_clean(plain_repo, agents({"cwd": str(claude_w / "src"), "pid": 7, "status": "idle"},
+                                             {"cwd": str(herdr_made), "id": "ab12", "state": "blocked"}))
+    assert claude_w.exists() and not herdr_made.exists()  # a session without a process is no live one
+    line = next(line for line in cleaned.summary.splitlines() if "#51" in line)
+    assert line.startswith("kept") and line.endswith("session idle · live session")
+
+
+def test_plain_cleanup_keeps_every_worktree_when_sessions_are_unreadable_and_judges_branches(plain_repo):
+    git("branch", "issue-50", cwd=plain_repo)
+    cleaned = plain_clean(plain_repo, fail(1, "boom"))
+    assert all(path.exists() for path in plain_paths(plain_repo))
+    assert "issue-50" not in REAL_LOCAL_BRANCHES(plain_repo)
+    kept = [line for line in cleaned.summary.splitlines() if line.startswith("kept")]
+    assert len(kept) == 2 and all(line.endswith("· sessions unreadable") for line in kept)
+
+
+def test_plain_cleanup_from_inside_a_removable_worktree_handles_it_last(plain_repo):
+    herdr_made, claude_w = plain_paths(plain_repo)
+    seen = []
+    backend = plain_backend(agents({"cwd": str(claude_w), "pid": 7, "status": "busy", "sessionId": "me"}), "me")
+    backend.release = lambda cwd, path: seen.append((Path(path).name, herdr_made.exists())) or Released()
+    cleaned = cleanup.clean(claude_w, FakeProvider(TICKETS), 40, backend, uncommitted=lambda path: False)
+    assert seen == [("issue-40", True), ("issue-51", False)]  # its own goes after the herdr-made one
+    assert not claude_w.exists() and cleaned.ok and cleaned.last == ()
+    assert cleaned.summary.splitlines()[-2].endswith("· cleanup ran in it")
+
+
+def test_plain_cleanups_own_session_marks_its_worktree_to_go_last_from_anywhere(plain_repo):
+    _, claude_w = plain_paths(plain_repo)
+    text = plain_clean(plain_repo, agents({"cwd": str(claude_w), "pid": 7, "status": "busy", "sessionId": "me"}),
+                       session="me", dry_run=True)
+    line = next(line for line in text.splitlines() if "#51" in line)
+    assert line.startswith("removable") and line.endswith("removed last: cleanup runs in it")
+
+
+def test_plain_cleanup_on_an_open_map_refuses_and_changes_nothing(plain_repo):
+    open_map = issue(40, title="Ship deviations", labels=MAP_LABELS)
+    with pytest.raises(cleanup.CleanupError, match="#40 is still open"):
+        cleanup.clean(plain_repo, FakeProvider([open_map, *TICKETS[1:]]), 40, plain_backend(agents()))
+    assert all(path.exists() for path in plain_paths(plain_repo))
+
+
+def test_main_cleans_up_through_the_plain_backend(plain_repo, monkeypatch, capsys):
+    monkeypatch.setattr(config, "resolve_provider", lambda *args: FakeProvider(TICKETS))
+    monkeypatch.setattr(plain, "make", lambda cwd, config, env: plain_backend(agents()))
+    monkeypatch.chdir(plain_repo)
+    assert cli.main(["cleanup", "40", "--backend", "plain"]) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == "2 removed, 0 kept"
+    assert not any(path.exists() for path in plain_paths(plain_repo))

@@ -8,7 +8,7 @@ from fake_plain import FakeRunner, agents, fail, ok
 from fakes import FakeProvider, a_map, impl_of, spec_of
 from ticketmaster import backends, cli, config
 from ticketmaster.board_model import BoardModel
-from ticketmaster.backends import BackendError, SessionsUnreadable, plain
+from ticketmaster.backends import BackendError, CleanupView, Occupant, Released, SessionsUnreadable, plain
 from ticketmaster.backends.plain import PlainBackend
 from ticketmaster.providers import Query
 from ticketmaster.session import Session
@@ -488,13 +488,54 @@ def test_go_to_while_sessions_were_never_read_says_so_and_opens_nothing(tmp_path
     assert repo.runner.calls == []
 
 
-# --- later tickets ------------------------------------------------------------------------------------------------
+# --- cleanup ----------------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("call", [
-    lambda b: b.cleanup_view(Path(REPO)),
-    lambda b: b.release(Path(REPO), "/p"),
-])
-def test_cleanup_is_refused_with_a_reason_until_it_lands(call):
-    with pytest.raises(BackendError, match="lands in a later ticket") as caught:
-        call(PlainBackend(runner=FakeRunner(), env={}))
-    assert caught.value.source == "plain"
+def viewing(answer, env=None):
+    backend, runner = reading(answer)
+    backend.env = env or {}
+    return backend, runner
+
+
+def test_cleanup_view_lists_each_worktrees_sessions_and_a_live_one_keeps_it():
+    backend, _ = viewing(agents(
+        {"cwd": f"{REPO}/.claude/worktrees/issue-12/src", "pid": 1, "status": "busy", "sessionId": "s-9"},
+        {"cwd": "/home/me/.herdr/worktrees/shiplog/tm-13", "id": "ab12", "state": "blocked", "kind": "background"},
+        {"cwd": f"{REPO}/.claude/worktrees/spike", "pid": 3, "status": "idle"},  # any worktree, whatever its name
+        {"cwd": REPO, "pid": 4, "status": "busy"},  # the main checkout is no worktree to remove
+        {"cwd": "/elsewhere/issue-12", "pid": 5, "status": "busy"},
+    ))
+    view = backend.cleanup_view(Path(REPO))
+    assert view == CleanupView({
+        f"{REPO}/.claude/worktrees/issue-12": (Occupant("session", "working", blocks="live session"),),
+        "/home/me/.herdr/worktrees/shiplog/tm-13": (Occupant("session", "unknown"),),  # no process: not live
+        f"{REPO}/.claude/worktrees/spike": (Occupant("session", "idle", blocks="live session"),),
+    })
+
+
+def test_cleanups_own_session_is_its_own_and_keeps_nothing():
+    backend, _ = viewing(agents(
+        {"cwd": f"{REPO}/.claude/worktrees/issue-12", "pid": 1, "status": "busy", "sessionId": "s-1"},
+        {"cwd": f"{REPO}/.claude/worktrees/issue-14", "pid": 2, "status": "idle", "sessionId": "s-2"},
+    ), env={"CLAUDE_CODE_SESSION_ID": "s-1"})
+    view = backend.cleanup_view(Path(REPO))
+    assert view.occupants[f"{REPO}/.claude/worktrees/issue-12"] == (Occupant("session", "working", own=True),)
+    assert view.occupants[f"{REPO}/.claude/worktrees/issue-14"] == (
+        Occupant("session", "idle", blocks="live session"),)
+
+
+@pytest.mark.parametrize("answer", [fail(1), ok("not json"), FileNotFoundError(2, "No such file or directory")])
+def test_cleanup_view_says_sessions_unreadable_when_claude_agents_fails(answer):
+    backend, _ = viewing(answer)
+    assert backend.cleanup_view(Path(REPO)) == CleanupView({}, unreadable="sessions unreadable")
+
+
+def test_cleanup_view_says_sessions_unreadable_when_git_cannot_list_the_worktrees():
+    backend, _ = viewing(agents({"cwd": f"{REPO}/.claude/worktrees/issue-12", "pid": 1, "status": "busy"}))
+    backend.runner.answers[GIT] = fail(128)
+    assert backend.cleanup_view(Path(REPO)) == CleanupView({}, unreadable="sessions unreadable")
+
+
+def test_release_closes_nothing():
+    backend, runner = viewing(agents())
+    assert backend.release(Path(REPO), f"{REPO}/.claude/worktrees/issue-12") == Released()
+    assert runner.calls == []
