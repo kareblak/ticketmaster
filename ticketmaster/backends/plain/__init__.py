@@ -25,7 +25,7 @@ from pathlib import Path
 from ...git import checkout_of, parse_worktrees, ticket_number
 from ...session import Session
 from ..base import BackendError, CleanupView, Released, SessionsUnreadable
-from .terminal import OVERRIDE_HINT, LaunchFailed, Launcher, Runner, exited
+from .terminal import OVERRIDE_HINT, LaunchFailed, Launcher, Runner, exited, paste_line
 
 NAME = "plain"
 SOURCE = "claude agents"  # where session status comes from, and errors about it on the status line
@@ -87,17 +87,19 @@ class PlainBackend:
         try:
             terminal = self.launcher().open(str(cwd), self.board_command(args, slot), front=True)
         except LaunchFailed as exc:
-            raise BackendError(f"{exc}; run it yourself:\n  {exc.paste}\n{OVERRIDE_HINT}", source=NAME) from None
+            paste = paste_line(str(cwd), self.board_command(args, slot, window=False))  # the user's shell has a PATH
+            raise BackendError(f"{exc}; run it yourself:\n  {paste}\n{OVERRIDE_HINT}", source=NAME) from None
         replaced = previous is not None and self.stop(previous)
         return f"Board opened in a new {terminal.name} window" + (" (replaced the previous one)" if replaced else "")
 
     def launcher(self) -> Launcher:
         return Launcher(self.runner, self.env, self.system, self.which, self.configured)
 
-    def board_command(self, args: list[str], slot: str) -> list[str]:
+    def board_command(self, args: list[str], slot: str, window: bool = True) -> list[str]:
         """`open` again, in the new window, by absolute path: the window has neither the Bash tool's PATH nor its
-        env, so the slot and the wrapper's data dir go along."""
-        settings = [f"{SLOT_ENV}={slot}"]
+        env (iTerm2 and Ghostty run it without a login shell), so PATH, the slot and the wrapper's data dir go along."""
+        settings = [f"PATH={path}"] if window and (path := self.env.get("PATH")) else []
+        settings.append(f"{SLOT_ENV}={slot}")
         if wrapper := self.env.get(WRAPPER_ENV):
             settings.append(f"{DATA_ENV}={self.env[DATA_ENV]}")
             program = [wrapper]

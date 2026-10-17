@@ -56,7 +56,7 @@ class World:
 
 
 FROM_CLAUDE = {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "s-1", "TICKETMASTER_WRAPPER": WRAPPER,
-               "CLAUDE_PLUGIN_DATA": "/data/tm", "GHOSTTY_RESOURCES_DIR": "/x", "PATH": "/bin"}
+               "CLAUDE_PLUGIN_DATA": "/data/tm", "GHOSTTY_RESOURCES_DIR": "/x", "PATH": "/opt/bin:/bin"}
 
 
 def test_plain_is_always_available_and_auto_detected_outside_herdr(monkeypatch):
@@ -88,8 +88,10 @@ def test_from_claude_the_board_opens_in_a_new_window_running_the_wrapper_with_it
     assert report == "Board opened in a new Ghostty window"
     launch = runner.last("osascript")
     assert "activate" in launch.argv  # the board's own window comes forward
-    assert launch.argv[-1] == shlex.join(["/bin/sh", "-c", f"cd {world.repo} && exec /usr/bin/env TICKETMASTER_SLOT=s-1 "
-                                          f"CLAUDE_PLUGIN_DATA=/data/tm {WRAPPER} open 42 --backend plain"])
+    assert launch.argv[-1] == shlex.join(["/bin/sh", "-c", f"cd {world.repo} && exec /usr/bin/env PATH=/opt/bin:/bin "
+                                          f"TICKETMASTER_SLOT=s-1 CLAUDE_PLUGIN_DATA=/data/tm {WRAPPER} open 42 "
+                                          f"--backend plain"])
+    # iTerm2 and Ghostty run it without a login shell: without Claude's PATH the board finds neither gh nor claude
     assert "CLAUDECODE" not in launch.env and "CLAUDE_CODE_SESSION_ID" not in launch.env
 
 
