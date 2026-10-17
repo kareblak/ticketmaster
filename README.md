@@ -162,6 +162,10 @@ one worktree, never a `-2` copy: when it exists without an agent, `s` opens it a
 `claude -n "#<n> <title>" --continue` there. Every session `s` starts is unfocused, whatever the card:
 the board stays where it is, and `Enter` goes to the session.
 
+A confirmed start writes a marker, `<git common dir>/ticketmaster/starting/<n>`, with its time. Every board of
+the repo, in any Claude session, reads the markers each second, shows the card `▶ starting…` and refuses a
+second `s` on it until its session appears; a marker older than 30 s is ignored.
+
 `s` on an `impl` card starts `/implement` AFK. On Linear its branch is the issue's branch name (`branchName`),
 in a `tm-<n>` worktree. `s` also refuses an `impl` card with an open PR that closes it. A card you
 claimed starts, even while its spec is open. The session owns review, push and PR; the board starts
@@ -239,7 +243,9 @@ per user and repo, under `repos` in the same `settings.json`:
 ```
 
 `Esc` closes the menu without changing anything. A field that is not valid stays open with a message
-saying why, and a failed save shows a warning while the new value still applies to this run.
+saying why, and a failed save shows a warning while the new value still applies to this run. A save re-reads
+`settings.json` and writes back only what it changed, so two boards open on the same machine keep each other's
+saved filters and settings; a running board picks another's change up when it next starts.
 
 | Setting          | Values                       | Effect                                                    |
 | ---------------- | ---------------------------- | --------------------------------------------------------- |

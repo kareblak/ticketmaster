@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,6 +76,15 @@ def load_settings(path: Path) -> dict:
 def save_settings(path: Path, settings: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, indent=2) + "\n")
+
+
+def update_settings(path: Path, change: Callable[[dict], None]) -> None:
+    """Re-reads settings.json, makes `change` and writes it back, so keys another board saved meanwhile stay."""
+    settings = load_settings(path)
+    if not isinstance(settings, dict):
+        settings = {}
+    change(settings)
+    save_settings(path, settings)
 
 
 def default_interval(kind: str) -> float:

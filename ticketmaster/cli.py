@@ -184,10 +184,12 @@ def main(argv: list[str] | None = None) -> int:
     # None: the board runs here (in herdr: a board pane launched this, or it was typed at a shell)
 
     from .board import BoardApp
+    from .cleanup import common_dir
     from .config import settings_path
     from .start import workbench_for
 
     workbench = workbench_for(cwd, config, backend)
+    common = common_dir(cwd)
     BoardApp(
         provider,
         Query(named_map=named_number(args.map, provider)),
@@ -197,5 +199,6 @@ def main(argv: list[str] | None = None) -> int:
         columns=args.columns,
         settings_path=settings_path(),
         map_key=args.map if isinstance(args.map, str) else None,
+        starting_dir=common / "ticketmaster" / "starting" if common else None,
     ).run()
     return 0
