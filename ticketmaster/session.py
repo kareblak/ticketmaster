@@ -15,13 +15,15 @@ URGENCY = {"blocked": 0, "working": 1, "idle": 2, "done": 3, "unknown": 4, "unav
 @dataclass(frozen=True)
 class Session:
     """A session working a ticket, in the worktree it runs in; or a ticket's worktree with none (status None).
-    `handle` is the backend's own: the board only passes it back."""
+    `handle` is the backend's own: the board only passes it back. `reason`: what a blocked session waits for, when
+    the backend says."""
 
     number: int
     path: str
     branch: str | None = None
     status: str | None = None
     handle: object = None
+    reason: str | None = None
 
     @property
     def urgency(self) -> tuple[int, bool]:

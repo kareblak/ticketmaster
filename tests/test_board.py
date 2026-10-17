@@ -10,7 +10,7 @@ from textual.widgets import Input
 from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, SettingsMenu,
                                budget_pace, clamp_lines, passes_filters, render_card)
 from fake_backend import FailingBackend, FakeBackend, workbench
-from ticketmaster.backends import BackendError
+from ticketmaster.backends import BackendError, SessionsUnreadable
 from ticketmaster.session import Session
 from ticketmaster.model import Column, Ticket
 from ticketmaster.providers import ProviderError, Query, Quota, RateLimited
@@ -2984,5 +2984,71 @@ def test_the_confirm_says_where_the_backend_puts_the_session():
             await pilot.press("s")
             await pilot.pause()
             assert app.screen.detail.endswith("\nworktree: issue-1, in a fake place")
+
+    run(scenario())
+
+
+class FlakySessions(FakeBackend):
+    """Answers `sessions` from a queue: a dict, or an exception to raise."""
+
+    def __init__(self, *answers):
+        super().__init__()
+        self.answers = list(answers)
+
+    def sessions(self, cwd):
+        answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def test_an_unread_session_source_shows_status_unavailable_then_keeps_the_last_good_badges():
+    unavailable = {1: [Session(1, "/wt/issue-1", "issue-1", "unavailable")]}
+    good = {1: [Session(1, "/wt/issue-1", "issue-1", "blocked", 7, "permission prompt")]}
+    down = SessionsUnreadable("exited 1", source="claude agents")
+
+    async def scenario():
+        bench = FlakySessions(SessionsUnreadable("claude not on PATH", "claude agents", unavailable), good, down, good)
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "· status unavailable issue-1" in card_text(app, 1)
+            assert "⚠ claude agents: claude not on PATH" in status_of(app)
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert "⚠ needs you (permission prompt) issue-1" in card_text(app, 1)
+            assert "⚠ claude agents" not in status_of(app)
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert "⚠ needs you (permission prompt) issue-1" in card_text(app, 1)
+            assert "⚠ claude agents: exited 1" in status_of(app)
+            await pilot.press("r")
+            await loaded(app, pilot)
+            assert "⚠ claude agents" not in status_of(app)
+
+    run(scenario())
+
+
+def test_an_unavailable_session_counts_as_live_for_s():
+    async def scenario():
+        bench = FakeBackend({1: [Session(1, "/wt/issue-1", "issue-1", "unavailable")]})
+        app = bench_app(bench)
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            await select(app, pilot, 1)
+            await pilot.press("s")
+            await loaded(app, pilot)
+            assert not is_confirm(app) and bench.calls == []
+            assert notifications(app)[-1] == ("#1 has a live session: press Enter to go to it", "warning")
+
+    run(scenario())
+
+
+def test_a_session_in_a_state_the_source_does_not_name_shows_unknown():
+    async def scenario():
+        app = bench_app(FakeBackend({1: [Session(1, "/wt/issue-1", "issue-1", "unknown", 7)]}))
+        async with app.run_test(size=(160, 40)) as pilot:
+            await loaded(app, pilot)
+            assert "? unknown issue-1" in card_text(app, 1)
 
     run(scenario())
