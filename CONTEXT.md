@@ -48,7 +48,38 @@ _Avoid_: orphan ticket, unparented ticket
 What `s` starts a session on: wayfinder work (a map, a ticket on one, a map spec and its tickets) or standalone
 work (a standalone spec and the tickets in its spec lane), or a loose ticket. Anything else is refused.
 
+### Sessions
+
+**Session backend**:
+What opens the board, starts, finds and goes to sessions, and releases them for cleanup: herdr panes and
+workspaces, or plain terminal windows. Auto-detected (herdr inside herdr, else plain), overridable per run, shell or
+repo.
+_Avoid_: workbench, multiplexer
+
+**Session**:
+A Claude session whose working directory is a card's worktree, whichever backend or hand opened it.
+
+**Session status**:
+What the board knows of a session: working, needs you, idle, done (herdr only), or unknown. A worktree without a
+session has no status (no agent).
+_Avoid_: agent state
+
+**Unknown**:
+A live session whose status the session source reports but doesn't name. The session exists; only its state is
+unclear.
+
+**Status unavailable**:
+The session source itself can't be read and has never answered, so the board can't tell whether a worktree has a
+session at all. Not the same as unknown.
+
+### Views
+
+**Board view**:
+How the board is shown: the TUI in a terminal, or the web view in a browser on the same machine. Every view shows
+the same lanes, filters and start flow; which view is open is independent of the session backend, and a TUI and a
+web view of one repo can run side by side.
+_Avoid_: frontend, front end, web client, UI mode
+
 **Starting**:
-The state of a ticket a board has begun a session for, until herdr lists its agent. Every board of the repo, in any
-Claude session, sees it as starting and refuses a second start on it.
-_Avoid_: launching, pending
+A card a board view has just started a session on, until the session appears or 30 s pass. Every board view of the
+repo sees it and refuses a second start meanwhile.

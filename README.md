@@ -59,17 +59,21 @@ so code changes apply on the next `/ticketmaster` without rebuilding. Changing `
 
 ```
 ticketmaster [open] [map] [--repo OWNER/NAME] [--provider github|gitlab|gitea|forgejo|linear]
-             [--host HOST] [--columns auto|one|all] [--interval SECONDS]
+             [--host HOST] [--columns auto|one|all] [--interval SECONDS] [--backend NAME]
 ticketmaster login
-ticketmaster cleanup MAP [--dry-run]
+ticketmaster cleanup MAP [--dry-run] [--backend NAME]
 ```
 
 `open` is the default command: it opens the board in a herdr pane right of the
 calling pane (the focused pane when `HERDR_PANE_ID` is stale or another session's), labelled
 `ticketmaster`; run again, it restarts there; run in that pane, it runs the board right there.
 Typed at a shell rather than run by Claude (no `CLAUDECODE` in the env), it runs the board right in
-the current pane, with no split. It
-only runs inside herdr (`HERDR_ENV=1`). `login` logs in to Linear with OAuth instead of an API key
+the current pane, with no split. `open` and `cleanup` run through a session backend, which opens the
+board and starts, finds and cleans up sessions; `herdr` is the only one so far, available inside herdr
+(`HERDR_ENV=1` and `herdr` on PATH). It is `--backend` for this run, else `TICKETMASTER_BACKEND`, else
+`backend = "<name>"` in `.ticketmaster.toml`, else the first available. A named backend that is unknown or
+unavailable exits 2 with the reason (an unknown name lists the known ones), never falling back to
+another; with none available it exits 2 too. A `--backend` given to `open` carries over to the board pane. `login` logs in to Linear with OAuth instead of an API key
 (see [Providers](#providers)); it runs anywhere.
 
 `cleanup MAP --dry-run` lists what a map, open or closed, leaves behind: the worktrees of the map and its
@@ -80,7 +84,7 @@ ticket is closed, or a PR that closes it is merged (GitHub), and it has no uncom
 **kept**, with the reasons: open ticket, unmerged PR, uncommitted changes. Merged comes from the tracker, never
 from unpushed commits, which a squash merge with its remote branch deleted leaves behind. The worktree the
 command runs in (its directory, or its herdr pane's workspace or agent) is judged like the others and marked to
-go last. With `--dry-run` it changes nothing. It runs inside herdr.
+go last. With `--dry-run` it changes nothing. It runs through the session backend, as `open` does.
 
 `cleanup MAP` without `--dry-run` removes what the dry run marks removable, on a closed map only: an open map
 is refused with a non-zero exit and nothing changed, since a human closes the map in the tracker. For each
@@ -155,12 +159,12 @@ claude -n "#<n> <title>" "<prompt>"
 
 The skills are `wayfinder_command`, `implement_command` and `to_tickets_command` in `.ticketmaster.toml`. Each ticket gets
 one worktree, never a `-2` copy: when it exists without an agent, `s` opens it and runs
-`claude -n "#<n> <title>" --continue` there. Maps and HITL tickets (grilling, prototype, task) take
-focus; research and `impl` cards start unfocused, and the status line says so.
+`claude -n "#<n> <title>" --continue` there. Every session `s` starts is unfocused, whatever the card:
+the board stays where it is, and `Enter` goes to the session.
 
 A confirmed start writes a marker, `<git common dir>/ticketmaster/starting/<n>`, with its time. Every board of
 the repo, in any Claude session, reads the markers each second, shows the card `▶ starting…` and refuses a
-second `s` on it until herdr lists the agent; a marker older than 30 s is ignored.
+second `s` on it until its session appears; a marker older than 30 s is ignored.
 
 `s` on an `impl` card starts `/implement` AFK. On Linear its branch is the issue's branch name (`branchName`),
 in a `tm-<n>` worktree. `s` also refuses an `impl` card with an open PR that closes it. A card you
@@ -168,7 +172,7 @@ claimed starts, even while its spec is open. The session owns review, push and P
 nothing else.
 
 `s` on a lane's map card whose open spec has no implementation ticket yet, open or closed, breaks the
-spec into tickets: it starts `/mattpocock-skills:to-tickets <spec-url>`, focused, in the spec's own
+spec into tickets: it starts `/mattpocock-skills:to-tickets <spec-url>` in the spec's own
 `issue-<spec>` worktree (`tm-<spec>` on Linear, on the issue's branch name), also when the map is
 closed. It refuses a blocked spec, one assigned to someone else, and one with a live session (`Enter`
 on the map card goes to the map's session, else the spec's); a spec closed without tickets is passed
@@ -181,10 +185,10 @@ next frontier ticket. With an empty frontier it starts `/mattpocock-skills:wayfi
 the map's own worktree, so wayfinder can graduate fog or finish the map.
 
 `s` on a spec lane's header card, a standalone spec with no implementation ticket yet (neither open nor
-closed), starts `/mattpocock-skills:to-tickets <spec-url>`, focused, in the spec's own `issue-<spec>` worktree.
+closed), starts `/mattpocock-skills:to-tickets <spec-url>` in the spec's own `issue-<spec>` worktree.
 It refuses a closed spec, a blocked one, one assigned to someone else, then one that has tickets (`s
 starts /implement on its tickets`), in that order. `s` on a ticket in a spec lane starts
-`/mattpocock-skills:implement <ticket-url>` unfocused in its `issue-<n>` worktree, as on a map spec's
+`/mattpocock-skills:implement <ticket-url>` in its `issue-<n>` worktree, as on a map spec's
 tickets. The board never removes a spec's worktree.
 
 The board finds the sessions working a ticket, including ones it did not start. A herdr agent works

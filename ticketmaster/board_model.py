@@ -18,7 +18,8 @@ from typing import NamedTuple, Protocol
 
 from .config import (DEFAULT_BUDGET, board_budget, board_decided_age, board_fetch_limit, board_interval, load_settings,
                      parse_budget, parse_decided_age, parse_fetch_limit, parse_interval, seconds_text, update_settings)
-from .herdr import HerdrError, Session
+from .backends import BackendError
+from .session import Session
 from .model import (COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, LaneKind, SpecProgress, Ticket, build_board,
                     frontier)
 from .providers import ErrorNotice, Provider, ProviderError, Query, Quota, RateLimited, error_notice
@@ -201,7 +202,7 @@ class Pacer:
 
 
 class Workbench(Protocol):
-    """The herdr side of the board, see start.Workbench. Every call blocks."""
+    """The session side of the board, see start.Workbench. Every call blocks."""
 
     def sessions(self) -> dict[int, list[Session]]: ...
     def start(self, ticket: Ticket) -> str: ...
@@ -405,7 +406,7 @@ class FetchPlan(NamedTuple):
 class FetchResult:
     plan: FetchPlan
     sessions: dict[int, list[Session]]
-    herdr_error: str | None = None
+    session_error: str | None = None
     board: Board | None = None
     error: ProviderError | None = None
     rate_limited: bool = False
@@ -467,7 +468,7 @@ class BoardModel:
         self.marked: set[int] = set()  # started by any view of the repo in the last STARTING_SECONDS
         self.sessions: dict[int, list[Session]] = {}
         self.settings = load_settings(self.settings_path) if self.settings_path else {}
-        self.herdr_error: str | None = None
+        self.session_error: str | None = None
         self.repo_key = f"{provider.name}:{provider.repo}"
         self.board_query = replace(query, limit=board_fetch_limit(self._repo_settings()))
         self.cut_off: str | None = None  # what the last ticket fetch cut off at the fetch limit
@@ -537,8 +538,8 @@ class BoardModel:
         if self.workbench is not None:
             try:
                 result.sessions = self.workbench.sessions()
-            except HerdrError as exc:
-                result.herdr_error = f"herdr: {exc}"
+            except BackendError as exc:
+                result.session_error = f"{exc.source}: {exc}"
         if not plan.tickets:
             return result
         try:
@@ -597,7 +598,7 @@ class BoardModel:
                 self._unmark(number)
             self.sessions = sessions
             changed = True
-        self.herdr_error = result.herdr_error
+        self.session_error = result.session_error
         return Applied(changed, queued)
 
     def drain_notices(self) -> list[Notice]:
@@ -887,7 +888,7 @@ class BoardModel:
             if chosen := self.chosen(section):
                 values = [f"#{v}" if v.isdigit() else v for v in chosen] if section == MAP else chosen
                 segments.append(Segment(f" · {section.lower()}: {', '.join(values)}", "filter"))
-        for error in (self.last_error, self.herdr_error):
+        for error in (self.last_error, self.session_error):
             if error:
                 segments.append(Segment(f"  ⚠ {error}", "error"))
         return segments
@@ -956,9 +957,8 @@ class BoardModel:
         if ticket.spec_kind:
             where = "its worktree with claude --continue" if worktree else "a new worktree"
             skill = "/implement" if ticket.spec_kind == "impl" else "/to-tickets"
-            unfocused = "\nunfocused (AFK)" if ticket.spec_kind == "impl" else ""
             return ConfirmText(f"Start {skill} on {ticket.ref} {ticket.title} in {where}?",
-                               self.describe_start(ticket) + unfocused, "Start")
+                               self.describe_start(ticket), "Start")
         if worktree is None:
             return ConfirmText(f"Start {ticket.ref} {ticket.title}{via} in a new worktree?",
                                self.describe_start(ticket), "Start")
@@ -980,8 +980,8 @@ class BoardModel:
         """Starts the session, off the owner thread; an error notice means it failed (see start_failed)."""
         try:
             return Notice(self.workbench.start(ticket))
-        except HerdrError as exc:
-            return Notice(f"herdr: {exc}", "error")
+        except BackendError as exc:
+            return Notice(f"{exc.source}: {exc}", "error")
 
     def start_failed(self, ticket: Ticket) -> None:
         """Frees the ticket for another start."""
@@ -992,8 +992,8 @@ class BoardModel:
         """Goes to the session, off the owner thread."""
         try:
             return Notice(self.workbench.go_to(goto.ticket, goto.session))
-        except HerdrError as exc:
-            return Notice(f"herdr: {exc}", "error")
+        except BackendError as exc:
+            return Notice(f"{exc.source}: {exc}", "error")
 
     def primary(self, ticket: Ticket) -> GoTo | Hint:
         """The card's own most urgent session, a map card's else its spec's; with none, what a start would do."""

@@ -499,7 +499,7 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
     for kind, prompt in [
         ("wayfinder map", "s on the lane's header card, while its open spec has no tickets (open\n"
                           + " " * 22 + "or closed), starts to_tickets_command (default\n"
-                          + " " * 22 + "/mattpocock-skills:to-tickets) with the spec's URL, focused, in the\n"
+                          + " " * 22 + "/mattpocock-skills:to-tickets) with the spec's URL, in the\n"
                           + " " * 22 + "spec's own worktree, also on a closed map. Else the map's first\n"
                           + " " * 22 + "frontier ticket (open, unblocked, unclaimed, no live session) in\n"
                           + " " * 22 + "that ticket's own worktree; with an empty frontier, the map itself\n"
@@ -509,11 +509,11 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
                              + " " * 22 + "first line"),
         ("standalone spec", "s on a spec lane's header card (▣), while the spec has no tickets\n"
                             + " " * 22 + "(neither open nor closed), starts to_tickets_command with the spec's URL,\n"
-                            + " " * 22 + "focused, in the spec's own worktree. Once it has tickets, s\n"
+                            + " " * 22 + "in the spec's own worktree. Once it has tickets, s\n"
                             + " " * 22 + "refuses it: s starts /implement on its tickets, one by one"),
         ("impl ticket", "an impl card, in a map lane or a spec lane: implement_command\n"
                         + " " * 22 + "(default /mattpocock-skills:implement) with the\n"
-                        + " " * 22 + "ticket's URL, unfocused (AFK). On Linear the branch is the issue's\n"
+                        + " " * 22 + "ticket's URL (AFK). On Linear the branch is the issue's\n"
                         + " " * 22 + "gitBranchName. Not with an open PR that closes it. The session owns\n"
                         + " " * 22 + "review, push and PR; the board starts nothing else"),
         ("refused", "a closed, blocked or someone else's ticket or ticketless spec, and\n"
@@ -525,8 +525,8 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
         row(kind, 18, prompt)
     text.append("  A wayfinder ticket's card says who it needs: HITL (you at the keyboard) for grilling and\n"
                 "  prototype, AFK (the agent alone) for research, and for a task whichever of the two\n"
-                "  words its body names first. Maps and HITL tickets take focus when started; research\n"
-                "  starts unfocused, and the status line says so.\n")
+                "  words its body names first. Every session s starts is unfocused: the board stays put,\n"
+                "  and Enter goes to it.\n")
 
     heading("Finding sessions")
     text.append("  A herdr agent in this repo works #<n> when its worktree or branch is issue-<n> or tm-<n>\n"

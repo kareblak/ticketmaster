@@ -1,4 +1,4 @@
-"""Fakes the board tests share: a tracker, a herdr workbench and ticket builders."""
+"""Fakes the board tests share: a tracker, a session workbench and ticket builders."""
 
 from ticketmaster.model import Ticket
 
@@ -27,7 +27,7 @@ class FakeProvider:
 
 
 class FakeBench:
-    """Records the board's herdr actions; `sessions` is what herdr reports."""
+    """The board's Workbench, faked: records its session actions; `sessions` is what the backend reports."""
 
     def __init__(self, sessions=None):
         self.calls = []

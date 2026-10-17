@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from fakes import FakeBench, FakeProvider, a_map, impl_of, on, spec_of
 from ticketmaster.board_model import (BoardModel, Chip, GoTo, Hint, Pacer, Refusal, StartPlan, budget_pace, card_view,
                                       passes_filters)
-from ticketmaster.herdr import HerdrError, Session
+from ticketmaster.backends import BackendError
+from ticketmaster.session import Session
 from ticketmaster.model import Column, LaneKind, Ticket
 from ticketmaster.providers import Query, Quota
 
@@ -360,8 +361,8 @@ def test_a_start_continues_an_agentless_worktree():
 
 
 def test_primary_goes_to_the_most_urgent_session_else_hints_what_a_start_would_do():
-    bench = FakeBench({2: [Session(2, "/w/issue-2", status="idle", workspace="w"),
-                           Session(2, "/w/issue-2-b", status="blocked", workspace="w")]})
+    bench = FakeBench({2: [Session(2, "/w/issue-2", status="idle", handle="w"),
+                           Session(2, "/w/issue-2-b", status="blocked", handle="w")]})
     model = a_model(bench=bench)
     found = model.primary(TICKETS[2])
     assert isinstance(found, GoTo) and found.session.status == "blocked"
@@ -375,7 +376,7 @@ def test_primary_goes_to_the_most_urgent_session_else_hints_what_a_start_would_d
 class FailingBench(FakeBench):
     def start(self, ticket):
         super().start(ticket)
-        raise HerdrError("agent_start_failed")
+        raise BackendError("agent_start_failed", source="fake")
 
 
 def test_a_begun_start_holds_the_ticket_until_it_fails():
@@ -384,7 +385,7 @@ def test_a_begun_start_holds_the_ticket_until_it_fails():
     assert model.start_plan(TICKETS[1]) == Refusal("#1 has a live session", live=True)
     assert "starting" in [b.kind for b in model.snapshot().lanes[0].cells[1][1][0].badges]
     notice = model.start(TICKETS[1])
-    assert notice == ("herdr: agent_start_failed", "error")
+    assert notice == ("fake: agent_start_failed", "error")
     model.start_failed(TICKETS[1])
     assert isinstance(model.start_plan(TICKETS[1]), StartPlan)
 
