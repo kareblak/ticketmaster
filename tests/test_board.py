@@ -9,7 +9,7 @@ from textual.widgets import Input
 
 from ticketmaster.board import (BoardApp, Card, Cell, FilterPicker, HelpScreen, Pacer, PickerOption, SettingsMenu,
                                budget_pace, clamp_lines, passes_filters, render_card)
-from fake_backend import FailingBackend, FakeBackend, workbench
+from fake_backend import FailingBackend, FakeBackend, FlakySessions, workbench
 from ticketmaster.backends import BackendError, SessionsUnreadable
 from ticketmaster.session import Session
 from ticketmaster.model import Column, Ticket
@@ -2987,19 +2987,6 @@ def test_the_confirm_says_where_the_backend_puts_the_session():
 
     run(scenario())
 
-
-class FlakySessions(FakeBackend):
-    """Answers `sessions` from a queue: a dict, or an exception to raise."""
-
-    def __init__(self, *answers):
-        super().__init__()
-        self.answers = list(answers)
-
-    def sessions(self, cwd):
-        answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
 
 
 def test_an_unread_session_source_shows_status_unavailable_then_keeps_the_last_good_badges():

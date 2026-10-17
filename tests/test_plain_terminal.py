@@ -279,3 +279,11 @@ def test_every_failure_kind_gives_the_reason_and_the_paste_able_line(env, system
         found.open(DIR, CMD, front=True)
     assert caught.value.reason == reason
     assert caught.value.paste == PASTE == paste_line(DIR, CMD)
+
+
+@pytest.mark.parametrize("answer", [subprocess.TimeoutExpired("osascript", 15), fail(1, "Not authorized (-1743)")])
+def test_ghostty_tries_no_second_recipe_after_a_timeout_or_a_refusal(answer):
+    found, runner = launcher({"GHOSTTY_RESOURCES_DIR": "/x"}, answers={("osascript",): answer})
+    with pytest.raises(LaunchFailed):
+        found.open(DIR, CMD, front=True)
+    assert [c.argv[0] for c in runner.calls] == ["osascript"]

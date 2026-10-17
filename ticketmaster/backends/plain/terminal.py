@@ -59,14 +59,16 @@ class Runner(Protocol):
 
 
 class LaunchFailed(BackendError):
-    """No window opened: `reason` says why, `paste` is the line that does it by hand."""
+    """No window opened: `reason` says why, `paste` is the line that does it by hand. `final`: the terminal app
+    refused (consent denied, sandboxed) or may still open one late (timed out), so no other recipe is tried."""
 
     source = "plain"
 
-    def __init__(self, reason: str, paste: str = ""):
+    def __init__(self, reason: str, paste: str = "", final: bool = False):
         super().__init__(f"couldn't open a terminal window ({reason})")
         self.reason = reason
         self.paste = paste
+        self.final = final
 
 
 @dataclass(frozen=True)
@@ -110,7 +112,7 @@ class Launcher:
             terminal = self.detect()
             self.launch(terminal, directory, command, front)
         except LaunchFailed as exc:
-            raise LaunchFailed(exc.reason, paste_line(directory, command)) from None
+            raise LaunchFailed(exc.reason, paste_line(directory, command), exc.final) from None
         return terminal
 
     # --- which terminal ----------------------------------------------------------------------------------------
@@ -197,7 +199,7 @@ class Launcher:
                     "new window with configuration cfg", *activate, "end tell",
                 ], directory, line))
             except LaunchFailed as exc:
-                if "(-1743)" in exc.reason or "(-600)" in exc.reason:  # denied or sandboxed: so would `open` be
+                if exc.final:
                     raise
                 self.open_app("Ghostty", front, f"--working-directory={directory}", "-e", *command)
         elif key == "kitty":
@@ -226,30 +228,40 @@ class Launcher:
         done = self.waited(argv, "osascript")
         if done.returncode == 0:
             return
-        error = (done.stderr.strip().splitlines() or [""])[-1]
+        error = last_line(done.stderr)
         code = (match[1] if (match := APPLE_ERROR.search(error)) else None)
         if code == "-1743":
             raise LaunchFailed(f"macOS Automation permission for {terminal.name} denied (-1743); allow it in System "
-                               "Settings > Privacy & Security > Automation")
+                               "Settings > Privacy & Security > Automation", final=True)
         if code == "-600":
             raise LaunchFailed(f"{terminal.name} could not be reached (-600); under the Bash sandbox, set "
-                               'sandbox.allowAppleEvents or add "ticketmaster *" to sandbox.excludedCommands')
-        raise LaunchFailed(f"osascript exited {done.returncode}: {error}".rstrip(": "))
+                               'sandbox.allowAppleEvents or add "ticketmaster *" to sandbox.excludedCommands',
+                               final=True)
+        raise LaunchFailed(exited("osascript", done))
 
     def open_app(self, app: str, front: bool, *args: str) -> None:
         """A new instance of the app with one window: `open -n`, in the background (`-g`) unless `front`."""
         done = self.waited(["open", *([] if front else ["-g"]), "-n", "-a", app, "--args", *args], "open")
         if done.returncode != 0:
-            error = (done.stderr.strip().splitlines() or [""])[-1]
-            raise LaunchFailed(f"open exited {done.returncode}: {error}".rstrip(": "))
+            raise LaunchFailed(exited("open", done))
 
     def waited(self, argv: list[str], name: str) -> subprocess.CompletedProcess:
         try:
             return self.runner(argv, env=child_env(self.env), timeout=OSASCRIPT_TIMEOUT)
         except subprocess.TimeoutExpired:
-            raise LaunchFailed(f"{name} timed out") from None
+            raise LaunchFailed(f"{name} timed out", final=True) from None
         except OSError as exc:
             raise LaunchFailed(f"{name}: {exc.strerror or exc}") from None
+
+
+def last_line(stderr: str) -> str:
+    return (stderr.strip().splitlines() or [""])[-1]
+
+
+def exited(name: str, done: subprocess.CompletedProcess) -> str:
+    """`<name> exited <code>`, and its last line of stderr when it said something."""
+    error = last_line(done.stderr)
+    return f"{name} exited {done.returncode}" + (f": {error}" if error else "")
 
 
 def linux_argv(terminal: Terminal, directory: str, command: list[str]) -> list[str]:

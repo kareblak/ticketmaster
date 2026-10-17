@@ -941,7 +941,8 @@ class BoardApp(App):
             try:
                 sessions = self.workbench.sessions()
             except SessionsUnreadable as exc:  # shows what the backend still can, else keeps the last good list
-                sessions, session_error = exc.sessions or sessions, f"{exc.source}: {exc}"
+                sessions = exc.sessions if exc.sessions is not None else sessions
+                session_error = f"{exc.source}: {exc}"
             except BackendError as exc:
                 session_error = f"{exc.source}: {exc}"
         if not tickets:

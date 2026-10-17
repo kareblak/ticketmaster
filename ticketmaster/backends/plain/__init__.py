@@ -25,7 +25,7 @@ from pathlib import Path
 from ...git import checkout_of, parse_worktrees, ticket_number
 from ...session import Session
 from ..base import BackendError, CleanupView, Released, SessionsUnreadable
-from .terminal import OVERRIDE_HINT, LaunchFailed, Launcher, Runner, paste_line
+from .terminal import OVERRIDE_HINT, LaunchFailed, Launcher, Runner, exited
 
 NAME = "plain"
 SOURCE = "claude agents"  # where session status comes from, and errors about it on the status line
@@ -69,27 +69,26 @@ class PlainBackend:
     configured: str | None = None  # `terminal` in .ticketmaster.toml
     name: str = NAME
     where: str = "in a new terminal window"
-    answered: bool = False  # `claude agents` has answered this run
+    ever_read: bool = False  # `claude agents` has answered this run
 
     # --- the board ---------------------------------------------------------------------------------------------
 
     def open_board(self, cwd: Path, args: list[str]) -> str | None:
         """None when the board runs here: typed at a shell, or the board a window was opened for, which records
-        itself in its pidfile. Run by Claude, a new window, after stopping this Claude session's previous board."""
+        itself in its pidfile. Run by Claude, a new window; once it opened, this Claude session's previous board
+        stops, so a failed launch leaves it running."""
         if slot := self.env.get(SLOT_ENV):
             self.record(cwd, slot)
             return None
         if not self.env.get(CLAUDE_ENV):
             return None
         slot = re.sub(r"[^A-Za-z0-9_.-]", "_", self.env.get(SESSION_ENV) or "repo")
-        command, launcher = self.board_command(args, slot), self.launcher()
+        previous = self.live_board(cwd, slot)
         try:
-            terminal = launcher.detect()
-            replaced = self.stop_board(cwd, slot)
-            launcher.launch(terminal, str(cwd), command, front=True)
+            terminal = self.launcher().open(str(cwd), self.board_command(args, slot), front=True)
         except LaunchFailed as exc:
-            raise BackendError(f"{exc}; run it yourself:\n  {paste_line(str(cwd), command)}\n{OVERRIDE_HINT}",
-                               source=NAME) from None
+            raise BackendError(f"{exc}; run it yourself:\n  {exc.paste}\n{OVERRIDE_HINT}", source=NAME) from None
+        replaced = previous is not None and self.stop(previous)
         return f"Board opened in a new {terminal.name} window" + (" (replaced the previous one)" if replaced else "")
 
     def launcher(self) -> Launcher:
@@ -127,10 +126,13 @@ class PlainBackend:
 
         self.at_exit(forget)
 
-    def stop_board(self, cwd: Path, slot: str) -> bool:
-        """SIGTERM to the slot's board, if its pidfile names a live ticketmaster; whether there was one."""
+    def live_board(self, cwd: Path, slot: str) -> int | None:
+        """The PID of the slot's board, if its pidfile names a live ticketmaster."""
         if (path := self.pidfile(cwd, slot)) is None or (pid := read_pid(path)) is None or not self.is_board(pid):
-            return False
+            return None
+        return pid
+
+    def stop(self, pid: int) -> bool:
         try:
             self.kill(pid, signal.SIGTERM)
         except OSError:
@@ -160,11 +162,10 @@ class PlainBackend:
         try:
             agents = self.agents()
         except BackendError as exc:
-            shown = None if self.answered else {
-                n: [Session(n, w["path"], w.get("branch"), "unavailable")] for w in checkouts
-                if w["is_linked_worktree"] and (n := ticket_number(w)) is not None}
+            shown = None if self.ever_read else {
+                n: [Session(n, w["path"], w.get("branch"), "unavailable")] for n, w in ticket_worktrees(checkouts)}
             raise SessionsUnreadable(str(exc), SOURCE, shown) from None
-        self.answered = True
+        self.ever_read = True
         found: dict[int, list[Session]] = {}
         busy: set[str] = set()
         for agent in agents:
@@ -176,8 +177,8 @@ class PlainBackend:
             reason = agent.get("waitingFor") if status == "blocked" else None
             found.setdefault(n, []).append(Session(n, checkout["path"], checkout.get("branch"), status,
                                                    agent.get("pid") or agent.get("id"), reason))
-        for w in checkouts:
-            if w["is_linked_worktree"] and w["path"] not in busy and (n := ticket_number(w)) is not None:
+        for n, w in ticket_worktrees(checkouts):
+            if w["path"] not in busy:
                 found.setdefault(n, []).append(Session(n, w["path"], w.get("branch")))
         return {n: sorted(sessions, key=lambda s: s.urgency) for n, sessions in found.items()}
 
@@ -199,8 +200,7 @@ class PlainBackend:
         except OSError as exc:
             raise BackendError(str(exc.strerror or exc), SOURCE) from None
         if done.returncode != 0:
-            error = (done.stderr.strip().splitlines() or [""])[-1]
-            raise BackendError(f"exited {done.returncode}" + (f": {error}" if error else ""), SOURCE)
+            raise BackendError(exited("claude agents", done).removeprefix("claude agents "), SOURCE)
         try:
             listed = json.loads(done.stdout)
         except ValueError:
@@ -223,6 +223,11 @@ class PlainBackend:
 
     def release(self, cwd: Path, path: str) -> Released:
         raise BackendError(f"cleanup {LATER}", NAME)
+
+
+def ticket_worktrees(checkouts: list[dict]) -> list[tuple[int, dict]]:
+    """The linked worktrees named after a ticket, with its number."""
+    return [(n, w) for w in checkouts if w["is_linked_worktree"] and (n := ticket_number(w)) is not None]
 
 
 def read_pid(path: Path) -> int | None:
