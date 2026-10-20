@@ -1,6 +1,6 @@
 ---
 name: ticketmaster
-description: Open a live, read-only swimlane board of the current repo's wayfinder maps and, on GitHub, GitLab, Gitea/Forgejo and Linear, standalone /to-spec specs (a lane per open map or spec, its tickets in Blocked, Frontier, Claimed, Decided) in a herdr pane beside this Claude session, from which a wayfinder ticket starts /wayfinder, a spec without tickets /to-tickets and a spec's ticket /implement, each in its own worktree. Works with GitHub, GitLab, Gitea/Forgejo and Linear. Use when the user wants to see or track wayfinder work, start a map's tickets, or log in to the tracker for the board.
+description: Open a live, read-only swimlane board of the current repo's wayfinder maps and, on GitHub, GitLab, Gitea/Forgejo and Linear, standalone /to-spec specs (a lane per open map or spec, its tickets in Blocked, Frontier, Claimed, Decided) beside this Claude session, in a new terminal window or, inside herdr, a herdr pane, from which a wayfinder ticket starts /wayfinder, a spec without tickets /to-tickets and a spec's ticket /implement, each in its own worktree. Works with GitHub, GitLab, Gitea/Forgejo and Linear. Use when the user wants to see or track wayfinder work, start a map's tickets, or log in to the tracker for the board.
 argument-hint: "[map] | login | cleanup <map> [--dry-run]"
 ---
 
@@ -10,30 +10,48 @@ Run the plugin's `ticketmaster` command with the user's arguments, then reply wi
 ticketmaster $ARGUMENTS
 ```
 
-- No arguments, or a map (`42`, `#42`, `TM-1` or an issue URL): opens the board in a herdr pane next to this
-  session, labelled `ticketmaster`; running it again restarts the board there. A named map shows even when it
-  is closed, as its header card alone.
+- No arguments, or a map (`42`, `#42`, `TM-1` or an issue URL): opens the board beside this session, through
+  the session backend, auto-detected (herdr inside herdr, plain everywhere else) unless `--backend herdr|plain`,
+  `TICKETMASTER_BACKEND` or `backend` in `.ticketmaster.toml` names one. A named map shows even when it is
+  closed, as its header card alone.
+  - **herdr**: the board opens in a herdr pane next to this session, labelled `ticketmaster`; running it again
+    restarts the board there.
+  - **plain**: the board opens in a new window of the user's terminal and prints one line, e.g.
+    `Board opened in a new Ghostty window (replaced the previous one), for github:kareblak/ticketmaster.` Relay
+    it verbatim. Running it again from this session replaces this session's previous board; another Claude
+    session's board stays.
 - `login`: logs in to Linear with OAuth in the browser, for a board without a personal API key; it needs
   `oauth_client_id` in `.ticketmaster.toml` and waits up to 5 minutes for the browser, so run it with a Bash
   timeout of at least 330000 ms. Relay what it prints: the token file it wrote, or the config line to add. On the
   other trackers it names their own login (`gh auth login`, `glab auth login`, `tea login add`).
-- `cleanup <map> --dry-run`: lists the map's and its tickets' worktrees, branches and herdr workspaces, each
-  marked removable or kept with the reason; it changes nothing. Relay the list as printed.
-- `cleanup <map>`: removes what the dry run marks removable (worktree, herdr workspace and agents, merged
-  branch), never forcing anything; it refuses an open map. Run it when the user asks for the cleanup itself, not
-  just the list, or as the final step of a session that finished a map's last work (see below), and relay the
-  summary as printed. Run from inside one of the map's worktrees, it removes that worktree last, prints the
-  summary, and then closes its own herdr workspace, which ends this session: make it the session's last step, as
-  there is no turn after it to relay anything.
+- `cleanup <map> --dry-run`: lists the map's and its tickets' worktrees, branches and what the backend has in
+  them (herdr workspaces and agents, or `claude agents` sessions), each marked removable or kept with the reason;
+  it changes nothing. Relay the list as printed.
+- `cleanup <map>`: removes what the dry run marks removable (worktree, merged branch, and in herdr the
+  workspace and agents), never forcing anything; it refuses an open map. Run it when the user asks for the
+  cleanup itself, not just the list, or as the final step of a session that finished a map's last work (see
+  below), and relay the summary as printed. Run from inside one of the map's worktrees, it removes that worktree
+  last and prints the summary. In herdr it then closes its own herdr workspace, which ends this session: make it
+  the session's last step, as there is no turn after it to relay anything. In a plain terminal nothing is closed:
+  the summary says `cleanup ran in it`, and this session is left in a removed directory; tell the user they can
+  close its window.
 
 The first run, and the first after a plugin update, builds the plugin's venv, which takes a minute.
 
 If it fails:
 
-- **No session backend available** or **backend herdr unavailable** (exit 2): this session is not in a herdr
-  pane (`HERDR_ENV is not 1`) or `herdr` is not on PATH. Tell the user to start herdr and run `/ticketmaster`
-  from a Claude session inside it. **Unknown backend** (exit 2): report the known backends it lists; the name
-  came from `--backend`, `TICKETMASTER_BACKEND` or `backend` in `.ticketmaster.toml`.
+- **No terminal window** (exit 1, plain backend): it prints why (over SSH, no display, no terminal found, macOS
+  Automation denied `-1743`, the Bash sandbox `-600`), a line to paste, `cd '<dir>' && …`, and how to pick the
+  terminal. Relay the reason and the paste line verbatim, in a code block, for the user to run in a terminal of
+  their own, plus the override: `TICKETMASTER_TERMINAL` or `terminal` in `.ticketmaster.toml`, a command with
+  `{dir}` and `{cmd}`. For `-1743`, the user allows the terminal in System Settings > Privacy & Security >
+  Automation; for `-600`, they set `sandbox.allowAppleEvents` or add `"ticketmaster *"` to
+  `sandbox.excludedCommands`. Do not tell the user to start herdr: herdr is optional.
+- **Backend herdr unavailable** (exit 2): herdr was forced (`--backend herdr`, `TICKETMASTER_BACKEND` or
+  `backend` in `.ticketmaster.toml`) but this session is not in a herdr pane (`HERDR_ENV is not 1`) or `herdr`
+  is not on PATH; ticketmaster never falls back. Report the reason, and that dropping the forced choice (or
+  `--backend plain`) opens the board in a terminal window instead. **Unknown backend** (exit 2): report the known
+  backends it lists, and where the name came from.
 - **Building the plugin venv failed**: report the printed reason. The fix is Python 3.11 or newer as `python3` on
   PATH (`brew install python@3.12`) and network access for pip, then `/ticketmaster` again.
 - **Provider or login error** (CLI missing or not logged in, unknown host): report it as printed, with the fix:
@@ -45,7 +63,9 @@ If it fails:
 On the board, `Enter` goes to the session working a ticket (or its worktree, with a shell), or says it has
 none and what `s` would do; it never starts Claude. `s` starts (or continues) `/wayfinder` for the ticket,
 or a map's next frontier ticket, `/to-tickets` on a spec without tickets, or `/implement` on a spec's ticket,
-in its own git worktree and herdr workspace, or says why it refuses.
+in its own git worktree, in a herdr workspace or a new terminal window, or says why it refuses. In a plain
+terminal, `Enter` on a card with a live session only says `running in <path>`, since the board cannot raise
+another terminal's window.
 
 ## Cleanup as a map's final step
 
@@ -60,8 +80,10 @@ closed the map in the tracker:
 
 Reading the list: **removable** entries go; **kept** entries stay with their reasons, and nothing is ever
 forced. `open ticket` or `unmerged PR` means the ticket's work is not in yet; `uncommitted changes` (or
-`git status unreadable`) means a worktree may hold work nobody committed; `agent outside a ticket worktree` is a
-session working the ticket from another checkout. Name each kept entry and its reason for the user; do not remove
-it by hand. `removed last: cleanup runs in it` marks this session's own worktree, whose workspace closes after the
-summary. In the real run's summary, `branch … kept: not merged in git` is normal after a squash merge, and
+`git status unreadable`) means a worktree may hold work nobody committed; `agent outside a ticket worktree` (herdr)
+is a session working the ticket from another checkout; `live session` (plain) is a Claude session still running in
+the worktree, which the user closes before running cleanup again; `sessions unreadable` (plain) means
+`claude agents --json` failed, so every worktree was kept. Name each kept entry and its reason for the user; do not
+remove it by hand. `removed last: cleanup runs in it` marks this session's own worktree, whose herdr workspace closes
+after the summary. In the real run's summary, `branch … kept: not merged in git` is normal after a squash merge, and
 `worktree kept: git worktree remove refused` means the worktree changed after the look.

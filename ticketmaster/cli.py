@@ -1,7 +1,8 @@
 """Command line: `open` (the board beside the caller, through the session backend: in herdr a pane split off the
-caller, or right here when the caller is that pane) and `cleanup <map>` (removes what a closed map leaves behind;
-`--dry-run` lists it), which run through a session backend (`--backend`, else TICKETMASTER_BACKEND, else `backend` in
-`.ticketmaster.toml`, else the first available), and `login` (Linear OAuth, in the browser), which runs anywhere.
+caller, in a plain terminal a new window, or right here when the caller is that pane or a shell) and `cleanup <map>`
+(removes what a closed map leaves behind; `--dry-run` lists it), which run through a session backend (`--backend`,
+else TICKETMASTER_BACKEND, else `backend` in `.ticketmaster.toml`, else auto-detected: herdr inside herdr, else
+plain), and `login` (Linear OAuth, in the browser), which runs anywhere.
 """
 
 from __future__ import annotations
@@ -25,7 +26,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="ticketmaster",
         usage="ticketmaster [open] [map] [options] | ticketmaster login | ticketmaster cleanup map [--dry-run]",
-        description="Live swimlane board of wayfinder maps and standalone specs, starting sessions through herdr.",
+        description="Live swimlane board of wayfinder maps and standalone specs, starting sessions in terminal "
+                    "windows or herdr.",
     )
     parser.add_argument("--version", action="store_true", help="print the version")
     parser.add_argument("command", choices=COMMANDS)
