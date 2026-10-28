@@ -1,0 +1,164 @@
+#!/usr/bin/env python3
+"""Generate `ticketmaster/herdr_palettes.py` from herdr's source at a git tag.
+
+    scripts/herdr_palettes.py v0.9.5          # fetch, parse and write the module
+    scripts/herdr_palettes.py --check v0.9.5  # exit 1 when the committed module differs
+
+Herdr compiles its themes into the binary, so the board keeps its own copy. The palettes come from `src/app/state.rs`,
+the theme names and aliases from `src/config/theme.rs`, and the light/dark siblings `auto_switch` defaults to from
+`src/app/mod.rs`. The parsing is strict: when herdr reshapes that code, this fails rather than writing a partial module.
+"""
+
+from __future__ import annotations
+
+import argparse
+import difflib
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = "herdrdev/herdr"
+MODULE = Path(__file__).resolve().parent.parent / "ticketmaster" / "herdr_palettes.py"
+SOURCES = {"state": "src/app/state.rs", "theme": "src/config/theme.rs", "app": "src/app/mod.rs"}
+# The ratatui colors herdr's palettes use besides Rgb, written as `parse_color` reads them in `[theme.custom]`.
+NAMED = {
+    "Reset", "Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White", "Gray", "DarkGray",
+    "LightRed", "LightGreen", "LightYellow", "LightBlue", "LightMagenta", "LightCyan",
+}  # fmt: skip
+
+
+class ParseError(Exception):
+    pass
+
+
+def fetch(tag: str) -> dict[str, str]:
+    sources = {}
+    for key, path in SOURCES.items():
+        url = f"https://raw.githubusercontent.com/{REPO}/{tag}/{path}"
+        # curl rather than urllib: python.org builds on macOS ship without CA certificates.
+        sources[key] = subprocess.run(["curl", "-fsSL", url], capture_output=True, text=True, check=True).stdout
+    return sources
+
+
+def block(source: str, start: str) -> str:
+    """The text from `start` to the brace or bracket that closes the one it opens."""
+    at = source.find(start)
+    if at < 0:
+        raise ParseError(f"not found: {start}")
+    opening = min((i for i in (source.find("{", at), source.find("[", at + len(start))) if i >= 0))
+    pairs = {"{": "}", "[": "]"}
+    depth = 0
+    for i in range(opening, len(source)):
+        if source[i] == source[opening]:
+            depth += 1
+        elif source[i] == pairs[source[opening]]:
+            depth -= 1
+            if depth == 0:
+                return source[opening + 1 : i]
+    raise ParseError(f"unclosed: {start}")
+
+
+def strings(text: str) -> list[str]:
+    return re.findall(r'"([^"]*)"', text)
+
+
+def color(expr: str) -> str:
+    if rgb := re.fullmatch(r"Rgb\((\d+),\s*(\d+),\s*(\d+)\)", expr):
+        return "#" + "".join(f"{int(c):02x}" for c in rgb.groups())
+    if expr in NAMED:
+        return expr.lower()
+    raise ParseError(f"unknown color: Color::{expr}")
+
+
+def parse(sources: dict[str, str]) -> tuple[tuple[str, ...], dict, dict, dict]:
+    state, theme, app = sources["state"], sources["theme"], sources["app"]
+
+    tokens = tuple(re.findall(r"pub (\w+): Color,", block(state, "pub struct Palette")))
+    names = strings(block(theme, "pub const THEME_NAMES: &[&str] ="))
+    constructors = dict(re.findall(r'"([\w-]+)" => Some\(Self::(\w+)\(\)\)', block(state, "pub fn from_name(")))
+    if list(constructors) != names:
+        raise ParseError(f"Palette::from_name covers {list(constructors)}, THEME_NAMES is {names}")
+
+    palettes = {}
+    for name, constructor in constructors.items():
+        body = block(state, f"pub fn {constructor}() -> Self")
+        fields = re.findall(r"(\w+): Color::(\w+(?:\([^)]*\))?),", body)
+        if tuple(field for field, _ in fields) != tokens:
+            raise ParseError(f"{constructor}() sets {[field for field, _ in fields]}, the Palette has {list(tokens)}")
+        palettes[name] = {token: color(expr) for token, expr in fields}
+
+    aliases = {}
+    for patterns, canonical in re.findall(r"((?:\"[\w-]+\"\s*\|?\s*)+)=> Some\(\"([\w-]+)\"\)",
+                                          block(theme, "fn canonical_theme_name(")):  # fmt: skip
+        aliases.update({alias: canonical for alias in strings(patterns) if alias != canonical})
+    if set(aliases.values()) - set(names):
+        raise ParseError(f"aliases name unknown themes: {set(aliases.values()) - set(names)}")
+
+    siblings = {}
+    for patterns, dark, light in re.findall(
+        r"((?:\"[\w-]+\"\s*\|?\s*)+)=> \{\s*\(\"([\w-]+)\"\.to_string\(\), \"([\w-]+)\"\.to_string\(\)\)",
+        block(app, "fn sibling_theme_names("),
+    ):
+        siblings.update({name: (dark, light) for name in strings(patterns) if name in names})
+    if not siblings or {d for pair in siblings.values() for d in pair} - set(names):
+        raise ParseError(f"siblings name unknown themes: {siblings}")
+    return tokens, palettes, aliases, siblings
+
+
+def render(tag: str, sources: dict[str, str]) -> str:
+    tokens, palettes, aliases, siblings = parse(sources)
+    lines = [
+        f'"""Herdr\'s built-in themes as of herdr {tag}. Generated by `scripts/herdr_palettes.py {tag}`; do not edit.',
+        "",
+        "Colors are hex, or the names herdr's `parse_color` reads (`reset`, `blue`, `darkgray`, …). Theme names are",
+        "matched after lowercasing and turning spaces and underscores into dashes, then looking the name up in ALIASES.",
+        "SIBLINGS gives a theme's (dark, light) pair, the default `dark_name`/`light_name` under `auto_switch`.",
+        '"""',
+        "",
+        f'HERDR_TAG = "{tag}"',
+        "",
+        "TOKENS = (",
+        *(f'    "{token}",' for token in tokens),
+        ")",
+        "",
+        "PALETTES = {",
+    ]
+    for name, palette in palettes.items():
+        lines.append(f'    "{name}": {{')
+        lines.extend(f'        "{token}": "{value}",' for token, value in palette.items())
+        lines.append("    },")
+    lines += ["}", "", "ALIASES = {", *(f'    "{a}": "{c}",' for a, c in aliases.items()), "}", ""]
+    lines += ["SIBLINGS = {", *(f'    "{n}": ("{d}", "{l}"),' for n, (d, l) in siblings.items()), "}", ""]
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("tag", help="herdr git tag, e.g. v0.9.5")
+    parser.add_argument("--check", action="store_true", help="compare with the committed module instead of writing")
+    args = parser.parse_args(argv)
+    try:
+        generated = render(args.tag, fetch(args.tag))
+    except subprocess.CalledProcessError as error:
+        print(f"herdr {args.tag}: {error.stderr.strip()}", file=sys.stderr)
+        return 2
+    except ParseError as error:
+        print(f"herdr {args.tag}: {error}", file=sys.stderr)
+        return 2
+    if not args.check:
+        MODULE.write_text(generated)
+        print(f"wrote {MODULE.relative_to(Path.cwd()) if MODULE.is_relative_to(Path.cwd()) else MODULE}")
+        return 0
+    committed = MODULE.read_text() if MODULE.exists() else ""
+    if committed == generated:
+        print(f"{MODULE.name} matches herdr {args.tag}")
+        return 0
+    sys.stdout.writelines(difflib.unified_diff(committed.splitlines(True), generated.splitlines(True),
+                                               "committed", f"herdr {args.tag}"))  # fmt: skip
+    print(f"{MODULE.name} differs from herdr {args.tag}: run scripts/herdr_palettes.py {args.tag}", file=sys.stderr)
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
