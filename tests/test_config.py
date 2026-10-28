@@ -89,7 +89,7 @@ def test_version_is_0_3_2(capsys):
     from ticketmaster.cli import main
 
     assert main(["--version"]) == 0
-    assert capsys.readouterr().out.strip() == "ticketmaster 0.3.6"
+    assert capsys.readouterr().out.strip() == "ticketmaster 0.3.7"
 
 
 def linear_repo(tmp_path, toml):
