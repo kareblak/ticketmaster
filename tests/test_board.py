@@ -726,7 +726,7 @@ def test_help_explains_lanes_and_the_four_column_rules():
             await pilot.press("question_mark")
             await pilot.pause()
             text = " ".join(app.screen.text.plain.split())
-            assert "A map lane is an open wayfinder map, headed by its map card (◆)" in text
+            assert "A map lane is an open wayfinder map, headed by its map card (MAP)" in text
             assert "A spec lane is a standalone spec, from /to-spec with no map link" in text
             assert "Other issues are not shown" not in text and "Each open wayfinder map is a lane" not in text
             for rule in ("Decided closed, of any age", "Blocked an open blocking issue", "Claimed assigned to someone",
@@ -734,10 +734,10 @@ def test_help_explains_lanes_and_the_four_column_rules():
                 assert rule in text
             for gone in ("Review", "Done", "In progress", "Ready"):
                 assert gone not in text
-            assert "is a line of the map card, ▣ #<spec> open or closed" in text
+            assert "is a line of the map card, SPEC #<spec> open or closed" in text
             assert ("s on the lane's header card, while its open spec has no tickets (open or closed), starts "
                     "to_tickets_command (default /mattpocock-skills:to-tickets)") in text
-            assert ("standalone spec s on a spec lane's header card (▣), while the spec has no tickets (neither "
+            assert ("standalone spec s on a spec lane's header card (SPEC), while the spec has no tickets (neither "
                     "open nor closed), starts to_tickets_command") in text
             assert "s refuses it: s starts /implement on its tickets" in text
             assert "impl ticket an impl card, in a map lane or a spec lane: implement_command" in text
@@ -1589,8 +1589,8 @@ def test_a_maps_spec_is_a_line_of_its_map_card_and_no_card_in_any_column():
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
             assert not {60, 80} & set(shown_numbers(app))
-            assert "▣ #80 open  no tickets yet" in card_text(app, 9)
-            assert "▣ #60 open  1 done · 2 open · 1 blocked" in card_text(app, 20)  # done less canceled
+            assert " SPEC  #80 open  no tickets yet" in card_text(app, 9)
+            assert " SPEC  #60 open  1 done · 2 open · 1 blocked" in card_text(app, 20)  # done less canceled
             assert "1 decided · 3 open · 1 blocked" in card_text(app, 9)  # the map's own counts stay its decisions
 
     run(scenario())
@@ -1628,7 +1628,7 @@ def test_a_spec_linked_only_as_a_sub_issue_of_the_map_is_on_its_spec_line_and_s_
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
             assert 80 not in shown_numbers(app)
-            assert "▣ #80 open  no tickets yet" in card_text(app, 9)
+            assert " SPEC  #80 open  no tickets yet" in card_text(app, 9)
             await select(app, pilot, 9)
             await pilot.press("s")
             await pilot.pause()
@@ -1711,7 +1711,7 @@ def test_the_map_card_badges_its_specs_session_and_enter_goes_there_when_the_map
         app = spec_app(bench)
         async with app.run_test(size=(200, 60)) as pilot:
             await loaded(app, pilot)
-            assert "▣ #80 open  no tickets yet\n● working issue-80" in card_text(app, 9)
+            assert " SPEC  #80 open  no tickets yet\n● working issue-80" in card_text(app, 9)
             await select(app, pilot, 9)
             await pilot.press("enter")
             await loaded(app, pilot)
@@ -1729,7 +1729,7 @@ def test_the_spec_type_filter_keeps_a_lane_whose_map_card_carries_a_spec(tmp_pat
             await pilot.pause()
             await pick(pilot, app, "spec")
             assert headers(app) == [20] and shown_numbers(app) == []
-            assert "▣ #30 open" in card_text(app, 20)
+            assert " SPEC  #30 open" in card_text(app, 20)
 
     run(scenario())
 
@@ -1771,7 +1771,7 @@ def test_a_linear_maps_lane_shows_keys_display_names_and_key_blockers():
         async with app.run_test(size=(160, 40)) as pilot:
             await loaded(app, pilot)
             assert shown_lanes(app) == {1: {"BLOCKED": [3, 5], "CLAIMED": [2]}}
-            assert "▣ TM-4 open  0 done · 1 open · 1 blocked" in card_text(app, 1)
+            assert " SPEC  TM-4 open  0 done · 1 open · 1 blocked" in card_text(app, 1)
             assert "TM-1 Read-only ticketmaster" in card_text(app, 1) and "#1" not in card_text(app, 1)
             assert "TM-2 Survey" in card_text(app, 2) and "@kaare.blakstad" in card_text(app, 2)
             assert "TM-3 Decide" in card_text(app, 3) and "⛔ TM-2" in card_text(app, 3)
@@ -1800,7 +1800,7 @@ def test_a_linear_board_shows_a_standalone_spec_lane():
             await loaded(app, pilot)
             assert shown_lanes(app) == {1: {"BLOCKED": [3], "FRONTIER": [2], "DECIDED": [4]}}
             header = card_text(app, 1).split("\n")
-            assert header[:2] == ["▣ TM-1 Board shows standalone work  @kaare.blakstad",
+            assert header[:2] == [" SPEC  TM-1 Board shows standalone work  @kaare.blakstad",
                                   "spec · 1 done · 2 open · 1 blocked"]
             assert chips_of(app, 3).startswith("impl ") and "⛔ TM-2" in chips_of(app, 3)
             assert "Show the lane." in card_text(app, 2)
@@ -2438,9 +2438,9 @@ def test_spec_lanes_follow_the_map_lanes_by_number_headed_by_the_spec():
                 70: {"BLOCKED": [72], "FRONTIER": [71], "CLAIMED": [75], "DECIDED": [73, 74]},  # #74 however old
                 85: {}}
             header = card_text(app, 70).split("\n")
-            assert header[0] == "▣ #70 Board shows standalone work  @alice"
+            assert header[0] == " SPEC  #70 Board shows standalone work  @alice"
             assert header[1] == "spec · 1 done · 3 open · 1 blocked"  # #74 was canceled
-            assert card_text(app, 40).split("\n")[:2] == ["▣ #40 Old spec  spec closed",
+            assert card_text(app, 40).split("\n")[:2] == [" SPEC  #40 Old spec  spec closed",
                                                          "spec · 1 done · 1 open · 0 blocked"]
             assert card_text(app, 85).split("\n")[1] == "spec · 0 done · 0 open · 0 blocked"
             assert chips_of(app, 71).startswith("impl ") and "▣ Board shows standalone work" in chips_of(app, 71)
@@ -2615,9 +2615,9 @@ def test_the_loose_lane_comes_last_with_its_header_counts_and_last_weeks_closed_
             # #93 closed 6 days ago stays, #94 closed 8 days ago is gone
             assert shown_lanes(app)["loose"] == {"BLOCKED": [91], "FRONTIER": [90], "CLAIMED": [92],
                                                  "DECIDED": [93, 95]}
-            assert card_text(app, "loose").split("\n") == ["◇ Loose tickets  to-tickets output with no parent",
+            assert card_text(app, "loose").split("\n") == [" ORPHANED  Orphaned tickets  to-tickets output with no parent",
                                                             "1 done · 3 open · 1 blocked"]  # #95 was canceled
-            assert chips_of(app, 90).startswith("impl ") and "◇ Loose tickets" in chips_of(app, 90)
+            assert chips_of(app, 90).startswith("impl ") and "◇ Orphaned tickets" in chips_of(app, 90)
             assert "Trim summaries." in card_text(app, 90)
             assert "2 maps · 3 specs · 16 tickets" in status_of(app)
 
@@ -2687,7 +2687,7 @@ def test_help_describes_the_loose_lane():
             await pilot.pause()
             text = " ".join(app.screen.text.plain.split())
             assert "then spec lanes, by number, then the Loose lane" in text
-            assert ("The Loose lane (◇) holds /to-tickets tickets whose parent is no spec, or that have none: "
+            assert ("The Loose lane (ORPHANED) holds /to-tickets tickets whose parent is no spec, or that have none: "
                     "the open ones and those closed in the last 7 days") in text
 
     run(scenario())

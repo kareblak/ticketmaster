@@ -12,7 +12,7 @@ board never writes to the tracker or the repo, and never removes a worktree.
 
 ```
 ‹ 1 Blocked 1 ·  2 Frontier 2  · 3 Claimed 1 · 4 Decided 3 ›
-◆ #9 Pick a stack
+ MAP  #9 Pick a stack
 3 decided · 3 open · 1 blocked
 #14 Pick a queue
   Should we use…
@@ -405,14 +405,14 @@ to_tickets_command = "/to-tickets"        # default /mattpocock-skills:to-ticket
 
 Map lanes come first, then spec lanes, each ordered by issue number, then the Loose lane.
 
-Each open `wayfinder:map` is a map lane. Its header is the map card (`◆`, cyan): the map's
+Each open `wayfinder:map` is a map lane. Its header is the map card (a `MAP` label, black on cyan): the map's
 title and its counts, **decided** (closed tickets, less those out of scope), **open** and
 **blocked**. A closed map keeps its full lane while any of its spec or implementation tickets is
 open, since the decisions are made but the work goes on. Otherwise it shows only when named
 (`ticketmaster <map>`), shrunk to its header card.
 The lane holds the map's decision tickets (`wayfinder:research`, `prototype`, `grilling` or `task`),
 then the spec's implementation tickets, each in the first column whose rule matches. The spec itself
-is no card: the map card shows it on a line of its own, `▣ #<spec> open` (or `closed`) with its
+is no card: the map card shows it on a line of its own, `SPEC #<spec> open` (or `closed`) with its
 tickets' counts, `N done · N open · N blocked` (done is closed, less canceled), or `no tickets yet`,
 and the badges of the spec's sessions. The map card's own counts are of its decision tickets only.
 
@@ -421,7 +421,7 @@ headings `/to-spec` writes, `## Problem Statement` and `## Solution`, has no `Pa
 map, is no sub-issue of a map and has no `wayfinder:` label. Both headings must be there, at `##` level,
 in any case (on Linear, whose search matches the heading exactly, as `/to-spec` writes it); an issue that
 only mentions them in prose does not count, and one that also carries the ticket signature is a spec.
-Its header is the spec card (`▣`, magenta): `▣ #<n> <title>`, `spec closed` once it is closed, its
+Its header is the spec card (a `SPEC` label, black on magenta): `SPEC #<n> <title>`, `spec closed` once it is closed, its
 assignees, and `spec · N done · N open · N blocked` (done is closed, less canceled). Its tickets are the
 issues with the ticket signature `/to-tickets` writes, `## What to build` and `## Acceptance criteria`,
 whose sub-issue parent, else first `## Parent` reference (`#<n>` or the issue's URL; on Linear `TM-<n>`, a
@@ -433,7 +433,7 @@ closed. A ticket whose parent is a map spec stays in the map's lane.
 On GitHub, a **loose ticket** is an issue with the ticket signature whose parent is no spec: it has no
 sub-issue parent or `## Parent` reference, or the one it names is a plain issue, a wayfinder ticket or no
 issue at all. The loose tickets share one Loose lane, last on the board. It has no issue behind it: its
-header (`◇`, blue) reads `◇ Loose tickets  to-tickets output with no parent` and
+header (an `ORPHANED` label, black on blue) reads `ORPHANED Orphaned tickets  to-tickets output with no parent` and
 `N done · N open · N blocked` (done is closed, less canceled). It holds the open loose tickets and those
 closed in the last 7 days, in the same four columns, tagged `impl`, and is left out when there are none.
 `s` on a loose ticket starts `/implement`, as on a map spec's implementation ticket; on its header it starts
@@ -461,7 +461,7 @@ section when it has one, else the `## What to build` section), and then:
 - its open blockers (`⛔ #3 other/lib#12`, `⛔ TM-3` on Linear)
 - its assignees (`@kare`; Linear's display name, `@kaare.blakstad`)
 - its lane's title (`◆ Pick a stack` for a map, `▣ Board shows standalone work` for a spec,
-  `◇ Loose tickets` in the Loose lane)
+  `◇ Orphaned tickets` in the Loose lane)
 
 ## Providers
 

@@ -35,6 +35,8 @@ MAP_COLOR = "cyan"
 SPEC_COLOR = "magenta"  # a standalone spec's lane
 LOOSE_COLOR = "blue"  # the Loose lane
 LANE_GLYPHS = {LaneKind.MAP: "◆", LaneKind.SPEC: "▣", LaneKind.LOOSE: "◇"}
+LANE_LABELS = {LaneKind.MAP: ("MAP", MAP_COLOR), LaneKind.SPEC: ("SPEC", SPEC_COLOR),
+               LaneKind.LOOSE: ("ORPHANED", LOOSE_COLOR)}  # what a header names its lane's kind by
 STATUS_STYLES = {  # session states
     "working": ("● working", "bold yellow"),
     "blocked": ("⚠ needs you", "bold red"),
@@ -83,7 +85,9 @@ def render_card(view: CardView) -> Text:
     chips = Text()
     moded = any(chip.kind == "mode" for chip in view.chips)
     for chip in view.chips:
-        if chip.kind == "type":
+        if chip.kind == "type" and chip.text == "spec":
+            chips.append(kind_label(LaneKind.SPEC))
+        elif chip.kind == "type":
             chips.append(chip.text if moded else f"{chip.text} ", style="bold")
         elif chip.kind == "mode":
             chips.append(" · ")
@@ -104,6 +108,12 @@ def render_card(view: CardView) -> Text:
     return text
 
 
+def kind_label(kind: LaneKind) -> Text:
+    """A lane kind's label chip, in reverse video in its lane's color, and the space after it."""
+    word, color = LANE_LABELS[kind]
+    return Text.assemble((f" {word} ", f"bold black on {color}"), " ")
+
+
 def render_lane_header(view: HeaderView) -> Text:
     """A lane's header. A map's: its title and its decided / open / blocked counts, then a line per spec with its
     tickets' done / open / blocked counts, or that it has none yet, and its sessions' badges. A standalone spec's: its
@@ -115,7 +125,8 @@ def render_lane_header(view: HeaderView) -> Text:
         return render_loose_lane(lane, text)
     if not lane.is_map:
         return render_spec_lane(lane, text)
-    text.append(f"◆ {lane.header.ref} ", style=f"bold {MAP_COLOR}")
+    text.append(kind_label(LaneKind.MAP))
+    text.append(f"{lane.header.ref} ", style=f"bold {MAP_COLOR}")
     text.append(lane.header.title, style="bold")
     if lane.collapsed:
         text.append("  closed", style="grey50")
@@ -124,7 +135,9 @@ def render_lane_header(view: HeaderView) -> Text:
                 style=f"bold {MAP_COLOR}")
     for line in view.specs:
         spec, counts = line.spec, line.counts
-        text.append(f"\n▣ {spec.ref} {'open' if spec.is_open else 'closed'}", style="bold")
+        text.append("\n")
+        text.append(kind_label(LaneKind.SPEC))
+        text.append(f"{spec.ref} {'open' if spec.is_open else 'closed'}", style="bold")
         tickets = (f"{counts.done} done · {counts.open} open · {counts.blocked} blocked" if counts is not None
                    else "no tickets yet")
         text.append(f"  {tickets}", style="grey62")
@@ -140,7 +153,8 @@ def render_spec_lane(lane: Lane, text: Text) -> Text:
     """A spec lane's header after `text` (its sessions' badges): the spec, `spec closed` once it is, its assignees,
     then its tickets' done / open / blocked counts."""
     spec, progress = lane.header, lane.progress
-    text.append(f"▣ {spec.ref} ", style=f"bold {SPEC_COLOR}")
+    text.append(kind_label(LaneKind.SPEC))
+    text.append(f"{spec.ref} ", style=f"bold {SPEC_COLOR}")
     text.append(spec.title, style="bold")
     if not spec.is_open:
         text.append("  spec closed", style="grey50")
@@ -154,7 +168,8 @@ def render_spec_lane(lane: Lane, text: Text) -> Text:
 def render_loose_lane(lane: Lane, text: Text) -> Text:
     """The Loose lane's header after `text`: what it holds, then its tickets' done / open / blocked counts."""
     progress = lane.progress
-    text.append(f"{LANE_GLYPHS[LaneKind.LOOSE]} {LOOSE_TITLE}", style=f"bold {LOOSE_COLOR}")
+    text.append(kind_label(LaneKind.LOOSE))
+    text.append(LOOSE_TITLE, style=f"bold {LOOSE_COLOR}")
     text.append("  to-tickets output with no parent", style="grey62")
     text.append(f"\n{progress.done} done · {progress.open} open · {progress.blocked} blocked",
                 style=f"bold {LOOSE_COLOR}")
@@ -460,23 +475,23 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
 
     heading("Lanes")
     text.append("  Map lanes come first, by number, then spec lanes, by number, then the Loose lane. A map\n"
-                "  lane is an open wayfinder map, headed by its map card (◆): its decided (closed, not out of\n"
+                "  lane is an open wayfinder map, headed by its map card (MAP): its decided (closed, not out of\n"
                 "  scope), open and blocked tickets. Naming a map (ticketmaster <map>, a number or a tracker\n"
                 "  key) filters this run's board to it, unsaved, and hides the spec lanes and the Loose lane;\n"
                 "  Esc shows every lane again.\n"
                 "  A map named by number shows also when closed, as its header card\n"
                 f"  alone.{'  ← this board' if query.named_map else ''}\n"
-                "  A spec whose first line is `Part of #<map>` is a line of the map card, ▣ #<spec> open or\n"
+                "  A spec whose first line is `Part of #<map>` is a line of the map card, SPEC #<spec> open or\n"
                 "  closed, with its tickets' done (closed, less canceled), open and blocked counts, or no\n"
                 "  tickets yet. Its implementation tickets (sub-issues, or a `## Parent` section naming the\n"
                 "  spec) sit in the map's lane, tagged impl. The spec type filter keeps a lane with a spec.\n"
                 "  A spec lane is a standalone spec, from /to-spec with no map link: `## Problem Statement`\n"
-                "  and `## Solution`, no wayfinder: label. Its header card (▣) shows the spec's assignees,\n"
+                "  and `## Solution`, no wayfinder: label. Its header card (SPEC) shows the spec's assignees,\n"
                 "  spec closed once it is, and `spec · N done · N open · N blocked`. Its tickets, from\n"
                 "  /to-tickets (`## What to build` and `## Acceptance criteria`, the spec as sub-issue parent\n"
-                "  or in `## Parent`), fill the columns, tagged impl; the spec is tagged spec. The lane stays\n"
+                "  or in `## Parent`), fill the columns, tagged impl; the spec is tagged SPEC. The lane stays\n"
                 "  while the spec or any of its tickets is open.\n"
-                "  The Loose lane (◇) holds /to-tickets tickets whose parent is no spec, or that have none:\n"
+                "  The Loose lane (ORPHANED) holds /to-tickets tickets whose parent is no spec, or that have none:\n"
                 "  the open ones and those closed in the last 7 days, tagged impl, with their done (closed,\n"
                 "  less canceled), open and blocked counts. It has no issue behind it, and shows only when it\n"
                 "  has tickets.\n"
@@ -510,7 +525,7 @@ def help_text(keys: list[tuple[str, str]], query: Query) -> Text:
         ("wayfinder ticket", "a wayfinder:research/prototype/grilling/task ticket (or wayfinder::…);\n"
                              + " " * 22 + "its map is the native parent, else `Part of #<map>` on the body's\n"
                              + " " * 22 + "first line"),
-        ("standalone spec", "s on a spec lane's header card (▣), while the spec has no tickets\n"
+        ("standalone spec", "s on a spec lane's header card (SPEC), while the spec has no tickets\n"
                             + " " * 22 + "(neither open nor closed), starts to_tickets_command with the spec's URL,\n"
                             + " " * 22 + "in the spec's own worktree. Once it has tickets, s\n"
                             + " " * 22 + "refuses it: s starts /implement on its tickets, one by one"),
