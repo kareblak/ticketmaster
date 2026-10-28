@@ -25,7 +25,7 @@ from .model import (COLUMN_ORDER, WAYFINDER_TYPES, Board, Column, Lane, LaneKind
 from .providers import ErrorNotice, Provider, ProviderError, Query, Quota, RateLimited, error_notice
 from .start import branch_name, worktree_name
 
-LOOSE_TITLE = "Loose tickets"
+LOOSE_TITLE = "Orphaned tickets"
 NO_ISSUE = "The Loose lane has no issue; select one of its tickets"
 LIMITED_TICKETS_EVERY = 60.0  # ticket fetches while the tracker rate-limits the board
 LIMITED_SESSIONS_EVERY = 10.0  # herdr session refreshes meanwhile
