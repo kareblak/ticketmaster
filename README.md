@@ -571,3 +571,16 @@ claude plugin validate .
 `tests/test_board.py` drives the Textual app headlessly with a fake provider, and
 `tests/test_wrapper.py` runs `bin/ticketmaster` against a fake `python3`. Try the plugin itself with
 `claude --plugin-dir .` (see [Install](#install)).
+
+### Herdr's palettes
+
+Herdr compiles its themes into its binary, so the board keeps a generated copy in `ticketmaster/herdr_palettes.py`,
+pinned to the herdr tag in its `HERDR_TAG`. After upgrading herdr, or when the board's colors look wrong next to
+herdr's, check the copy against the new tag, and regenerate and commit it when it differs:
+
+```bash
+scripts/herdr_palettes.py --check v0.9.6   # exits 1 and prints the diff when herdr's themes changed
+scripts/herdr_palettes.py v0.9.6           # rewrites ticketmaster/herdr_palettes.py
+```
+
+Neither runs at build or install time; the script needs `curl` and network access to GitHub.
